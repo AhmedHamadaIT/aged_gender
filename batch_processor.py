@@ -46,7 +46,7 @@ class BatchProcessor:
             self.model.to('cuda')
             try:
                 dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                self.model.predict(dummy_img, verbose=False)
+                self.model.predict(dummy_img, verbose=False, device=self.device, half=True)
             except Exception as e:
                 print(f"[!] WARNING: CUDA architecture unsupported. Falling back to CPU.\n")
                 self.device = 'cpu'
@@ -65,7 +65,8 @@ class BatchProcessor:
         
         # Run inference
         start_time = time.time()
-        results = self.model.predict(img, verbose=False, augment=False)
+        is_half = (self.device == 'cuda')
+        results = self.model.predict(img, verbose=False, augment=False, device=self.device, half=is_half)
         inference_time = (time.time() - start_time) * 1000  # ms
         
         # Parse results

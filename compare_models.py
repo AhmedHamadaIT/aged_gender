@@ -53,7 +53,7 @@ class ModelComparator:
                 model.to('cuda')
                 try:
                     dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                    model.predict(dummy_img, verbose=False)
+                    model.predict(dummy_img, verbose=False, device=device, half=True)
                 except Exception as e:
                     print(f"  [!] WARNING: CUDA architecture unsupported. Falling back to CPU.")
                     device = 'cpu'
@@ -131,7 +131,8 @@ class ModelComparator:
             
             # Inference
             infer_start = time.time()
-            preds = model.predict(img, verbose=False, augment=False)
+            is_half = (device == 'cuda')
+            preds = model.predict(img, verbose=False, augment=False, device=device, half=is_half)
             infer_time = (time.time() - infer_start) * 1000  # ms
             
             # Record memory after

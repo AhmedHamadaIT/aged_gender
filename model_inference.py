@@ -100,10 +100,16 @@ class ModelPerformanceAnalyzer:
                 self.model.to('cuda')
                 print(f"✓ GPU: {torch.cuda.get_device_name(0)}")
                 
+                try:
+                    debug_device = next(self.model.model.parameters()).device
+                    print(f"✓ Model Device inside PyTorch: {debug_device}")
+                except Exception:
+                    pass
+                
                 # Warmup / Test CUDA architecture support
                 try:
                     dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                    self.model.predict(dummy_img, verbose=False)
+                    self.model.predict(dummy_img, verbose=False, device=self.device, half=True)
                 except Exception as e:
                     print(f"\n[!] WARNING: CUDA error detected (likely unsupported old GPU architecture).")
                     print(f"[!] Falling back to CPU...\n")
@@ -192,7 +198,8 @@ class ModelPerformanceAnalyzer:
         start_memory = torch.cuda.memory_allocated() if self.device == 'cuda' else 0
         
         # Run inference
-        results = self.model.predict(img, verbose=False, augment=False)
+        is_half = (self.device == 'cuda')
+        results = self.model.predict(img, verbose=False, augment=False, device=self.device, half=is_half)
         
         end_time = time.time()
         end_memory = torch.cuda.memory_allocated() if self.device == 'cuda' else 0
@@ -255,7 +262,8 @@ class ModelPerformanceAnalyzer:
             batch_start = time.time()
             
             # Run batch inference
-            results = self.model.predict(batch, batch=len(batch), verbose=False, augment=False)
+            is_half = (self.device == 'cuda')
+            results = self.model.predict(batch, batch=len(batch), verbose=False, augment=False, device=self.device, half=is_half)
             
             batch_end = time.time()
             batch_time = (batch_end - batch_start) * 1000  # ms
@@ -383,7 +391,8 @@ class ModelPerformanceAnalyzer:
                     gpu_usages.append(0)
             
             # Run inference
-            results_obj = self.model.predict(img, verbose=False, augment=False)
+            is_half = (self.device == 'cuda')
+            results_obj = self.model.predict(img, verbose=False, augment=False, device=self.device, half=is_half)
             
             if results_obj and len(results_obj) > 0:
                 probs = results_obj[0].probs
