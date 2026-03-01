@@ -17,7 +17,7 @@ echo "Using image: $CONTAINER_IMAGE"
 echo "(If you don't have it, downloading may take some time)."
 echo ""
 echo "Once inside, you can run commands like:"
-echo "  python export_onnx.py --model best.pt --imgsz 640"
+echo "  python export_model.py --model best.pt --format onnx"
 echo "  python realtime_monitor.py --model best.engine --source 0"
 
 docker run -it --rm \

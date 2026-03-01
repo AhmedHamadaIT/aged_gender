@@ -11,6 +11,42 @@ pip install ultralytics opencv-python psutil pandas numpy matplotlib seaborn tqd
 
 ---
 
+## Docker Build & Run
+
+You can run the inference scripts inside an isolated Docker container with GPU support.
+
+1. **Build and start the container:**
+   ```bash
+   sudo docker-compose -f docker-compose.jetson.yml up -d --build
+   ```
+
+2. **Access the container shell:**
+   ```bash
+   sudo docker exec -it yolov8_inference bash
+   ```
+   *Alternatively, you can use the provided script:*
+   ```bash
+   bash run_in_docker.sh
+   ```
+
+---
+
+## Model Export (ONNX & TensorRT Engine)
+
+For maximum inference speed, especially on NVIDIA Jetson/Orin devices, export the `.pt` model to ONNX or TensorRT Engine format.
+
+```bash
+# Export to ONNX
+python export_model.py --model best.pt --format onnx
+
+# Export to TensorRT Engine (Recommended for Jetson/Orin - requires GPU)
+python export_model.py --model best.pt --format engine --half
+```
+
+**Note:** Once exported, you can pass the `.onnx` or `.engine` file directly to the `--model` argument in any of the scripts below instead of `.pt`. This usually results in significantly higher FPS.
+
+---
+
 ## Scripts
 
 ### 1. `model_inference.py` — Full Inference + Reports

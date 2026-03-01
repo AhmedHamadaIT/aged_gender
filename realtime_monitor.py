@@ -233,7 +233,7 @@ class RealTimeMonitor:
 def main():
     parser = argparse.ArgumentParser(description='Real-time YOLO Model Monitor')
     parser.add_argument('--model', type=str, required=True,
-                       help='Path to best.pt model file')
+                       help='Path to model file (.pt, .onnx, .engine)')
     parser.add_argument('--source', type=str, default='0',
                        help='Video source (0 for webcam, or path to video file)')
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu'],

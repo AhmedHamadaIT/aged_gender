@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Model Inference and Performance Analysis Script
-For use with fine-tuned YOLO classification model (best.pt)
+For use with fine-tuned YOLO classification model
 """
 
 import os
@@ -713,7 +713,7 @@ class ModelPerformanceAnalyzer:
 def main():
     parser = argparse.ArgumentParser(description='YOLO Model Performance Analyzer')
     parser.add_argument('--model', type=str, required=True,
-                       help='Path to the best.pt model file')
+                       help='Path to the model file (.pt, .onnx, .engine)')
     parser.add_argument('--input', type=str, required=True,
                        help='Path to input image or folder containing images')
     parser.add_argument('--output', type=str, default='./reports',

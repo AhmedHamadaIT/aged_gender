@@ -259,7 +259,7 @@ class BatchProcessor:
 def main():
     parser = argparse.ArgumentParser(description='Batch Image Processor for YOLO Model')
     parser.add_argument('--model', type=str, required=True,
-                       help='Path to best.pt model file')
+                       help='Path to model file (.pt, .onnx, .engine)')
     parser.add_argument('--input', type=str, required=True,
                        help='Input directory containing images')
     parser.add_argument('--output', type=str, default='./batch_output',

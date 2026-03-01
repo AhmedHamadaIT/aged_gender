@@ -40,12 +40,12 @@ source .venv/bin/activate
 
 ## Step 4: Export the Model to ONNX
 
-We have provided a script to export your PyTorch model (`best.pt`) to the ONNX format. The script uses settings (`dynamic=False` and `simplify=True`) which are highly recommended for the best performance when subsequently generating TensorRT engines on the NVIDIA Orin.
+We have provided a script to export your PyTorch model (`best.pt`) to the ONNX format or TensorRT Engine. The script uses settings (`dynamic=False` and `simplify=True`) which are highly recommended for the best performance when subsequently generating TensorRT engines on the NVIDIA Orin.
 
 Make sure your `best.pt` file is in the project directory, then run:
 
 ```bash
-python export_onnx.py --model best.pt --imgsz 640
+python export_model.py --model best.pt --format onnx
 ```
 
 This will generate a `best.onnx` file in your directory.
@@ -57,7 +57,7 @@ For maximum performance on an Orin device, you should convert the ONNX model int
 You can trigger this by simply attempting to export to `engine` format. The system will use the ONNX file implicitly:
 
 ```bash
-yolo export model=best.pt format=engine imgsz=640 device=0
+python export_model.py --model best.pt --format engine --half
 ```
 *(This step might take several minutes to compile the engine optimized specifically for your Orin).*
 
