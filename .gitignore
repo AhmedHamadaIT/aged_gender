@@ -1,0 +1,26 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual Environments
+.venv/
+venv/
+env/
+.env
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDEs
+.vscode/
+.idea/
+
+# Reports (Explicitly ignored per request)
+reports/
+
+# OS Files
+.DS_Store
+
+# Large or generated directories (uncomment if you don't want to track images)
+# images/

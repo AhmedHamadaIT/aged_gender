@@ -1,0 +1,16 @@
+# Requirements for NVIDIA Orin
+# Note: For best performance on Jetson/Orin, you should install PyTorch and Torchvision
+# using NVIDIA's provided wheels or use the l4t-ml Docker containers.
+# Do NOT install torch/torchvision directly via pip from PyPI on Jetson.
+
+# Core ML and Utils
+ultralytics
+onnx
+onnxruntime-gpu
+opencv-python
+numpy
+pandas
+matplotlib
+seaborn
+psutil
+tqdm
