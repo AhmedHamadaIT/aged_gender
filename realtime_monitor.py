@@ -17,6 +17,17 @@ import argparse
 from collections import deque
 from pathlib import Path
 
+import atexit
+import gc
+
+@atexit.register
+def cleanup():
+    """Cleanup CUDA memory on exit to prevent Jetson Orin glibc corruption."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
 class RealTimeMonitor:
     def __init__(self, model_path, source=0, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.model_path = model_path

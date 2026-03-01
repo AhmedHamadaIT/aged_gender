@@ -27,6 +27,17 @@ try:
 except ImportError:
     HAS_TABULATE = False
 
+import atexit
+import gc
+
+@atexit.register
+def cleanup():
+    """Cleanup CUDA memory on exit to prevent Jetson Orin glibc corruption."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
 class ModelComparator:
     def __init__(self):
         self.models = {}

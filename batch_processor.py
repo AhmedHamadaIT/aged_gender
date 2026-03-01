@@ -19,6 +19,17 @@ from tqdm import tqdm
 from ultralytics import YOLO
 import matplotlib.pyplot as plt
 
+import atexit
+import gc
+
+@atexit.register
+def cleanup():
+    """Cleanup CUDA memory on exit to prevent Jetson Orin glibc corruption."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
 class BatchProcessor:
     def __init__(self, model_path, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.model_path = model_path
