@@ -1,0 +1,26 @@
+# Use NVIDIA L4T ML container for JetPack 6 as the base image
+# This includes PyTorch, torchvision, TensorRT, and OpenCV with CUDA support
+FROM nvcr.io/nvidia/l4t-ml:r36.2.0-py3
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Set the working directory
+WORKDIR /workspace
+
+# Install system utilities if needed
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY requirements.txt /tmp/requirements.txt
+
+# Install Python dependencies
+# We use --no-deps for some or just standard pip, but l4t-ml already has PyTorch.
+# Running standard pip install will satisfy missing requirements like ultralytics.
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# Default command: Open a bash shell
+CMD ["/bin/bash"]

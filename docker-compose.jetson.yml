@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  aged_gender_inference:
+    # Build a local image using the Jetpack Dockerfile if you want to explicitly install extra dependencies
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson
+    image: aged_gender_jetson
+
+    # Required to access Jetson GPU and CUDA/TensorRT resources
+    runtime: nvidia
+
+    # Use host network for easier camera matching and port mapping
+    network_mode: "host"
+
+    # Required if using CSI or USB cameras attached to the Jetson
+    privileged: true
+
+    # Map the project folder to /workspace in the container
+    volumes:
+      - .:/workspace
+
+    # Default start directory
+    working_dir: /workspace
+
+    # Optional: By default, it runs bash and exits. Add "tty: true" to keep alive.
+    # Uncomment the command line below to run the inference script immediately:
+    # command: python realtime_monitor.py --model best.engine --source 0
+    command: /bin/bash
+    tty: true
