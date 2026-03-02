@@ -1,0 +1,47 @@
+# ============================================
+# Docker Compose — YOLO Object Detection
+# ============================================
+# Start:  docker compose up -d --build
+# Logs:   docker compose logs -f
+# Shell:  docker compose exec yolo-detect bash
+# ============================================
+
+services:
+
+  yolo-detect:
+    container_name: yolo-detect
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9000"]
+    runtime: nvidia
+    stdin_open: true
+    tty: true
+
+    env_file:
+      - .env
+
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+
+    volumes:
+      - .:/app                  # mount entire project directory
+      - ./models:/app/models    # model files
+      - ./outputs:/app/outputs  # saved frames
+
+    ports:
+      - "9000:9000"    # YOLO Detection API
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, compute, utility]
+
+    restart: "no"

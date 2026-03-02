@@ -1,0 +1,12 @@
+# Core
+ultralytics>=8.0.0          # YOLOv8
+opencv-python-headless      # OpenCV (headless for Docker/server)
+
+# Config loading
+python-dotenv>=1.0.0        # Reads .env file
+
+# Utilities
+requests>=2.28.0
+Pillow>=9.0.0
+PyYAML>=6.0
+tqdm>=4.64.0
