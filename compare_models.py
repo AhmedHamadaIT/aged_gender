@@ -1,7 +1,19 @@
 #!/usr/bin/env python3
 """
-Model Comparison Tool
-Compares multiple models on the same dataset
+compare_models.py — Unified Model Comparison Tool
+==================================================
+Compares two types of models on the same dataset:
+  • YOLO  (.pt / .onnx / .engine) — Ultralytics YOLO classification
+  • GenderAge (.pth)              — MobileNetV3-Small custom model
+
+Usage:
+  python3 compare_models.py \\
+      --model-yolo      best.pt \\
+      --model-gender-age best_checkpoint.pth \\
+      --images          ./images \\
+      --output          ./comparison_output \\
+      --device          cpu \\
+      --num-images      100
 """
 
 import os
@@ -9,348 +21,505 @@ import sys
 import json
 import time
 import argparse
-import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
+
 import numpy as np
-import torch
+import pandas as pd
 import cv2
+import torch
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
-from ultralytics import YOLO
+
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Optional tabulate for nice tables
+import atexit
+import gc
+
+@atexit.register
+def _cleanup():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    gc.collect()
+
+# Optional pretty tables
 try:
     from tabulate import tabulate
     HAS_TABULATE = True
 except ImportError:
     HAS_TABULATE = False
 
-import atexit
-import gc
+# ── Conditional imports ────────────────────────────────────────────────────────
+try:
+    from ultralytics import YOLO
+    HAS_YOLO = True
+except ImportError:
+    HAS_YOLO = False
+    print("WARNING: ultralytics not found — YOLO model will be skipped.")
 
-@atexit.register
-def cleanup():
-    """Cleanup CUDA memory on exit to prevent Jetson Orin glibc corruption."""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
+try:
+    from gender_age_inference import GenderAgeInference
+    HAS_GENDER_AGE = True
+except ImportError:
+    HAS_GENDER_AGE = False
+    print("WARNING: gender_age_inference.py not found — GenderAge model will be skipped.")
 
-class ModelComparator:
-    def __init__(self):
-        self.models = {}
-        self.results = {}
-        self.test_images = []
-        
-    def load_model(self, name, path, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        """Load a model"""
-        print(f"Loading model '{name}': {path}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+
+def collect_images(root: str, recursive: bool = True) -> list:
+    p = Path(root)
+    if p.is_file():
+        return [str(p)]
+    fn = p.rglob if recursive else p.glob
+    paths = [str(f) for f in fn("*") if f.suffix.lower() in IMAGE_EXTS]
+    paths.sort()
+    return paths
+
+
+def save_annotated_image(img_bgr: np.ndarray, label: str, conf: float,
+                         vis_dir: str, filename: str):
+    """
+    Write a copy of img_bgr with prediction text burned in.
+    Organises into vis_dir/<class_name>/<filename>.
+    """
+    class_dir = os.path.join(vis_dir, label)
+    os.makedirs(class_dir, exist_ok=True)
+
+    out = img_bgr.copy()
+    text = f"{label}  {conf:.2f}"
+
+    # Background rectangle for readability
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+    cv2.rectangle(out, (8, 6), (14 + tw, 14 + th + 6), (0, 0, 0), -1)
+    cv2.putText(out, text, (10, 10 + th),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2, cv2.LINE_AA)
+
+    cv2.imwrite(os.path.join(class_dir, filename), out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# YOLO benchmarker
+# ─────────────────────────────────────────────────────────────────────────────
+
+def benchmark_yolo(model_path: str, image_paths: list, device: str,
+                   num_images: int, vis_dir: str = None):
+    if not HAS_YOLO:
+        return None
+
+    subset = image_paths[:min(num_images, len(image_paths))]
+    model_size_mb = os.path.getsize(model_path) / (1024 ** 2)
+
+    print(f"\nLoading YOLO model: {model_path}")
+    model = YOLO(model_path)
+    if device == "cuda" and torch.cuda.is_available():
+        model.to("cuda")
         try:
-            model = YOLO(path)
-            if device == 'cuda':
-                model.to('cuda')
-                try:
-                    dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
-                    model.predict(dummy_img, verbose=False, device=device, half=True)
-                except Exception as e:
-                    print(f"  [!] WARNING: CUDA architecture unsupported. Falling back to CPU.")
-                    device = 'cpu'
-                    model.to('cpu')
-            self.models[name] = {
-                'model': model,
-                'path': path,
-                'device': device,
-                'size_mb': os.path.getsize(path) / (1024 * 1024)
-            }
-            print(f"  ✓ Size: {self.models[name]['size_mb']:.2f} MB")
-            return True
-        except Exception as e:
-            print(f"  ✗ Failed: {str(e)}")
-            return False
-    
-    def load_test_images(self, test_dir, recursive=True):
-        """Load test images"""
-        print(f"\nLoading test images from: {test_dir}")
-        
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-        image_paths = []
-        
-        if recursive:
-            for ext in image_extensions:
-                image_paths.extend(Path(test_dir).rglob(f'*{ext}'))
-                image_paths.extend(Path(test_dir).rglob(f'*{ext.upper()}'))
-        else:
-            for ext in image_extensions:
-                image_paths.extend(Path(test_dir).glob(f'*{ext}'))
-                image_paths.extend(Path(test_dir).glob(f'*{ext.upper()}'))
-        
-        self.test_images = [str(p) for p in image_paths]
-        print(f"Found {len(self.test_images)} test images")
-        
-        return self.test_images
-    
-    def benchmark_model(self, model_name, num_images=100):
-        """Benchmark a single model"""
-        if model_name not in self.models:
-            return None
-        
-        model_info = self.models[model_name]
-        model = model_info['model']
-        device = model_info['device']
-        
-        # Select subset of images
-        test_subset = self.test_images[:min(num_images, len(self.test_images))]
-        
-        print(f"\nBenchmarking '{model_name}' on {len(test_subset)} images...")
-        
-        results = {
-            'model_name': model_name,
-            'model_size_mb': model_info['size_mb'],
-            'inference_times': [],
-            'confidences': [],
-            'predictions': [],
-            'total_time': 0,
-            'fps': 0,
-            'memory_usage': []
-        }
-        
-        if torch.cuda.is_available():
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+            model.predict(dummy, verbose=False, device=device, half=True)
+        except Exception:
+            print("  [!] CUDA arch unsupported — falling back to CPU")
+            device = "cpu"
+            model.to("cpu")
+
+    if vis_dir:
+        os.makedirs(vis_dir, exist_ok=True)
+        print(f"  Saving annotated images → {vis_dir}")
+
+    print(f"  Size: {model_size_mb:.2f} MB | Device: {device}")
+    print(f"  Benchmarking on {len(subset)} images…")
+
+    is_half = device == "cuda"
+    inference_times = []
+    confidences     = []
+    predictions     = []
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+    total_start = time.perf_counter()
+
+    for img_path in tqdm(subset, desc="  YOLO"):
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+
+        t0 = time.perf_counter()
+        preds = model.predict(img, verbose=False, augment=False,
+                              device=device, half=is_half)
+        t1 = time.perf_counter()
+
+        inference_times.append((t1 - t0) * 1000)
+
+        if preds and preds[0].probs is not None:
+            probs   = preds[0].probs
+            top1_i  = probs.top1
+            top1_c  = float(probs.data[top1_i])
+            top1_n  = preds[0].names[top1_i]
+            confidences.append(top1_c)
+            predictions.append({"image": os.path.basename(img_path),
+                                 "class": top1_n,
+                                 "confidence": top1_c})
+
+            if vis_dir:
+                save_annotated_image(img, top1_n, top1_c,
+                                     vis_dir, os.path.basename(img_path))
+
+    total_time = time.perf_counter() - total_start
+    peak_mem   = (torch.cuda.max_memory_allocated() / (1024 ** 2)
+                  if torch.cuda.is_available() else 0)
+
+    return {
+        "model_name":     "YOLO",
+        "model_file":     os.path.basename(model_path),
+        "model_size_mb":  model_size_mb,
+        "inference_times": inference_times,
+        "confidences":    confidences,
+        "predictions":    predictions,
+        "total_time":     total_time,
+        "fps":            len(predictions) / total_time if total_time > 0 else 0,
+        "avg_time_ms":    np.mean(inference_times) if inference_times else 0,
+        "std_time_ms":    np.std(inference_times)  if inference_times else 0,
+        "min_time_ms":    min(inference_times)     if inference_times else 0,
+        "max_time_ms":    max(inference_times)     if inference_times else 0,
+        "avg_confidence": np.mean(confidences)     if confidences else 0,
+        "peak_memory_mb": peak_mem,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GenderAge benchmarker  (delegates to GenderAgeInference.benchmark)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def benchmark_gender_age(checkpoint: str, image_paths: list, device: str,
+                         num_images: int, vis_dir: str = None):
+    if not HAS_GENDER_AGE:
+        return None
+
+    infer = GenderAgeInference(checkpoint, device)
+
+    if vis_dir:
+        # Run inference with image saving inline (can't delegate to .benchmark)
+        os.makedirs(vis_dir, exist_ok=True)
+        print(f"  Saving annotated images → {vis_dir}")
+
+        subset = image_paths[:min(num_images, len(image_paths))]
+        inference_times = []
+        confidences     = []
+        predictions     = []
+
+        if infer.device == "cuda" and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
-        
-        start_time = time.time()
-        
-        for img_path in tqdm(test_subset, desc=f"  {model_name}"):
-            img = cv2.imread(img_path)
+
+        total_start = time.perf_counter()
+
+        for img_path in tqdm(subset, desc="  GenderAge inference"):
+            img = cv2.imread(str(img_path))
             if img is None:
                 continue
-            
-            # Record memory before
-            mem_before = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
-            
-            # Inference
-            infer_start = time.time()
-            is_half = (device == 'cuda')
-            preds = model.predict(img, verbose=False, augment=False, device=device, half=is_half)
-            infer_time = (time.time() - infer_start) * 1000  # ms
-            
-            # Record memory after
-            mem_after = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
-            mem_used = (mem_after - mem_before) / (1024**2)  # MB
-            
-            results['inference_times'].append(infer_time)
-            results['memory_usage'].append(mem_used)
-            
-            # Get predictions
-            if preds and len(preds) > 0 and preds[0].probs is not None:
-                probs = preds[0].probs
-                top1_idx = probs.top1
-                top1_conf = float(probs.data[top1_idx])
-                top1_class = preds[0].names[top1_idx]
-                
-                results['confidences'].append(top1_conf)
-                results['predictions'].append({
-                    'image': os.path.basename(img_path),
-                    'class': top1_class,
-                    'confidence': top1_conf
-                })
-        
-        total_time = time.time() - start_time
-        results['total_time'] = total_time
-        results['fps'] = len(test_subset) / total_time if total_time > 0 else 0
-        results['avg_time_ms'] = np.mean(results['inference_times']) if results['inference_times'] else 0
-        results['std_time_ms'] = np.std(results['inference_times']) if results['inference_times'] else 0
-        results['min_time_ms'] = min(results['inference_times']) if results['inference_times'] else 0
-        results['max_time_ms'] = max(results['inference_times']) if results['inference_times'] else 0
-        results['avg_confidence'] = np.mean(results['confidences']) if results['confidences'] else 0
-        results['peak_memory_mb'] = max(results['memory_usage']) if results['memory_usage'] else 0
-        
-        self.results[model_name] = results
-        
-        # Print quick summary
-        print(f"  FPS: {results['fps']:.1f} | Avg time: {results['avg_time_ms']:.2f} ms | "
-              f"Avg conf: {results['avg_confidence']:.4f}")
-        
-        return results
-    
-    def benchmark_all(self, num_images=100):
-        """Benchmark all loaded models"""
-        print(f"\n{'='*60}")
-        print("Benchmarking All Models")
-        print(f"{'='*60}")
-        
-        for model_name in self.models:
-            self.benchmark_model(model_name, num_images)
-    
-    def generate_comparison_report(self, output_dir='./model_comparison'):
-        """Generate comparison report"""
-        os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Prepare comparison table
-        comparison = []
-        for name, res in self.results.items():
-            comparison.append({
-                'Model': name,
-                'Size (MB)': f"{res['model_size_mb']:.2f}",
-                'Avg Time (ms)': f"{res['avg_time_ms']:.2f} ± {res['std_time_ms']:.2f}",
-                'FPS': f"{res['fps']:.1f}",
-                'Peak Memory (MB)': f"{res['peak_memory_mb']:.2f}",
-                'Avg Confidence': f"{res['avg_confidence']:.4f}"
-            })
-        
-        df = pd.DataFrame(comparison)
-        
-        # Print comparison table
-        print("\n" + "="*80)
-        print("MODEL COMPARISON SUMMARY")
-        print("="*80)
-        if HAS_TABULATE:
-            print(tabulate(df, headers='keys', tablefmt='grid', showindex=False))
-        else:
-            print(df.to_string(index=False))
-        
-        # Save to CSV
-        csv_path = os.path.join(output_dir, f'comparison_{timestamp}.csv')
-        df.to_csv(csv_path, index=False)
-        print(f"\n✓ Comparison saved: {csv_path}")
-        
-        # Generate plots
-        self.generate_comparison_plots(output_dir, timestamp)
-        
-        # Save detailed results (drop raw lists to keep JSON lean)
-        exportable = {}
-        for name, res in self.results.items():
-            exportable[name] = {k: v for k, v in res.items()
-                                if k not in ('inference_times', 'memory_usage', 'predictions')}
-        
-        json_path = os.path.join(output_dir, f'detailed_results_{timestamp}.json')
-        with open(json_path, 'w') as f:
-            json.dump(exportable, f, indent=2, default=str)
-        print(f"✓ Detailed results: {json_path}")
-        
-        return df
-    
-    def generate_comparison_plots(self, output_dir, timestamp):
-        """Generate comparison visualizations"""
-        model_names = list(self.results.keys())
-        
-        if not model_names:
-            print("No results to plot.")
-            return
-        
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Model Comparison Dashboard', fontsize=16, fontweight='bold')
-        
-        # 1. Inference Time Comparison
-        ax1 = axes[0, 0]
-        times = [self.results[m]['avg_time_ms'] for m in model_names]
-        errors = [self.results[m]['std_time_ms'] for m in model_names]
-        bars = ax1.bar(model_names, times, yerr=errors, capsize=5, color='skyblue', alpha=0.7)
-        ax1.set_ylabel('Inference Time (ms)')
-        ax1.set_title('Average Inference Time')
-        ax1.grid(axis='y', alpha=0.3)
-        for bar, t in zip(bars, times):
-            ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                    f'{t:.1f}ms', ha='center', va='bottom', fontsize=9)
-        
-        # 2. FPS Comparison
-        ax2 = axes[0, 1]
-        fps_values = [self.results[m]['fps'] for m in model_names]
-        bars = ax2.bar(model_names, fps_values, color='lightgreen', alpha=0.7)
-        ax2.set_ylabel('FPS')
-        ax2.set_title('Frames Per Second')
-        ax2.grid(axis='y', alpha=0.3)
-        for bar, f in zip(bars, fps_values):
-            ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
-                    f'{f:.1f}', ha='center', va='bottom', fontsize=9)
-        
-        # 3. Memory & Model Size Comparison
-        ax3 = axes[1, 0]
-        memory = [self.results[m]['peak_memory_mb'] for m in model_names]
-        size = [self.results[m]['model_size_mb'] for m in model_names]
-        
-        x = np.arange(len(model_names))
-        width = 0.35
-        
-        bars1 = ax3.bar(x - width/2, memory, width, label='Peak Memory', color='orange', alpha=0.7)
-        bars2 = ax3.bar(x + width/2, size, width, label='Model Size', color='purple', alpha=0.7)
-        
-        ax3.set_ylabel('Memory (MB)')
-        ax3.set_title('Memory Usage vs Model Size')
-        ax3.set_xticks(x)
-        ax3.set_xticklabels(model_names)
-        ax3.legend()
-        ax3.grid(axis='y', alpha=0.3)
-        
-        # 4. Confidence Comparison
-        ax4 = axes[1, 1]
-        confidences = [self.results[m]['avg_confidence'] for m in model_names]
-        bars = ax4.bar(model_names, confidences, color='coral', alpha=0.7)
-        ax4.set_ylabel('Average Confidence')
-        ax4.set_title('Prediction Confidence')
-        ax4.set_ylim(0, 1)
-        ax4.grid(axis='y', alpha=0.3)
-        for bar, c in zip(bars, confidences):
-            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                    f'{c:.3f}', ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        plot_path = os.path.join(output_dir, f'comparison_plots_{timestamp}.png')
-        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"✓ Plots saved: {plot_path}")
+            res = infer.predict_image(img)
+            inference_times.append(res["inference_time_ms"])
+            confidences.append(res["confidence"])
+            predictions.append({"image":      os.path.basename(img_path),
+                                 "class":      res["combined_class"],
+                                 "confidence": res["confidence"]})
+            save_annotated_image(img, res["combined_class"], res["confidence"],
+                                 vis_dir, os.path.basename(img_path))
+
+        total_time = time.perf_counter() - total_start
+        peak_mem   = (torch.cuda.max_memory_allocated() / (1024 ** 2)
+                      if (infer.device == "cuda") else 0)
+
+        result = {
+            "model_name":      "GenderAge-MobileNetV3",
+            "model_file":      os.path.basename(checkpoint),
+            "model_size_mb":   infer.model_size_mb,
+            "inference_times": inference_times,
+            "confidences":     confidences,
+            "predictions":     predictions,
+            "total_time":      total_time,
+            "fps":             len(predictions) / total_time if total_time > 0 else 0,
+            "avg_time_ms":     np.mean(inference_times) if inference_times else 0,
+            "std_time_ms":     np.std(inference_times)  if inference_times else 0,
+            "min_time_ms":     min(inference_times)     if inference_times else 0,
+            "max_time_ms":     max(inference_times)     if inference_times else 0,
+            "avg_confidence":  np.mean(confidences)     if confidences else 0,
+            "peak_memory_mb":  peak_mem,
+        }
+    else:
+        result = infer.benchmark(image_paths, num_images=num_images)
+        result["model_file"] = os.path.basename(checkpoint)
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reporting & plots
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_comparison_table(results: dict):
+    rows = []
+    for name, r in results.items():
+        rows.append({
+            "Model":            name,
+            "File":             r.get("model_file", ""),
+            "Size (MB)":        f"{r['model_size_mb']:.2f}",
+            "FPS":              f"{r['fps']:.1f}",
+            "Avg Time (ms)":    f"{r['avg_time_ms']:.2f} ± {r['std_time_ms']:.2f}",
+            "Min Time (ms)":    f"{r['min_time_ms']:.2f}",
+            "Max Time (ms)":    f"{r['max_time_ms']:.2f}",
+            "Peak Mem (MB)":    f"{r['peak_memory_mb']:.2f}",
+            "Avg Confidence":   f"{r['avg_confidence']:.4f}",
+        })
+
+    df = pd.DataFrame(rows)
+    print("\n" + "=" * 90)
+    print("MODEL COMPARISON SUMMARY")
+    print("=" * 90)
+    if HAS_TABULATE:
+        print(tabulate(df, headers="keys", tablefmt="grid", showindex=False))
+    else:
+        print(df.to_string(index=False))
+    print("=" * 90)
+    return df
+
+
+def generate_plots(results: dict, output_dir: str, timestamp: str):
+    names = list(results.keys())
+    if not names:
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+    fig.suptitle(
+        "Model Comparison Dashboard — YOLO vs GenderAge-MobileNetV3",
+        fontsize=15, fontweight="bold", y=1.01
+    )
+
+    palette = ["#4A90D9", "#E67E22", "#2ECC71", "#E74C3C"]
+
+    # 1. Avg inference time
+    ax = axes[0, 0]
+    times  = [results[m]["avg_time_ms"] for m in names]
+    errors = [results[m]["std_time_ms"]  for m in names]
+    bars   = ax.bar(names, times, yerr=errors, capsize=6,
+                    color=palette[:len(names)], alpha=0.85)
+    ax.set_ylabel("Inference Time (ms)")
+    ax.set_title("Average Inference Time per Image")
+    ax.grid(axis="y", alpha=0.3)
+    for b, t in zip(bars, times):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.5,
+                f"{t:.1f} ms", ha="center", va="bottom", fontsize=9)
+
+    # 2. FPS
+    ax = axes[0, 1]
+    fps_vals = [results[m]["fps"] for m in names]
+    bars = ax.bar(names, fps_vals, color=palette[:len(names)], alpha=0.85)
+    ax.set_ylabel("FPS")
+    ax.set_title("Frames Per Second")
+    ax.grid(axis="y", alpha=0.3)
+    for b, f in zip(bars, fps_vals):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.3,
+                f"{f:.1f}", ha="center", va="bottom", fontsize=9)
+
+    # 3. Model size
+    ax = axes[0, 2]
+    sizes = [results[m]["model_size_mb"] for m in names]
+    bars  = ax.bar(names, sizes, color=palette[:len(names)], alpha=0.85)
+    ax.set_ylabel("Model Size (MB)")
+    ax.set_title("Model File Size")
+    ax.grid(axis="y", alpha=0.3)
+    for b, s in zip(bars, sizes):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.2,
+                f"{s:.1f} MB", ha="center", va="bottom", fontsize=9)
+
+    # 4. Peak memory
+    ax = axes[1, 0]
+    mem = [results[m]["peak_memory_mb"] for m in names]
+    bars = ax.bar(names, mem, color=palette[:len(names)], alpha=0.85)
+    ax.set_ylabel("Peak GPU Memory (MB)")
+    ax.set_title("Peak GPU Memory Usage")
+    ax.grid(axis="y", alpha=0.3)
+    for b, m_ in zip(bars, mem):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.2,
+                f"{m_:.1f}", ha="center", va="bottom", fontsize=9)
+
+    # 5. Avg confidence
+    ax = axes[1, 1]
+    conf = [results[m]["avg_confidence"] for m in names]
+    bars = ax.bar(names, conf, color=palette[:len(names)], alpha=0.85)
+    ax.set_ylabel("Average Confidence")
+    ax.set_title("Average Prediction Confidence")
+    ax.set_ylim(0, 1)
+    ax.grid(axis="y", alpha=0.3)
+    for b, c in zip(bars, conf):
+        ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.01,
+                f"{c:.3f}", ha="center", va="bottom", fontsize=9)
+
+    # 6. Inference time distribution (box-like bar with min/avg/max)
+    ax = axes[1, 2]
+    x = np.arange(len(names))
+    width = 0.25
+    mins = [results[m]["min_time_ms"] for m in names]
+    avgs = [results[m]["avg_time_ms"]  for m in names]
+    maxs = [results[m]["max_time_ms"]  for m in names]
+
+    ax.bar(x - width, mins, width, label="Min",  color="#2ECC71", alpha=0.8)
+    ax.bar(x,         avgs, width, label="Avg",  color="#3498DB", alpha=0.8)
+    ax.bar(x + width, maxs, width, label="Max",  color="#E74C3C", alpha=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names)
+    ax.set_ylabel("Time (ms)")
+    ax.set_title("Inference Time: Min / Avg / Max")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, f"comparison_plots_{timestamp}.png")
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"✓ Plots saved: {plot_path}")
+    return plot_path
+
+
+def save_results(results: dict, df: pd.DataFrame, output_dir: str, timestamp: str):
+    # CSV summary
+    csv_path = os.path.join(output_dir, f"comparison_{timestamp}.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"✓ CSV saved : {csv_path}")
+
+    # JSON detailed (drop raw lists)
+    exportable = {}
+    for name, r in results.items():
+        exportable[name] = {
+            k: v for k, v in r.items()
+            if k not in ("inference_times", "confidences", "predictions")
+        }
+    json_path = os.path.join(output_dir, f"comparison_detail_{timestamp}.json")
+    with open(json_path, "w") as f:
+        json.dump(exportable, f, indent=2, default=str)
+    print(f"✓ JSON saved: {json_path}")
+
+    # Per-model predictions (one JSON each)
+    for name, r in results.items():
+        preds_path = os.path.join(output_dir,
+                                  f"{name.replace(' ', '_')}_predictions_{timestamp}.json")
+        with open(preds_path, "w") as f:
+            json.dump(r.get("predictions", []), f, indent=2)
+    return csv_path, json_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Model Comparison Tool')
-    parser.add_argument('--models', type=str, nargs='+', required=True,
-                       help='List of model paths to compare')
-    parser.add_argument('--names', type=str, nargs='+',
-                       help='Names for the models (must match number of models)')
-    parser.add_argument('--test-dir', type=str, required=True,
-                       help='Directory containing test images')
-    parser.add_argument('--output', type=str, default='./model_comparison',
-                       help='Output directory for results')
-    parser.add_argument('--num-images', type=int, default=100,
-                       help='Number of images to test per model')
-    parser.add_argument('--device', type=str, choices=['cuda', 'cpu'],
-                       default='cuda' if torch.cuda.is_available() else 'cpu',
-                       help='Device to use')
-    
+    parser = argparse.ArgumentParser(
+        description="Unified YOLO + GenderAge model comparison",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--model-yolo",       default=None,
+                        help="Path to YOLO model (.pt / .onnx / .engine)")
+    parser.add_argument("--model-gender-age", default=None,
+                        help="Path to GenderAge checkpoint (.pth)")
+    parser.add_argument("--images", required=True,
+                        help="Image file or folder of images to test on")
+    parser.add_argument("--output", default="./comparison_output",
+                        help="Directory to save plots, CSV & JSON")
+    parser.add_argument("--num-images", type=int, default=100,
+                        help="Max number of images to benchmark per model")
+    parser.add_argument("--device",
+                        default="cuda" if torch.cuda.is_available() else "cpu",
+                        choices=["cuda", "cpu"])
+    parser.add_argument("--recursive", action="store_true", default=True,
+                        help="Recurse into image subdirectories")
+    parser.add_argument("--save-vis", action="store_true", default=False,
+                        help="Save annotated images per model to <output>/YOLO_vis/ and <output>/GenderAge_vis/")
     args = parser.parse_args()
-    
-    # Validate model count
-    if args.names and len(args.names) != len(args.models):
-        print("Error: Number of model names must match number of model paths")
-        return
-    
-    # Create comparator
-    comparator = ModelComparator()
-    
-    # Load models
-    print(f"\n{'='*60}")
-    print(f"Loading {len(args.models)} models")
-    print(f"{'='*60}")
-    
-    for i, model_path in enumerate(args.models):
-        if not os.path.exists(model_path):
-            print(f"Error: Model not found: {model_path}")
-            continue
-        
-        name = args.names[i] if args.names else f"Model_{i+1}"
-        comparator.load_model(name, model_path, args.device)
-    
-    # Load test images
-    comparator.load_test_images(args.test_dir)
-    
-    # Run benchmarks
-    comparator.benchmark_all(args.num_images)
-    
-    # Generate report
-    comparator.generate_comparison_report(args.output)
-    
-    print(f"\n✓ Comparison complete! Results saved to: {args.output}")
+
+    # At least one model required
+    if not args.model_yolo and not args.model_gender_age:
+        parser.error("Provide at least one of --model-yolo or --model-gender-age")
+
+    # Validate paths
+    for attr, label in [("model_yolo", "YOLO"), ("model_gender_age", "GenderAge")]:
+        p = getattr(args, attr)
+        if p and not os.path.exists(p):
+            print(f"ERROR: {label} model not found: {p}")
+            sys.exit(1)
+
+    if not os.path.exists(args.images):
+        print(f"ERROR: --images path not found: {args.images}")
+        sys.exit(1)
+
+    os.makedirs(args.output, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Collect images
+    image_paths = collect_images(args.images, recursive=args.recursive)
+    if not image_paths:
+        print(f"ERROR: No images found in {args.images}")
+        sys.exit(1)
+    print(f"\nFound {len(image_paths)} image(s) in {args.images}")
+    print(f"Benchmarking up to {args.num_images} per model on [{args.device}]")
+
+    # ── Visualisation dirs ──────────────────────────────────────────────────
+    yolo_vis_dir = os.path.join(args.output, "YOLO_vis")       if args.save_vis else None
+    ga_vis_dir   = os.path.join(args.output, "GenderAge_vis")  if args.save_vis else None
+    if args.save_vis:
+        print(f"  [save-vis] YOLO     → {yolo_vis_dir}")
+        print(f"  [save-vis] GenderAge → {ga_vis_dir}")
+
+    # ── Run benchmarks ─────────────────────────────────────────────────────
+    all_results = {}
+
+    if args.model_yolo:
+        r = benchmark_yolo(args.model_yolo, image_paths, args.device,
+                           args.num_images, vis_dir=yolo_vis_dir)
+        if r:
+            all_results["YOLO"] = r
+            print(f"  → YOLO : FPS={r['fps']:.1f}  "
+                  f"avg={r['avg_time_ms']:.2f}ms  "
+                  f"conf={r['avg_confidence']:.4f}")
+
+    if args.model_gender_age:
+        r = benchmark_gender_age(args.model_gender_age, image_paths,
+                                 args.device, args.num_images, vis_dir=ga_vis_dir)
+        if r:
+            all_results["GenderAge-MobileNetV3"] = r
+            print(f"  → GenderAge : FPS={r['fps']:.1f}  "
+                  f"avg={r['avg_time_ms']:.2f}ms  "
+                  f"conf={r['avg_confidence']:.4f}")
+
+    if not all_results:
+        print("ERROR: No models ran successfully.")
+        sys.exit(1)
+
+    # ── Report ─────────────────────────────────────────────────────────────
+    df = print_comparison_table(all_results)
+    save_results(all_results, df, args.output, timestamp)
+    plot_path = generate_plots(all_results, args.output, timestamp)
+
+    print(f"\n✅  Comparison complete! Results saved to: {args.output}")
+
+    # Quick winner summary
+    if len(all_results) >= 2:
+        names = list(all_results.keys())
+        fastest = min(names, key=lambda n: all_results[n]["avg_time_ms"])
+        smallest = min(names, key=lambda n: all_results[n]["model_size_mb"])
+        print(f"\n  🏆 Fastest model : {fastest} "
+              f"({all_results[fastest]['avg_time_ms']:.2f} ms avg)")
+        print(f"  🏆 Smallest model: {smallest} "
+              f"({all_results[smallest]['model_size_mb']:.2f} MB)")
+
 
 if __name__ == "__main__":
     main()

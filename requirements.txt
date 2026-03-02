@@ -14,3 +14,10 @@ matplotlib
 seaborn
 psutil
 tqdm
+
+# GenderAge MobileNetV3 model
+timm                   # MobileNetV3 backbone (required for gender_age_model.py)
+
+# Utilities
+humanize               # used in model_inference.py
+tabulate               # optional: nicer tables in compare_models.py
