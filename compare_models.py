@@ -42,10 +42,12 @@ import gc
 
 @atexit.register
 def _cleanup():
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception:
+        pass
 
 # Optional pretty tables
 try:

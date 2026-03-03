@@ -36,10 +36,12 @@ import gc
 
 @atexit.register
 def _cleanup():
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    gc.collect()
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+    except Exception:
+        pass
 
 # Import the model definition from the local module
 try:
@@ -87,9 +89,11 @@ class GenderAgeInference:
         if self.device == "cuda" and torch.cuda.is_available():
             try:
                 torch.cuda.synchronize()
-                dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, device="cuda")
+                # Use randn, not zeros — all-zero input gives degenerate BatchNorm stats
+                dummy = torch.randn(2, 3, IMG_SIZE, IMG_SIZE, device="cuda")
                 with torch.no_grad():
                     _ = self.model(dummy)
+                del dummy, _
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
                 print("  Warmup pass ✓")

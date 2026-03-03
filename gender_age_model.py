@@ -93,11 +93,12 @@ class GenderAgeModel(nn.Module):
         )
 
         # Gender head  (indices 0,1,2,3,4 in Sequential)
+        # NOTE: inplace=False to avoid heap corruption on Jetson Orin unified memory
         self.gender_head = nn.Sequential(
             nn.Linear(neck_out, head_hidden),   # [0]
             nn.BatchNorm1d(head_hidden),         # [1]
             nn.Dropout(dropout),                 # [2]
-            nn.ReLU(inplace=True),               # [3]
+            nn.ReLU(inplace=False),              # [3]
             nn.Linear(head_hidden, num_gender),  # [4]
         )
 
@@ -106,7 +107,7 @@ class GenderAgeModel(nn.Module):
             nn.Linear(neck_out, head_hidden),   # [0]
             nn.BatchNorm1d(head_hidden),         # [1]
             nn.Dropout(dropout),                 # [2]
-            nn.ReLU(inplace=True),               # [3]
+            nn.ReLU(inplace=False),              # [3]
             nn.Linear(head_hidden, num_age),     # [4]
         )
 
@@ -203,6 +204,9 @@ def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Modul
 
         print("  [DEBUG] All state_dicts loaded successfully.", flush=True)
 
+        # Free the raw checkpoint bytes immediately — saves ~22 MB on Jetson
+        del backbone_sd, neck_sd, gender_head_sd, age_head_sd, state_dict, raw
+
         for name, miss, unex in [
             ("backbone",    miss_b, unex_b),
             ("neck",        miss_n, unex_n),
@@ -229,6 +233,7 @@ def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Modul
             print(f"  [WARN] unexpected keys ({len(unex)}): {unex[:3]}")
 
     model.eval()  # eval on CPU first — ALWAYS before CUDA transfer
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
 
     # ── Safe CUDA transfer (Jetson / embedded GPU friendly) ──────────────────
     if device == "cuda":
