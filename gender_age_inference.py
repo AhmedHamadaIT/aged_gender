@@ -85,8 +85,6 @@ class GenderAgeInference:
         # Run a single tiny forward pass to pre-compile CUDA kernels.
         # Wrap in try/except so a crash here falls back gracefully to CPU.
         if self.device == "cuda" and torch.cuda.is_available():
-            import os as _os
-            _os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
             try:
                 torch.cuda.synchronize()
                 dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, device="cuda")
@@ -94,9 +92,9 @@ class GenderAgeInference:
                     _ = self.model(dummy)
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
-                print("  Warmup pass \u2713")
+                print("  Warmup pass ✓")
             except Exception as exc:
-                print(f"  [!] CUDA warmup failed ({exc}) \u2014 falling back to CPU")
+                print(f"  [!] CUDA warmup failed ({exc}) — falling back to CPU")
                 self.device = "cpu"
                 self.model  = self.model.cpu()
 

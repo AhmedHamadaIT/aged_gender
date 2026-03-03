@@ -76,6 +76,9 @@ class GenderAgeModel(nn.Module):
                  dropout: float = 0.3):
         super().__init__()
 
+        import sys
+        print("    [DEBUG] init backbone...", flush=True)
+
         # Backbone – remove the built-in classifier; keep global avg-pool
         self.backbone = timm.create_model(
             'mobilenetv3_small_100',
@@ -83,7 +86,7 @@ class GenderAgeModel(nn.Module):
             num_classes=0,   # returns (B, 1024) after global avg-pool + flatten
         )
 
-        # Shared neck
+        print("    [DEBUG] init neck...", flush=True)
         self.neck = nn.Sequential(
             nn.Linear(neck_in, neck_out),   # [0]
             nn.BatchNorm1d(neck_out),        # [1]
@@ -174,11 +177,14 @@ def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Modul
         print(f"  heads     : {neck_out} → {head_hidden}  "
               f"| gender_out={num_gender}  age_out={num_age}")
 
+        import sys
+        print("  [DEBUG] Creating GenderAgeModel instance...", flush=True)
         model = GenderAgeModel(
             neck_in=neck_in, neck_out=neck_out,
             head_hidden=head_hidden,
             num_gender=num_gender, num_age=num_age,
         )
+        print("  [DEBUG] GenderAgeModel instance created.", flush=True)
 
         # Load each sub-module separately for clear error reporting
         backbone_sd    = _strip_prefix(state_dict, "backbone.")
@@ -186,10 +192,16 @@ def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Modul
         gender_head_sd = _strip_prefix(state_dict, "gender_head.")
         age_head_sd    = _strip_prefix(state_dict, "age_head.")
 
+        print("  [DEBUG] Loading backbone_sd...", flush=True)
         miss_b, unex_b = model.backbone.load_state_dict(backbone_sd, strict=False)
+        print("  [DEBUG] Loading neck_sd...", flush=True)
         miss_n, unex_n = model.neck.load_state_dict(neck_sd, strict=True)
+        print("  [DEBUG] Loading gender_head_sd...", flush=True)
         miss_g, unex_g = model.gender_head.load_state_dict(gender_head_sd, strict=True)
+        print("  [DEBUG] Loading age_head_sd...", flush=True)
         miss_a, unex_a = model.age_head.load_state_dict(age_head_sd, strict=True)
+
+        print("  [DEBUG] All state_dicts loaded successfully.", flush=True)
 
         for name, miss, unex in [
             ("backbone",    miss_b, unex_b),
@@ -225,31 +237,40 @@ def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Modul
             device = "cpu"
         else:
             try:
+                print("  [DEBUG] 1. CUDA init...", flush=True)
                 # 1. Explicit CUDA init before any CUDA operation
                 torch.cuda.init()
                 torch.cuda.synchronize()
 
+                print("  [DEBUG] 2. Disabling cuDNN auto-tuner...", flush=True)
                 # 2. Disable cuDNN auto-tuner (causes crash on first run on Jetson)
                 torch.backends.cudnn.benchmark = False
                 torch.backends.cudnn.deterministic = True
 
+                print("  [DEBUG] 3. Emptying CUDA cache...", flush=True)
                 # 3. Clear any stale allocations
                 torch.cuda.empty_cache()
 
+                print("  [DEBUG] 4. Moving sub-modules...", flush=True)
                 # 4. Move model sub-modules one by one (avoids OOM spike)
                 if hasattr(model, 'backbone'):
+                    print("  [DEBUG]   -> backbone", flush=True)
                     model.backbone = model.backbone.cuda()
                     torch.cuda.synchronize()
                 if hasattr(model, 'neck'):
+                    print("  [DEBUG]   -> neck", flush=True)
                     model.neck = model.neck.cuda()
                     torch.cuda.synchronize()
                 if hasattr(model, 'gender_head'):
+                    print("  [DEBUG]   -> gender_head", flush=True)
                     model.gender_head = model.gender_head.cuda()
                     torch.cuda.synchronize()
                 if hasattr(model, 'age_head'):
+                    print("  [DEBUG]   -> age_head", flush=True)
                     model.age_head = model.age_head.cuda()
                     torch.cuda.synchronize()
                 if hasattr(model, 'classifier'):
+                    print("  [DEBUG]   -> classifier", flush=True)
                     # Layout A flat model
                     model = model.cuda()
                     torch.cuda.synchronize()
