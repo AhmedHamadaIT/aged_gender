@@ -363,8 +363,13 @@ def benchmark_gender_age(checkpoint: str, image_paths: list, device: str,
     monitor.stop()
 
     gpu_total, gpu_alloc, gpu_cached = _gpu_mem_snapshot()
+
+    # Extract properties before deletion
+    infer_device = infer.device
+    model_size_mb = infer.model_size_mb
+
     peak_mem = (torch.cuda.max_memory_allocated() / (1024 ** 2)
-                if (infer.device == "cuda" and torch.cuda.is_available()) else 0)
+                if (infer_device == "cuda" and torch.cuda.is_available()) else 0)
 
     # Clean up model to avoid Jetson memory corruption on exit
     del infer
@@ -376,7 +381,7 @@ def benchmark_gender_age(checkpoint: str, image_paths: list, device: str,
         "model_name":      "GenderAge-MobileNetV3",
         "model_file":      os.path.basename(checkpoint),
         "model_format":    fmt.upper(),
-        "model_size_mb":   infer.model_size_mb,
+        "model_size_mb":   model_size_mb,
         "inference_times": inference_times,
         "confidences":     confidences,
         "predictions":     predictions,
@@ -396,7 +401,7 @@ def benchmark_gender_age(checkpoint: str, image_paths: list, device: str,
         "avg_gpu_util_pct": monitor.avg_gpu_util,
         "max_gpu_util_pct": monitor.max_gpu_util,
         "total_images":    len(predictions),
-        "device":          infer.device,
+        "device":          infer_device,
     }
 
 
