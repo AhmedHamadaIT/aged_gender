@@ -7,9 +7,9 @@ Shows live FPS, memory usage, and predictions
 import os
 import sys
 import time
-import cv2
 import torch
 import numpy as np
+import cv2
 import psutil
 from ultralytics import YOLO
 from datetime import datetime

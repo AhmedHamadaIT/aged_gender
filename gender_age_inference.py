@@ -23,10 +23,10 @@ import argparse
 import warnings
 warnings.filterwarnings("ignore")
 
-import numpy as np
-import cv2
 import torch
 import torch.nn.functional as F
+import numpy as np
+import cv2
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm

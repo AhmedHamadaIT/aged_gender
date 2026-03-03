@@ -26,10 +26,10 @@ import threading
 import subprocess
 warnings.filterwarnings("ignore")
 
+import torch
+import cv2
 import numpy as np
 import pandas as pd
-import cv2
-import torch
 import psutil
 from pathlib import Path
 from datetime import datetime
