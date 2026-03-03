@@ -26,10 +26,10 @@ import threading
 import subprocess
 warnings.filterwarnings("ignore")
 
-import torch
 import numpy as np
 import pandas as pd
 import cv2
+import torch
 import psutil
 from pathlib import Path
 from datetime import datetime
@@ -751,3 +751,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    import os
+    os._exit(0)

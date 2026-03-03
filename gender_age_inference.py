@@ -23,10 +23,10 @@ import argparse
 import warnings
 warnings.filterwarnings("ignore")
 
-import torch
-import torch.nn.functional as F
 import numpy as np
 import cv2
+import torch
+import torch.nn.functional as F
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
@@ -359,3 +359,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    import os
+    os._exit(0)
