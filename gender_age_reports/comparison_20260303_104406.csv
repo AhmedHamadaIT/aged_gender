@@ -1,0 +1,2 @@
+Model,File,Size (MB),FPS,Avg Time (ms),Min Time (ms),Max Time (ms),Peak Mem (MB),Avg Confidence
+GenderAge-MobileNetV3,best_checkpoint.pth,21.42,40.1,19.82 ± 4.54,19.32,244.84,145.68,0.7794
