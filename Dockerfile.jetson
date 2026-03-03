@@ -22,5 +22,9 @@ COPY requirements.txt /tmp/requirements.txt
 # Running standard pip install will satisfy missing requirements like ultralytics.
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
+# Force numpy<2 AFTER all other packages, because ultralytics/timm may pull numpy>=2
+# as a transitive dependency, which breaks the l4t-ml cv2 build.
+RUN pip3 install --no-cache-dir "numpy<2.0.0"
+
 # Default command: Open a bash shell
 CMD ["/bin/bash"]

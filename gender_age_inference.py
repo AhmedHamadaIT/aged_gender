@@ -34,10 +34,14 @@ from tqdm import tqdm
 import atexit
 import gc
 
+# Only True after a successful CUDA warmup — prevents atexit from calling
+# cuda functions when the CUDA context was never initialized (e.g. import error).
+_cuda_was_used = False
+
 @atexit.register
 def _cleanup():
     try:
-        if torch.cuda.is_available():
+        if _cuda_was_used and torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
     except Exception:
@@ -96,6 +100,8 @@ class GenderAgeInference:
                 del dummy, _
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
+                global _cuda_was_used
+                _cuda_was_used = True
                 print("  Warmup pass ✓")
             except Exception as exc:
                 print(f"  [!] CUDA warmup failed ({exc}) — falling back to CPU")
