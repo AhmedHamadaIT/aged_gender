@@ -1,0 +1,63 @@
+
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Model Performance Report</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; }
+                h1 { color: #2c3e50; }
+                h2 { color: #34495e; border-bottom: 2px solid #3498db; }
+                table { border-collapse: collapse; width: 100%; margin: 20px 0; }
+                th { background-color: #3498db; color: white; padding: 12px; }
+                td { padding: 10px; border-bottom: 1px solid #ddd; }
+                .metric { font-weight: bold; color: #27ae60; }
+                .section { background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0; }
+            </style>
+        </head>
+        <body>
+            <h1>Model Performance Report</h1>
+            <p><strong>Model:</strong> best.pt</p>
+            <p><strong>Date:</strong> 2026-03-03 12:32:56</p>
+            <p><strong>Device:</strong> cuda</p>
+            
+            <div class="section">
+                <h2>System Information</h2>
+                <table>
+                    <tr><th>Component</th><th>Specification</th></tr>
+                    <tr><td>OS</td><td>Linux</td></tr>
+                    <tr><td>CPU</td><td>8 cores</td></tr>
+                    <tr><td>RAM</td><td>15.29 GB</td></tr>
+        
+                    <tr><td>GPU</td><td>Orin</td></tr>
+                    <tr><td>GPU Memory</td><td>15.29 GB</td></tr>
+            
+                </table>
+            </div>
+            
+            <div class="section">
+                <h2>Performance Metrics</h2>
+                <table>
+                    <tr><th>Metric</th><th>Value</th></tr>
+                    <tr><td>Model Size</td><td>19.93 MB</td></tr>
+                    <tr><td>Number of Classes</td><td>8</td></tr>
+                    <tr><td>Average Inference Time</td><td>36.88 ms</td></tr>
+                    <tr><td>FPS</td><td>27.12</td></tr>
+                    <tr><td>Memory Usage</td><td>0.00 MB</td></tr>
+                    <tr><td>Avg CPU Usage</td><td>10.3%</td></tr>
+                    <tr><td>Avg RAM Usage</td><td>16.4%</td></tr>
+                </table>
+            </div>
+            
+            <div class="section">
+                <h2>Classification Statistics</h2>
+                <table>
+                    <tr><th>Statistic</th><th>Value</th></tr>
+                    <tr><td>Average Confidence</td><td>0.5539</td></tr>
+                    <tr><td>Min Confidence</td><td>0.2085</td></tr>
+                    <tr><td>Max Confidence</td><td>0.9956</td></tr>
+                    <tr><td>Std Confidence</td><td>0.1651</td></tr>
+                </table>
+            </div>
+        </body>
+        </html>
+        
