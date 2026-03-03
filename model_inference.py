@@ -11,10 +11,10 @@ import json
 import argparse
 import platform
 import psutil
-import pandas as pd
-import numpy as np
 import torch
 import cv2
+import pandas as pd
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 import humanize
@@ -28,7 +28,6 @@ warnings.filterwarnings('ignore')
 import atexit
 import gc
 
-@atexit.register
 def cleanup():
     """Cleanup CUDA memory on exit to prevent Jetson Orin glibc corruption."""
     if torch.cuda.is_available():
@@ -740,6 +739,9 @@ def main():
     print(f"\n{'='*60}")
     print("Analysis Complete!")
     print(f"{'='*60}")
+    
+    cleanup()
+    os._exit(0)
 
 if __name__ == "__main__":
     main()
