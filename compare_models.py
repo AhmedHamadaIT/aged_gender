@@ -7,12 +7,12 @@ Compares two types of models on the same dataset:
   • GenderAge (.pth)              — MobileNetV3-Small custom model
 
 Usage:
-  python3 compare_models.py \\
-      --model-yolo      best.pt \\
-      --model-gender-age best_checkpoint.pth \\
-      --images          ./images \\
-      --output          ./comparison_output \\
-      --device          cpu \\
+  python3 compare_models.py \
+      --model-yolo      best.pt \
+      --model-gender-age best_checkpoint.pth \
+      --images          ./images \
+      --output          ./comparison_output \
+      --device          cpu \
       --num-images      100
 """
 
@@ -26,10 +26,10 @@ import threading
 import subprocess
 warnings.filterwarnings("ignore")
 
-import torch
-import cv2
 import numpy as np
 import pandas as pd
+import cv2
+import torch
 import psutil
 from pathlib import Path
 from datetime import datetime
@@ -41,21 +41,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-import atexit
+# NOTE: No @atexit handlers here.
+# Each benchmark function does its own explicit cleanup before returning.
+# The script ends with os._exit(0) to bypass ALL atexit/Python-shutdown
+# teardown — this is the only safe pattern on Jetson Orin with Ultralytics.
 import gc
-
-# Only True after CUDA is actually used — prevents atexit from touching
-# the CUDA context when it was never initialized (e.g. early import error).
-_cuda_was_used = False
-
-@atexit.register
-def _cleanup():
-    try:
-        if _cuda_was_used and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-    except Exception:
-        pass
 
 # Optional pretty tables
 try:
@@ -64,7 +54,7 @@ try:
 except ImportError:
     HAS_TABULATE = False
 
-# ── Conditional imports ────────────────────────────────────────────────────────
+# ── Conditional imports ───────────────────────────────────────────────────────
 try:
     from ultralytics import YOLO
     HAS_YOLO = True
@@ -81,7 +71,7 @@ except ImportError:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Resource Monitor  — background thread that samples GPU / CPU / RAM
+# Resource Monitor — background thread that samples GPU / CPU / RAM
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_gpu_util_pct() -> float:
@@ -206,6 +196,23 @@ def _print_table(rows, headers):
         print(df.to_string(index=False))
 
 
+def _cuda_cleanup():
+    """
+    Explicit, ordered CUDA teardown.
+    Call this manually — never rely on atexit for this on Jetson.
+    """
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+    gc.collect()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # YOLO benchmarker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -220,12 +227,21 @@ def benchmark_yolo(model_path: str, image_paths: list, device: str,
     fmt = Path(model_path).suffix.lstrip(".")
 
     print(f"\nLoading YOLO model: {model_path}")
+
+    # ── Load model onto CPU first, then move to target device.
+    # Loading directly to CUDA has triggered glibc corruption on Jetson
+    # when the process later tries to clean up.
     model = YOLO(model_path)
+    model.to("cpu")
+
     if device == "cuda" and torch.cuda.is_available():
         model.to("cuda")
+        # Warmup on CPU-generated dummy — avoids touching unified memory
+        # before the CUDA context is fully ready.
         try:
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             model.predict(dummy, verbose=False, device=device, half=True)
+            del dummy
         except Exception:
             print("  [!] CUDA arch unsupported — falling back to CPU")
             device = "cpu"
@@ -283,13 +299,7 @@ def benchmark_yolo(model_path: str, image_paths: list, device: str,
     peak_mem = (torch.cuda.max_memory_allocated() / (1024 ** 2)
                 if torch.cuda.is_available() else 0)
 
-    # Clean up model to avoid Jetson memory corruption on exit
-    del model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-
-    return {
+    result = {
         "model_name":      "YOLO",
         "model_file":      os.path.basename(model_path),
         "model_format":    fmt.upper(),
@@ -315,6 +325,13 @@ def benchmark_yolo(model_path: str, image_paths: list, device: str,
         "total_images":    len(predictions),
         "device":          device,
     }
+
+    # ── Ordered teardown: results collected → model deleted → CUDA flushed.
+    # This order is critical on Jetson; reversing it causes heap corruption.
+    del model
+    _cuda_cleanup()
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,20 +381,13 @@ def benchmark_gender_age(checkpoint: str, image_paths: list, device: str,
 
     gpu_total, gpu_alloc, gpu_cached = _gpu_mem_snapshot()
 
-    # Extract properties before deletion
-    infer_device = infer.device
+    # Capture these before deleting infer
+    infer_device  = infer.device
     model_size_mb = infer.model_size_mb
-
     peak_mem = (torch.cuda.max_memory_allocated() / (1024 ** 2)
                 if (infer_device == "cuda" and torch.cuda.is_available()) else 0)
 
-    # Clean up model to avoid Jetson memory corruption on exit
-    del infer
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-
-    return {
+    result = {
         "model_name":      "GenderAge-MobileNetV3",
         "model_file":      os.path.basename(checkpoint),
         "model_format":    fmt.upper(),
@@ -403,6 +413,12 @@ def benchmark_gender_age(checkpoint: str, image_paths: list, device: str,
         "total_images":    len(predictions),
         "device":          infer_device,
     }
+
+    # ── Ordered teardown (same pattern as YOLO benchmarker)
+    del infer
+    _cuda_cleanup()
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -724,21 +740,17 @@ def main():
                            args.num_images, vis_dir=yolo_vis_dir)
         if r:
             all_results["YOLO"] = r
-            global _cuda_was_used
-            if r["device"] == "cuda":
-                _cuda_was_used = True
 
     if args.model_gender_age:
         r = benchmark_gender_age(args.model_gender_age, image_paths,
                                  args.device, args.num_images, vis_dir=ga_vis_dir)
         if r:
             all_results["GenderAge-MobileNetV3"] = r
-            if r["device"] == "cuda":
-                _cuda_was_used = True
 
     if not all_results:
         print("ERROR: No models ran successfully.")
-        sys.exit(1)
+        # Use os._exit here too — never let Python's shutdown run on Jetson
+        os._exit(1)
 
     # ── Reports ─────────────────────────────────────────────────────────────
     print_all_reports(all_results)
@@ -747,14 +759,17 @@ def main():
 
     print(f"\n✅  Comparison complete! Results saved to: {args.output}")
 
-    # Explicit global cleanup to prevent Jetson memory corruption
+    # ── Final teardown ───────────────────────────────────────────────────────
+    # Do NOT call torch.cuda here — both benchmark functions already cleaned up.
+    # Just free Python objects and hard-exit to skip atexit / Python shutdown.
     del all_results
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     gc.collect()
 
 
 if __name__ == "__main__":
     main()
-    import os
+    # Hard exit — skips Python's normal shutdown sequence including all
+    # @atexit handlers (from this file AND from imported modules like
+    # gender_age_inference.py). This is required on Jetson Orin to prevent
+    # glibc heap corruption during CUDA context teardown.
     os._exit(0)
