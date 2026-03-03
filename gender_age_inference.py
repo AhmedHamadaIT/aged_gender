@@ -23,10 +23,10 @@ import argparse
 import warnings
 warnings.filterwarnings("ignore")
 
-import numpy as np
-import cv2
 import torch
 import torch.nn.functional as F
+import numpy as np
+import cv2
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
@@ -349,6 +349,12 @@ def main():
         with open(args.output, "w") as f:
             json.dump(payload, f, indent=2)
         print(f"\n✓ Results saved to {args.output}")
+
+    # Explicit global cleanup to prevent Jetson memory corruption
+    del infer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
 
 if __name__ == "__main__":

@@ -26,10 +26,10 @@ import threading
 import subprocess
 warnings.filterwarnings("ignore")
 
+import torch
 import numpy as np
 import pandas as pd
 import cv2
-import torch
 import psutil
 from pathlib import Path
 from datetime import datetime
@@ -166,7 +166,7 @@ def collect_images(root: str, recursive: bool = True) -> list:
 
 def _gpu_mem_snapshot():
     """Return (total_mb, alloc_mb, cached_mb) from torch CUDA."""
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
         return 0.0, 0.0, 0.0
     total  = torch.cuda.get_device_properties(0).total_memory / (1024**2)
     alloc  = torch.cuda.memory_allocated()  / (1024**2)
@@ -283,6 +283,12 @@ def benchmark_yolo(model_path: str, image_paths: list, device: str,
     peak_mem = (torch.cuda.max_memory_allocated() / (1024 ** 2)
                 if torch.cuda.is_available() else 0)
 
+    # Clean up model to avoid Jetson memory corruption on exit
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
     return {
         "model_name":      "YOLO",
         "model_file":      os.path.basename(model_path),
@@ -359,6 +365,12 @@ def benchmark_gender_age(checkpoint: str, image_paths: list, device: str,
     gpu_total, gpu_alloc, gpu_cached = _gpu_mem_snapshot()
     peak_mem = (torch.cuda.max_memory_allocated() / (1024 ** 2)
                 if (infer.device == "cuda" and torch.cuda.is_available()) else 0)
+
+    # Clean up model to avoid Jetson memory corruption on exit
+    del infer
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
     return {
         "model_name":      "GenderAge-MobileNetV3",
@@ -729,6 +741,12 @@ def main():
     generate_plots(all_results, args.output, timestamp)
 
     print(f"\n✅  Comparison complete! Results saved to: {args.output}")
+
+    # Explicit global cleanup to prevent Jetson memory corruption
+    del all_results
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
 
 
 if __name__ == "__main__":
