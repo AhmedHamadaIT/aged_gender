@@ -4,15 +4,18 @@ schemas.py
 Pydantic models for request/response validation.
 """
 
-from typing import Optional
+from typing import Optional, Dict
 from pydantic import BaseModel
 
 
 class DetectionRequest(BaseModel):
-    action: str  # "start" | "stop"
+    action    : str            # "start" | "stop" | "stop_all"
+    camera_id : Optional[str] = None  # None = all cameras
 
 
-class DetectionStatus(BaseModel):
+class CameraStatus(BaseModel):
+    camera_id        : str
+    rtsp_url         : str
     running          : bool
     frame_count      : int
     fps              : float
@@ -20,3 +23,7 @@ class DetectionStatus(BaseModel):
     total_detections : int
     uptime_seconds   : Optional[float]
     error            : Optional[str]
+
+
+class DetectionStatus(BaseModel):
+    cameras: Dict[str, CameraStatus]

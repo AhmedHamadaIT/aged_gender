@@ -1,20 +1,21 @@
 """
 services/detector.py
 --------------------
-YOLO detection services.
+YOLO detection service.
 
-DetectorService  — loads model once, callable with a frame.
+Reads frame from context, adds detections to context.
+
+Input context:  {"frame": np.ndarray, ...}
+Output context: {"frame": np.ndarray, "detections": List[Detection], ...}
 """
 
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Dict, Any
 
 import numpy as np
 from dotenv import load_dotenv
 from ultralytics import YOLO
-
-from services.base import BaseService
 
 load_dotenv()
 
@@ -61,17 +62,17 @@ class Detection:
 
 
 # ─────────────────────────────────────────────
-# Detection service
+# Detector service
 # ─────────────────────────────────────────────
-class DetectorService(BaseService):
+class DetectorService:
     """
     YOLO object detection service.
 
-    Loads the model once on init, callable with a frame.
+    Reads "frame" from context dict, appends "detections".
 
-    Usage:
-        detector = DetectorService()
-        detections = detector(frame)
+    Usage in pipeline:
+        context = detector(context)
+        detections = context["detections"]
     """
 
     def __init__(self):
@@ -92,16 +93,8 @@ class DetectorService(BaseService):
 
         print(f"[DETECTOR] Ready — {len(self.names)} classes\n")
 
-    def __call__(self, frame: np.ndarray) -> List[Detection]:
-        """
-        Run detection on a single BGR frame.
-
-        Args:
-            frame: numpy array (H, W, 3) BGR
-
-        Returns:
-            List of Detection objects.
-        """
+    def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        frame   = context["frame"]
         results = self.model.predict(
             frame,
             conf    = self.conf,
@@ -127,8 +120,7 @@ class DetectorService(BaseService):
                     confidence=score,
                 ))
 
-        return detections
+        return {**context, "detections": detections}
 
 
-# Keep YOLODetector as alias for backward compat
 YOLODetector = DetectorService

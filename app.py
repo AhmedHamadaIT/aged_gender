@@ -1,18 +1,41 @@
 """
 app.py
 ------
-FastAPI entry point.
-Owns all routes and startup logic.
+Application entry point.
+Owns all routes, startup, and pipeline composition.
+
+To add a new service: import it and add pipeline.register() below.
 
 Run with:
   uvicorn app:app --host 0.0.0.0 --port 9000
 """
 
 from fastapi import FastAPI
+from pipeline import CameraPipeline
 from schemas import DetectionRequest, DetectionStatus
 from apis.detection import detection
+from services.detector import DetectorService
+
+# Register future services here:
+# from services.counter import CounterService
+# from services.tracker import TrackerService
 
 app = FastAPI(title="YOLO Detection API", version="1.0.0")
+
+
+# ─────────────────────────────────────────────
+# Pipeline factory
+# Called once per camera process on start
+# ─────────────────────────────────────────────
+def build_pipeline(camera_id, rtsp_url, shared_state, stop_event):
+    pipeline = CameraPipeline(camera_id, rtsp_url, shared_state, stop_event)
+
+    # ── Register services in order ────────────
+    pipeline.register(DetectorService)
+    # pipeline.register(CounterService)
+    # pipeline.register(TrackerService)
+
+    pipeline.run()
 
 
 # ─────────────────────────────────────────────
@@ -20,9 +43,17 @@ app = FastAPI(title="YOLO Detection API", version="1.0.0")
 # ─────────────────────────────────────────────
 @app.on_event("startup")
 def startup():
-    print("[APP] Loading services...")
-    detection.init()
+    print("[APP] Configuring pipeline...")
+    detection.set_pipeline(build_pipeline)
     print("[APP] Ready.")
+
+
+# ─────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {"service": "YOLO Detection API", "version": "1.0.0"}
 
 
 # ─────────────────────────────────────────────
@@ -36,13 +67,3 @@ def detection_post(req: DetectionRequest):
 @app.get("/detection", response_model=DetectionStatus)
 def detection_get():
     return detection.on_get()
-
-
-# Add future services here:
-# from apis.counting import counting
-# @app.post("/counting")
-# def counting_post(req: CountingRequest):
-#     return counting.on_post(req)
-# @app.get("/counting", response_model=CountingStatus)
-# def counting_get():
-#     return counting.on_get()
