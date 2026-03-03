@@ -118,42 +118,63 @@ class GenderAgeInference:
 
         tensor = preprocess(img).to(self.device)
 
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            logits = self.model(tensor)
-        inference_time_ms = (time.perf_counter() - t0) * 1000
-
-        # Probabilities
-        probs = F.softmax(logits, dim=1)[0].cpu().numpy()
-        class_idx = int(np.argmax(probs))
-        confidence = float(probs[class_idx])
-
-        # YOLO-style combined class name e.g. "Female_Child"
-        combined_class = ALL_8_CLASSES[class_idx]
-        
-        # Derive gender and age
-        gender = "Female" if combined_class.startswith("Female") else "Male"
-        age_short = combined_class.split("_")[1]
-        
-        # Map short age to nice label
         age_map = {
-            "Child": "Child (0-16)",
-            "YoungAdult": "Young Adults (17-30)",
-            "MiddleAged": "Middle-aged Adults (31-45)",
-            "OldAged": "Old-aged Adults (45+)"
+            "Child":       "Child (0-16)",
+            "YoungAdult":  "Young Adults (17-30)",
+            "MiddleAged":  "Middle-aged Adults (31-45)",
+            "OldAged":     "Old-aged Adults (45+)",
         }
 
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            output = self.model(tensor)
+        inference_time_ms = (time.perf_counter() - t0) * 1000
+
+        # ── Layout B: backbone + gender_head + age_head ────────────────────
+        if isinstance(output, (tuple, list)):
+            gender_logits, age_logits = output[0], output[1]
+
+            gender_probs = F.softmax(gender_logits, dim=1)[0].cpu().numpy()  # (2,)
+            age_probs    = F.softmax(age_logits,    dim=1)[0].cpu().numpy()  # (4,)
+
+            gender_idx  = int(np.argmax(gender_probs))
+            age_idx     = int(np.argmax(age_probs))
+            gender_conf = float(gender_probs[gender_idx])
+            age_conf    = float(age_probs[age_idx])
+
+            gender      = GENDER_LABELS[gender_idx]          # "Female" / "Male"
+            age_short   = AGE_SHORT_LABELS[age_idx]          # "Child" / …
+            age_label   = age_map.get(age_short, age_short)
+            combined_class = f"{gender}_{age_short}"
+            confidence  = (gender_conf + age_conf) / 2.0
+
+        # ── Layout A: single 8-class logit vector ──────────────────────────
+        else:
+            probs       = F.softmax(output, dim=1)[0].cpu().numpy()  # (8,)
+            class_idx   = int(np.argmax(probs))
+            confidence  = float(probs[class_idx])
+
+            combined_class = ALL_8_CLASSES[class_idx]
+            gender      = "Female" if combined_class.startswith("Female") else "Male"
+            age_short   = combined_class.split("_")[1]
+            age_label   = age_map.get(age_short, age_short)
+
+            gender_conf = confidence
+            age_conf    = confidence
+            gender_probs = list(probs)
+            age_probs    = []
+
         return {
-            "gender":           gender,
-            "gender_conf":      confidence,  # sharing combined confidence
-            "age_class":        class_idx % 4,
-            "age_label":        age_map.get(age_short, age_short),
-            "age_conf":         confidence,  # sharing combined confidence
-            "combined_class":   combined_class,
-            "confidence":       confidence,
+            "gender":            gender,
+            "gender_conf":       gender_conf,
+            "age_class":         AGE_SHORT_LABELS.index(age_short) if age_short in AGE_SHORT_LABELS else 0,
+            "age_label":         age_label,
+            "age_conf":          age_conf,
+            "combined_class":    combined_class,
+            "confidence":        confidence,
             "inference_time_ms": inference_time_ms,
-            "gender_probs":     [],  # deprecated for 8-class output
-            "age_probs":        [],  # deprecated for 8-class output
+            "gender_probs":      list(gender_probs),
+            "age_probs":         list(age_probs),
         }
 
     # ── Benchmark ─────────────────────────────────────────────────────────────

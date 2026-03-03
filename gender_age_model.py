@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
 """
-GenderAge MobileNetV3-Small Model Definition
----------------------------------------------
-Architecture from the Kaggle training notebook.
-Backbone: MobileNetV3-Small (~2.5M params)
-Inputs: 224x224 RGB
-Outputs: 8-class logits combining Gender + Age
+gender_age_model.py
+-------------------
+GenderAge MobileNetV3-Small model definition.
 
-Classes:
-0: Female_Child
-1: Female_YoungAdult
-2: Female_MiddleAged
-3: Female_OldAged
-4: Male_Child
-5: Male_YoungAdult
-6: Male_MiddleAged
-7: Male_OldAged
+Supports TWO checkpoint layouts:
+
+  Layout A – "flat" 8-class classifier (old):
+      conv_stem.weight, blocks.*, classifier.weight, …
+
+  Layout B – "backbone + neck + heads" (current best_checkpoint.pth):
+      backbone.*                            MobileNetV3-Small (no classifier)
+      neck.0.weight  neck.0.bias           Linear(1024 → 256)
+      neck.1.*                             BatchNorm(256)
+      gender_head.0.weight/bias            Linear(256 → 128)
+      gender_head.1.*                      BatchNorm(128)
+      gender_head.4.weight/bias            Linear(128 → 2)
+      age_head.0.weight/bias               Linear(256 → 128)
+      age_head.1.*                         BatchNorm(128)
+      age_head.4.weight/bias               Linear(128 → 4)
+
+Layout is detected automatically from the first checkpoint key.
+
+Classes (Layout A – 8-class):
+  0: Female_Child        4: Male_Child
+  1: Female_YoungAdult   5: Male_YoungAdult
+  2: Female_MiddleAged   6: Male_MiddleAged
+  3: Female_OldAged      7: Male_OldAged
+
+Layout B outputs:  (gender_logits [B,2], age_logits [B,4])
 """
 
 import torch
@@ -26,7 +39,8 @@ try:
 except ImportError:
     raise ImportError("timm is required.  Install it with:  pip install timm")
 
-GENDER_LABELS = ["Female", "Male"]
+# ── Labels ────────────────────────────────────────────────────────────────────
+GENDER_LABELS    = ["Female", "Male"]
 AGE_SHORT_LABELS = ["Child", "YoungAdult", "MiddleAged", "OldAged"]
 AGE_LABELS = [
     "Child (0-16)",
@@ -34,59 +48,200 @@ AGE_LABELS = [
     "Middle-aged Adults (31-45)",
     "Old-aged Adults (45+)",
 ]
-
 ALL_8_CLASSES = [
     "Female_Child", "Female_YoungAdult", "Female_MiddleAged", "Female_OldAged",
-    "Male_Child", "Male_YoungAdult", "Male_MiddleAged", "Male_OldAged"
+    "Male_Child",   "Male_YoungAdult",   "Male_MiddleAged",   "Male_OldAged",
 ]
 
+
+# ── Layout B: backbone + neck + separate gender / age heads ───────────────────
+class GenderAgeModel(nn.Module):
+    """
+    Exact architecture that matches best_checkpoint.pth:
+
+        backbone  = MobileNetV3-Small (timm, num_classes=0, keeps global avg-pool)
+        neck      = Linear(1024→256) + BatchNorm(256)
+        gender_head = Linear(256→128) + BatchNorm(128) + Dropout + ReLU + Linear(128→2)
+        age_head    = Linear(256→128) + BatchNorm(128) + Dropout + ReLU + Linear(128→4)
+
+    The indices that appear in the checkpoint state_dict are:
+        neck:        [0]=Linear  [1]=BatchNorm
+        gender_head: [0]=Linear  [1]=BatchNorm  [4]=Linear   (2=Dropout, 3=ReLU)
+        age_head:    [0]=Linear  [1]=BatchNorm  [4]=Linear
+    """
+
+    def __init__(self, neck_in: int = 1024, neck_out: int = 256,
+                 head_hidden: int = 128,
+                 num_gender: int = 2, num_age: int = 4,
+                 dropout: float = 0.3):
+        super().__init__()
+
+        # Backbone – remove the built-in classifier; keep global avg-pool
+        self.backbone = timm.create_model(
+            'mobilenetv3_small_100',
+            pretrained=False,
+            num_classes=0,   # returns (B, 1024) after global avg-pool + flatten
+        )
+
+        # Shared neck
+        self.neck = nn.Sequential(
+            nn.Linear(neck_in, neck_out),   # [0]
+            nn.BatchNorm1d(neck_out),        # [1]
+        )
+
+        # Gender head  (indices 0,1,2,3,4 in Sequential)
+        self.gender_head = nn.Sequential(
+            nn.Linear(neck_out, head_hidden),   # [0]
+            nn.BatchNorm1d(head_hidden),         # [1]
+            nn.Dropout(dropout),                 # [2]
+            nn.ReLU(inplace=True),               # [3]
+            nn.Linear(head_hidden, num_gender),  # [4]
+        )
+
+        # Age head
+        self.age_head = nn.Sequential(
+            nn.Linear(neck_out, head_hidden),   # [0]
+            nn.BatchNorm1d(head_hidden),         # [1]
+            nn.Dropout(dropout),                 # [2]
+            nn.ReLU(inplace=True),               # [3]
+            nn.Linear(head_hidden, num_age),     # [4]
+        )
+
+    def forward(self, x):
+        feats  = self.backbone(x)       # (B, 1024)
+        neck   = self.neck(feats)       # (B, 256)
+        gender = self.gender_head(neck) # (B, 2)
+        age    = self.age_head(neck)    # (B, 4)
+        return gender, age
+
+
+# ── Layout A: flat 8-class vanilla timm model ─────────────────────────────────
+def _build_flat_model(num_classes: int = 8) -> nn.Module:
+    model = timm.create_model('mobilenetv3_small_100', pretrained=False)
+    in_features = model.classifier.in_features
+    model.classifier = nn.Linear(in_features, num_classes)
+    return model
+
+
+# ── Helper: strip a prefix from all keys in a state dict ──────────────────────
+def _strip_prefix(state_dict: dict, prefix: str) -> dict:
+    return {k[len(prefix):]: v for k, v in state_dict.items()
+            if k.startswith(prefix)}
+
+
+# ── Public loader ─────────────────────────────────────────────────────────────
 def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Module:
     """
-    Load a GenderAgeModel from a .pth checkpoint produced by the training pipeline.
+    Load the GenderAge model from *checkpoint_path*.
+
+    Auto-detects Layout A (flat 8-class) vs Layout B (backbone+neck+heads)
+    by inspecting the first key in model_state_dict.
+
+    Returns an nn.Module in eval() mode on *device*.
     """
     print(f"\nLoading GenderAge checkpoint: {checkpoint_path}")
 
-    # Create base MobileNetV3-Small
-    model = timm.create_model('mobilenetv3_small_100', pretrained=False)
-    
-    # Replace classifier correctly for 8 classes
-    # timm's mobilenetv3 uses model.classifier as the linear layer
-    in_features = model.classifier.in_features
-    model.classifier = nn.Linear(in_features, len(ALL_8_CLASSES))
+    raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
-    # Load weights
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
-    
-    # Support both raw state_dict and wrapped checkpoint dicts
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
-        state_dict = ckpt["model_state_dict"]
-        if "val_loss" in ckpt:
-            print(f"  Checkpoint val_loss : {ckpt['val_loss']:.4f}")
-        if "epoch" in ckpt:
-            print(f"  Saved at epoch      : {ckpt['epoch'] + 1}")
+    # ── Unwrap checkpoint dict ─────────────────────────────────────────────
+    if isinstance(raw, dict) and "model_state_dict" in raw:
+        state_dict = raw["model_state_dict"]
+        if "val_loss" in raw:
+            print(f"  val_loss  : {raw['val_loss']:.4f}")
+        if "epoch" in raw:
+            print(f"  epoch     : {raw['epoch'] + 1}")
+    elif isinstance(raw, dict) and all(isinstance(v, torch.Tensor) for v in raw.values()):
+        state_dict = raw
     else:
-        state_dict = ckpt
+        state_dict = raw
 
-    # Load the state dictionary
-    model.load_state_dict(state_dict)
-    
-    # Move to requested device
+    first_key = next(iter(state_dict))
+    print(f"  First key : {first_key}")
+
+    # ── Layout detection ───────────────────────────────────────────────────
+    if first_key.startswith("backbone."):
+        # ── Layout B ──────────────────────────────────────────────────────
+        print("  Detected  : Layout B  (backbone + neck + gender_head + age_head)")
+
+        # Read dimensions from the checkpoint itself
+        neck_in     = state_dict["neck.0.weight"].shape[1]   # e.g. 1024
+        neck_out    = state_dict["neck.0.weight"].shape[0]   # e.g. 256
+        head_hidden = state_dict["gender_head.0.weight"].shape[0]  # e.g. 128
+        num_gender  = state_dict["gender_head.4.weight"].shape[0]  # e.g. 2
+        num_age     = state_dict["age_head.4.weight"].shape[0]     # e.g. 4
+
+        print(f"  neck      : {neck_in} → {neck_out}")
+        print(f"  heads     : {neck_out} → {head_hidden}  "
+              f"| gender_out={num_gender}  age_out={num_age}")
+
+        model = GenderAgeModel(
+            neck_in=neck_in, neck_out=neck_out,
+            head_hidden=head_hidden,
+            num_gender=num_gender, num_age=num_age,
+        )
+
+        # Load each sub-module separately for clear error reporting
+        backbone_sd    = _strip_prefix(state_dict, "backbone.")
+        neck_sd        = _strip_prefix(state_dict, "neck.")
+        gender_head_sd = _strip_prefix(state_dict, "gender_head.")
+        age_head_sd    = _strip_prefix(state_dict, "age_head.")
+
+        miss_b, unex_b = model.backbone.load_state_dict(backbone_sd, strict=False)
+        miss_n, unex_n = model.neck.load_state_dict(neck_sd, strict=True)
+        miss_g, unex_g = model.gender_head.load_state_dict(gender_head_sd, strict=True)
+        miss_a, unex_a = model.age_head.load_state_dict(age_head_sd, strict=True)
+
+        for name, miss, unex in [
+            ("backbone",    miss_b, unex_b),
+            ("neck",        miss_n, unex_n),
+            ("gender_head", miss_g, unex_g),
+            ("age_head",    miss_a, unex_a),
+        ]:
+            if miss:
+                print(f"  [WARN] {name} missing keys ({len(miss)}): {miss[:3]}")
+            if unex:
+                print(f"  [WARN] {name} unexpected keys ({len(unex)}): {unex[:3]}")
+
+    else:
+        # ── Layout A ──────────────────────────────────────────────────────
+        print("  Detected  : Layout A  (flat 8-class classifier)")
+
+        num_classes = (state_dict["classifier.weight"].shape[0]
+                       if "classifier.weight" in state_dict else 8)
+
+        model = _build_flat_model(num_classes)
+        miss, unex = model.load_state_dict(state_dict, strict=False)
+        if miss:
+            print(f"  [WARN] missing keys ({len(miss)}): {miss[:3]}")
+        if unex:
+            print(f"  [WARN] unexpected keys ({len(unex)}): {unex[:3]}")
+
     model = model.to(device)
     model.eval()
 
-    print(f"  Model loaded ✓  (device={device})")
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"  Parameters        : {total_params:,}")
-    print(f"  Approx size (fp32): {total_params * 4 / 1024**2:.1f} MB")
+    print(f"  Parameters: {total_params:,}")
+    print(f"  Size fp32 : {total_params * 4 / 1024**2:.1f} MB")
+    print(f"  Device    : {device}")
+    print("  Model loaded ✓")
 
     return model
 
+
+# ── Standalone test ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import sys
     ckpt_path = sys.argv[1] if len(sys.argv) > 1 else "best_checkpoint.pth"
-    m = load_gender_age_model(ckpt_path, device="cpu")
+    model = load_gender_age_model(ckpt_path, device="cpu")
 
     dummy = torch.randn(2, 3, 224, 224)
     with torch.no_grad():
-        logits = m(dummy)
-    print(f"\nForward pass OK → logits {logits.shape}")
+        out = model(dummy)
+
+    if isinstance(out, (tuple, list)):
+        g, a = out
+        print(f"\nForward pass OK (Layout B)")
+        print(f"  gender logits : {g.shape}  → classes: {GENDER_LABELS}")
+        print(f"  age logits    : {a.shape}  → classes: {AGE_SHORT_LABELS}")
+    else:
+        print(f"\nForward pass OK (Layout A) → logits {out.shape}")
