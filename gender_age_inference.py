@@ -81,19 +81,24 @@ class GenderAgeInference:
         self.model = load_gender_age_model(checkpoint_path, device)
         self.model_size_mb = os.path.getsize(checkpoint_path) / (1024 ** 2)
 
-        # ── CUDA arch compatibility check ─────────────────────────────────────
-        # Some GPUs (e.g. older Jetson) don't have a CUDA kernel image for the
-        # installed PyTorch build.  Run a tiny warmup and fall back to CPU if it
-        # fails — mirrors the same check in compare_models.py for YOLO.
+        # ── CUDA warmup (Jetson-safe) ──────────────────────────────────────
+        # Run a single tiny forward pass to pre-compile CUDA kernels.
+        # Wrap in try/except so a crash here falls back gracefully to CPU.
         if self.device == "cuda" and torch.cuda.is_available():
+            import os as _os
+            _os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
             try:
-                dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, device=self.device)
+                torch.cuda.synchronize()
+                dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, device="cuda")
                 with torch.no_grad():
-                    self.model(dummy)
-            except Exception:
-                print("  [!] GenderAge: CUDA arch unsupported — falling back to CPU")
+                    _ = self.model(dummy)
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                print("  Warmup pass \u2713")
+            except Exception as exc:
+                print(f"  [!] CUDA warmup failed ({exc}) \u2014 falling back to CPU")
                 self.device = "cpu"
-                self.model = self.model.cpu()
+                self.model  = self.model.cpu()
 
     # ── Single image ──────────────────────────────────────────────────────────
     def predict_image(self, img_input):

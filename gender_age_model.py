@@ -216,8 +216,51 @@ def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Modul
         if unex:
             print(f"  [WARN] unexpected keys ({len(unex)}): {unex[:3]}")
 
-    model = model.to(device)
-    model.eval()
+    model.eval()  # eval on CPU first — ALWAYS before CUDA transfer
+
+    # ── Safe CUDA transfer (Jetson / embedded GPU friendly) ──────────────────
+    if device == "cuda":
+        if not torch.cuda.is_available():
+            print("  [WARN] CUDA not available — falling back to CPU")
+            device = "cpu"
+        else:
+            try:
+                # 1. Explicit CUDA init before any CUDA operation
+                torch.cuda.init()
+                torch.cuda.synchronize()
+
+                # 2. Disable cuDNN auto-tuner (causes crash on first run on Jetson)
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+
+                # 3. Clear any stale allocations
+                torch.cuda.empty_cache()
+
+                # 4. Move model sub-modules one by one (avoids OOM spike)
+                if hasattr(model, 'backbone'):
+                    model.backbone = model.backbone.cuda()
+                    torch.cuda.synchronize()
+                if hasattr(model, 'neck'):
+                    model.neck = model.neck.cuda()
+                    torch.cuda.synchronize()
+                if hasattr(model, 'gender_head'):
+                    model.gender_head = model.gender_head.cuda()
+                    torch.cuda.synchronize()
+                if hasattr(model, 'age_head'):
+                    model.age_head = model.age_head.cuda()
+                    torch.cuda.synchronize()
+                if hasattr(model, 'classifier'):
+                    # Layout A flat model
+                    model = model.cuda()
+                    torch.cuda.synchronize()
+
+                print(f"  CUDA transfer ✓  ({torch.cuda.get_device_name(0)})")
+            except Exception as e:
+                print(f"  [WARN] CUDA transfer failed ({e}) — falling back to CPU")
+                device = "cpu"
+                model = model.cpu()
+    else:
+        model = model.cpu()
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {total_params:,}")
