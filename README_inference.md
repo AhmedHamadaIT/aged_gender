@@ -93,28 +93,6 @@ python realtime_monitor.py --model best.pt --source video.mp4
 
 ---
 
-### 3. `batch_processor.py` — Batch Processing
-
-Processes every image in a folder, saves per-image predictions to CSV + JSON, and generates 4 analysis plots.
-
-```bash
-python batch_processor.py \
-    --model best.pt \
-    --input /home/a7med/Documents/aged_gender/images \
-    --output ./batch_output \
-    --recursive \
-    --save-vis        # optional: save annotated images
-```
-
-**Output (`./batch_output/`):**
-- `results_<timestamp>.csv` — per-image predictions
-- `results_<timestamp>.json` — JSON version
-- `summary_<timestamp>.json` — aggregated stats
-- `plots_<timestamp>.png` — distribution charts
-- `visualizations/` — annotated images (if `--save-vis`)
-
----
-
 ### 4. `compare_models.py` — Multi-Model Comparison
 
 Benchmarks two or more `.pt` models on the same test set and produces a side-by-side comparison.

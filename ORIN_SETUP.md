@@ -86,17 +86,3 @@ To run inference on a single image and generate a report:
 python model_inference.py --model best.engine --source images/test.jpg --save True
 ```
 
-### Batch Processing
-
-To process an entire folder of images efficiently:
-
-```bash
-python batch_processor.py --data_dir images/ --model_path best.engine --output_dir runs/batch_results
-```
-
----
-
-## Troubleshooting
-
-- **CUDA Out of Memory**: If you experience memory issues, try reducing the image size (e.g., `--imgsz 480`) or close other applications.
-- **Library Not Found (PyTorch/TensorRT)**: Ensure you used `./setup_orin.sh` which links against system packages, and that you are using an Nvidia L4T Docker container or have correctly installed JetPack.

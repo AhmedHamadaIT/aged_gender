@@ -72,7 +72,7 @@ def preprocess(img_bgr: np.ndarray) -> torch.Tensor:
 # ── Main inference class ──────────────────────────────────────────────────────
 
 class GenderAgeInference:
-    """Wraps the GenderAgeModel for convenient single-image / batch inference."""
+    """Wraps the GenderAgeModel for convenient single-image / folder inference."""
 
     def __init__(self, checkpoint_path: str, device: str = "cpu"):
         self.checkpoint_path = checkpoint_path
@@ -145,55 +145,6 @@ class GenderAgeInference:
             "age_probs":        age_probs.tolist(),
         }
 
-    # ── Batch of images ───────────────────────────────────────────────────────
-    def predict_batch(self, image_paths: list, batch_size: int = 32):
-        """Run inference on a list of image paths; returns list of result dicts."""
-        results = []
-        for i in range(0, len(image_paths), batch_size):
-            batch_paths = image_paths[i : i + batch_size]
-            tensors = []
-            valid_paths = []
-
-            for p in batch_paths:
-                img = cv2.imread(str(p))
-                if img is None:
-                    continue
-                tensors.append(preprocess(img))
-                valid_paths.append(p)
-
-            if not tensors:
-                continue
-
-            batch_tensor = torch.cat(tensors, dim=0).to(self.device)
-
-            t0 = time.perf_counter()
-            with torch.no_grad():
-                g_logits, a_logits = self.model(batch_tensor)
-            batch_time_ms = (time.perf_counter() - t0) * 1000
-            per_image_ms  = batch_time_ms / len(tensors)
-
-            g_probs = F.softmax(g_logits, dim=1).cpu().numpy()
-            a_probs = F.softmax(a_logits, dim=1).cpu().numpy()
-
-            for j, path in enumerate(valid_paths):
-                g_idx = int(np.argmax(g_probs[j]))
-                a_idx = int(np.argmax(a_probs[j]))
-                combined = f"{GENDER_LABELS[g_idx]}_{AGE_SHORT_LABELS[a_idx]}"
-                results.append({
-                    "image":          os.path.basename(path),
-                    "path":           str(path),
-                    "gender":         GENDER_LABELS[g_idx],
-                    "gender_conf":    float(g_probs[j][g_idx]),
-                    "age_class":      a_idx,
-                    "age_label":      AGE_LABELS[a_idx],
-                    "age_conf":       float(a_probs[j][a_idx]),
-                    "combined_class": combined,
-                    "confidence":     float(g_probs[j][g_idx]),
-                    "inference_time_ms": per_image_ms,
-                })
-
-        return results
-
     # ── Benchmark ─────────────────────────────────────────────────────────────
     def benchmark(self, image_paths: list, num_images: int = 100):
         """
@@ -261,7 +212,6 @@ def main():
                         help="Optional: save JSON results to this path")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                         choices=["cuda", "cpu"])
-    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-images", type=int, default=None,
                         help="Limit number of images processed (useful for quick tests)")
     args = parser.parse_args()
@@ -308,10 +258,15 @@ def main():
             print(f"\n✓ Saved to {args.output}")
         return
 
-    # ── Batch inference ───────────────────────────────────────────────────────
-    print(f"\nBatch inference (batch_size={args.batch_size})…")
+    # ── Folder inference ───────────────────────────────────────────────────────
+    print(f"\nProcessing {len(image_paths)} images one by one…")
     t0 = time.perf_counter()
-    results = infer.predict_batch(image_paths, batch_size=args.batch_size)
+    results = []
+    for p in tqdm(image_paths, desc="Processing images"):
+        res = infer.predict_image(str(p))
+        res["image"] = os.path.basename(p)
+        res["path"] = str(p)
+        results.append(res)
     elapsed = time.perf_counter() - t0
 
     fps = len(results) / elapsed if elapsed > 0 else 0

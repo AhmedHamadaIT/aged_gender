@@ -241,57 +241,6 @@ class ModelPerformanceAnalyzer:
             'top5_confidences': top5_confidences
         }
     
-    def benchmark_batch(self, image_paths, batch_size=32):
-        """Benchmark batch inference"""
-        if not self.model:
-            return None
-        
-        print(f"\nBatch inference with size={batch_size}...")
-        
-        # Prepare batches
-        batches = [image_paths[i:i + batch_size] for i in range(0, len(image_paths), batch_size)]
-        
-        total_time = 0
-        total_images = 0
-        all_times = []
-        
-        torch.cuda.reset_peak_memory_stats() if self.device == 'cuda' else None
-        start_memory = torch.cuda.memory_allocated() if self.device == 'cuda' else 0
-        
-        for batch in tqdm(batches, desc="Processing batches"):
-            batch_start = time.time()
-            
-            # Run batch inference
-            is_half = (self.device == 'cuda')
-            results = self.model.predict(batch, batch=len(batch), verbose=False, augment=False, device=self.device, half=is_half)
-            
-            batch_end = time.time()
-            batch_time = (batch_end - batch_start) * 1000  # ms
-            
-            total_time += batch_time
-            total_images += len(batch)
-            all_times.append(batch_time / len(batch))  # per-image time
-        
-        end_memory = torch.cuda.memory_allocated() if self.device == 'cuda' else 0
-        peak_memory = torch.cuda.max_memory_allocated() / (1024**2) if self.device == 'cuda' else 0
-        
-        avg_time_per_image = total_time / total_images
-        avg_batch_time = total_time / len(batches)
-        fps = 1000 / avg_time_per_image
-        
-        memory_used = (end_memory - start_memory) / (1024**2) if self.device == 'cuda' else 0
-        
-        return {
-            'total_images': total_images,
-            'total_batches': len(batches),
-            'avg_time_per_image_ms': avg_time_per_image,
-            'avg_batch_time_ms': avg_batch_time,
-            'fps': fps,
-            'memory_used_mb': memory_used,
-            'peak_memory_mb': peak_memory,
-            'all_times_ms': all_times
-        }
-    
     def run_inference_on_folder(self, folder_path, recursive=True, save_vis=False, output_dir=None):
         """Run inference on all images in a folder"""
         print(f"\n{'='*60}")
@@ -342,20 +291,6 @@ class ModelPerformanceAnalyzer:
                 for i, (cls, conf) in enumerate(zip(single_result['top5_classes'], 
                                                      single_result['top5_confidences'])):
                     print(f"  {i+1}. {cls}: {conf:.4f}")
-        
-        # Batch benchmark
-        if len(image_paths) >= 4:
-            print("\n" + "-"*40)
-            print("Batch Benchmark")
-            print("-"*40)
-            
-            batch_result = self.benchmark_batch(image_paths[:min(100, len(image_paths))], batch_size=32)
-            if batch_result:
-                print(f"Average time per image: {batch_result['avg_time_per_image_ms']:.2f} ms")
-                print(f"FPS: {batch_result['fps']:.2f}")
-                print(f"Peak memory: {batch_result['peak_memory_mb']:.2f} MB")
-                
-                self.results['performance']['batch_benchmark'] = batch_result
         
         # Full inference on all images
         print("\n" + "-"*40)
@@ -540,14 +475,7 @@ class ModelPerformanceAnalyzer:
             
             f.write("## Performance Metrics\n\n")
             f.write("### Single Image Inference\n")
-            perf = self.results.get('performance', {})
-            batch = perf.get('batch_benchmark', {})
-            if batch:
-                f.write(f"- **Average Time:** {batch.get('avg_time_per_image_ms', 0):.2f} ms\n")
-                f.write(f"- **FPS:** {batch.get('fps', 0):.2f}\n")
-                f.write(f"- **Peak Memory:** {batch.get('peak_memory_mb', 0):.2f} MB\n\n")
-            
-            f.write("### Batch Inference\n")
+            f.write("### Full Dataset Inference\n")
             stats = self.results.get('inference_stats', {})
             f.write(f"- **Total Images:** {stats.get('total_images', 0)}\n")
             f.write(f"- **Total Time:** {stats.get('total_time_seconds', 0):.2f} s\n")
@@ -624,7 +552,7 @@ class ModelPerformanceAnalyzer:
                     <tr><td>Number of Classes</td><td>{self.results['performance'].get('num_classes', 0)}</td></tr>
                     <tr><td>Average Inference Time</td><td>{self.results.get('inference_stats', {}).get('avg_time_ms', 0):.2f} ms</td></tr>
                     <tr><td>FPS</td><td>{self.results.get('inference_stats', {}).get('fps', 0):.2f}</td></tr>
-                    <tr><td>Peak Memory Usage</td><td>{self.results.get('performance', {}).get('batch_benchmark', {}).get('peak_memory_mb', 0):.2f} MB</td></tr>
+                    <tr><td>Memory Usage</td><td>{self.results.get('inference_stats', {}).get('memory_used_mb', 0):.2f} MB</td></tr>
                     <tr><td>Avg CPU Usage</td><td>{self.results.get('inference_stats', {}).get('avg_cpu_usage_percent', 0):.1f}%</td></tr>
                     <tr><td>Avg RAM Usage</td><td>{self.results.get('inference_stats', {}).get('avg_ram_usage_percent', 0):.1f}%</td></tr>
                 </table>
@@ -686,7 +614,7 @@ class ModelPerformanceAnalyzer:
         metrics = ['FPS', 'Memory (MB)', 'Time (ms)']
         perf_vals = [
             self.results.get('inference_stats', {}).get('fps', 0),
-            self.results.get('performance', {}).get('batch_benchmark', {}).get('peak_memory_mb', 0),
+            self.results.get('inference_stats', {}).get('memory_used_mb', 0),
             self.results.get('inference_stats', {}).get('avg_time_ms', 0)
         ]
         colors = ['#2ecc71', '#3498db', '#e74c3c']
@@ -741,8 +669,6 @@ def main():
     parser.add_argument('--device', type=str, choices=['cuda', 'cpu'],
                        default='cuda' if torch.cuda.is_available() else 'cpu',
                        help='Device to use (cuda/cpu)')
-    parser.add_argument('--batch-size', type=int, default=32,
-                       help='Batch size for inference (default: 32)')
     parser.add_argument('--recursive', action='store_true',
                        help='Search images recursively in input folder')
     parser.add_argument('--save-vis', action='store_true',
