@@ -7,8 +7,7 @@
 ultralytics
 onnx
 onnxruntime-gpu
-opencv-python
-numpy==1.26.4
+numpy<2.0.0
 pandas
 matplotlib
 seaborn
