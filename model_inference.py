@@ -218,9 +218,10 @@ class ModelPerformanceAnalyzer:
             top1_conf = float(probs.data[top1_idx])
             top1_class = results[0].names[top1_idx]
             
-            # Get top-5 predictions
-            top5_indices = probs.data.topk(5).indices.tolist()
-            top5_confidences = probs.data.topk(5).values.tolist()
+            # Get top-k predictions (k capped at num classes — mood model has only 3)
+            _k = min(5, len(probs.data))
+            top5_indices = probs.data.topk(_k).indices.tolist()
+            top5_confidences = probs.data.topk(_k).values.tolist()
             top5_classes = [results[0].names[idx] for idx in top5_indices]
         else:
             top1_class = "Unknown"
@@ -342,9 +343,10 @@ class ModelPerformanceAnalyzer:
                 top1_conf = float(probs.data[top1_idx])
                 top1_class = results_obj[0].names[top1_idx]
                 
-                # Get top-5
-                top5_indices = probs.data.topk(5).indices.tolist()
-                top5_confidences = probs.data.topk(5).values.tolist()
+                # Get top-k predictions (k capped at num classes)
+                _k = min(5, len(probs.data))
+                top5_indices = probs.data.topk(_k).indices.tolist()
+                top5_confidences = probs.data.topk(_k).values.tolist()
                 top5_classes = [results_obj[0].names[idx] for idx in top5_indices]
                 
                 class_counts[top1_class] += 1
