@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "aged_gender",
+			"path": "."
+		},
+		{
+			"name": "uncertain",
+			"path": "../../Downloads/age gender model/archive/uncertain"
+		}
+	],
+	"settings": {}
+}

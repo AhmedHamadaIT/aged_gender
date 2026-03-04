@@ -21,8 +21,11 @@ import time
 import json
 import argparse
 import warnings
+import gc
 warnings.filterwarnings("ignore")
 
+# NOTE: torch MUST be imported before numpy / cv2 on Jetson Orin.
+# Inverting this order can corrupt glibc's heap allocator.
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -31,21 +34,14 @@ from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
 
-import atexit
-import gc
-
-# Only True after a successful CUDA warmup — prevents atexit from calling
-# cuda functions when the CUDA context was never initialized (e.g. import error).
-_cuda_was_used = False
-
-@atexit.register
-def _cleanup():
-    try:
-        if _cuda_was_used and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-    except Exception:
-        pass
+# NOTE: No @atexit handlers here.
+# When imported by compare_models.py, any atexit handler registered here
+# races with Ultralytics' own CUDA teardown handlers, causing glibc heap
+# corruption on Jetson Orin. compare_models.py uses os._exit(0) to bypass
+# Python shutdown entirely — that is the only safe pattern on this platform.
+#
+# If you run gender_age_inference.py as a standalone script, the explicit
+# cleanup at the bottom of main() handles teardown before os._exit(0).
 
 # Import the model definition from the local module
 try:

@@ -2,18 +2,28 @@
 """
 compare_models.py — Unified Model Comparison Tool
 ==================================================
-Compares two types of models on the same dataset:
-  • YOLO  (.pt / .onnx / .engine) — Ultralytics YOLO classification
+Compares models on the same dataset:
+  • YOLO  (.pt / .onnx / .engine) — Ultralytics YOLO classification (age/gender)
   • GenderAge (.pth)              — MobileNetV3-Small custom model
+  • Mood  (.pt)                   — YOLOv8 3-class emotion classifier
+                                    (angry / happy / neutral)
 
 Usage:
+  # All three models
   python3 compare_models.py \
-      --model-yolo      best.pt \
+      --model-yolo       best.pt \
       --model-gender-age best_checkpoint.pth \
-      --images          ./images \
-      --output          ./comparison_output \
-      --device          cpu \
-      --num-images      100
+      --model-mood       "best mood.pt" \
+      --images           ./images \
+      --output           ./comparison_output \
+      --device           cuda \
+      --num-images       100
+
+  # Mood model only
+  python3 compare_models.py \
+      --model-mood "best mood.pt" \
+      --images     ./images \
+      --device     cpu
 """
 
 import os
@@ -26,11 +36,16 @@ import threading
 import subprocess
 warnings.filterwarnings("ignore")
 
-import numpy as np
-import pandas as pd
-import cv2
+import gc
+
+# NOTE: On Jetson Orin, torch MUST be imported before numpy / cv2.
+# Loading cv2 or numpy before PyTorch initializes CUDA can corrupt glibc's
+# internal heap allocators, leading to "corrupted size vs. prev_size" crashes.
 import torch
+import numpy as np
+import cv2
 import psutil
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
@@ -40,12 +55,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
-
-# NOTE: No @atexit handlers here.
-# Each benchmark function does its own explicit cleanup before returning.
-# The script ends with os._exit(0) to bypass ALL atexit/Python-shutdown
-# teardown — this is the only safe pattern on Jetson Orin with Ultralytics.
-import gc
 
 # Optional pretty tables
 try:
@@ -328,6 +337,136 @@ def benchmark_yolo(model_path: str, image_paths: list, device: str,
 
     # ── Ordered teardown: results collected → model deleted → CUDA flushed.
     # This order is critical on Jetson; reversing it causes heap corruption.
+    del model
+    _cuda_cleanup()
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mood benchmarker (YOLOv8 3-class: angry / happy / neutral)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MOOD_CLASSES = ["angry", "happy", "neutral"]
+
+
+def benchmark_mood(model_path: str, image_paths: list, device: str,
+                   num_images: int, vis_dir: str = None):
+    """
+    Benchmark the 3-class mood YOLOv8 classifier.
+    Follows the same Jetson-safe pattern as benchmark_yolo():
+      1. Load on CPU first.
+      2. Move to target device.
+      3. CUDA warmup with dummy frame.
+      4. Explicit del + _cuda_cleanup() before returning.
+    Works on both desktop GPU/CPU and Jetson Nano.
+    """
+    if not HAS_YOLO:
+        return None
+
+    subset = image_paths[:min(num_images, len(image_paths))]
+    model_size_mb = os.path.getsize(model_path) / (1024 ** 2)
+    fmt = Path(model_path).suffix.lstrip(".")
+
+    print(f"\nLoading Mood model: {model_path}")
+
+    # Load to CPU first — avoids glibc corruption on Jetson during CUDA init
+    model = YOLO(model_path)
+    model.to("cpu")
+
+    if device == "cuda" and torch.cuda.is_available():
+        model.to("cuda")
+        # Warmup: let CUDA kernels compile before real inference
+        try:
+            dummy = np.zeros((128, 128, 3), dtype=np.uint8)
+            model.predict(dummy, verbose=False, device=device, half=True)
+            del dummy
+        except Exception:
+            print("  [!] CUDA arch unsupported for Mood model — falling back to CPU")
+            device = "cpu"
+            model.to("cpu")
+
+    if vis_dir:
+        os.makedirs(vis_dir, exist_ok=True)
+        print(f"  Saving annotated images → {vis_dir}")
+
+    print(f"  Size: {model_size_mb:.2f} MB | Device: {device}")
+    print(f"  Classes: {MOOD_CLASSES}")
+    print(f"  Benchmarking on {len(subset)} images…")
+
+    is_half = device == "cuda"
+    inference_times = []
+    confidences     = []
+    predictions     = []
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+    monitor = ResourceMonitor()
+    monitor.start()
+    total_start = time.perf_counter()
+
+    for img_path in tqdm(subset, desc="  Mood"):
+        img = cv2.imread(img_path)
+        if img is None:
+            continue
+
+        t0 = time.perf_counter()
+        preds = model.predict(img, verbose=False, augment=False,
+                              device=device, half=is_half)
+        t1 = time.perf_counter()
+
+        inference_times.append((t1 - t0) * 1000)
+
+        if preds and preds[0].probs is not None:
+            probs  = preds[0].probs
+            top1_i = probs.top1
+            top1_c = float(probs.data[top1_i])
+            top1_n = preds[0].names[top1_i]
+            confidences.append(top1_c)
+            predictions.append({"image":      os.path.basename(img_path),
+                                 "class":      top1_n,
+                                 "confidence": top1_c})
+
+            if vis_dir:
+                save_annotated_image(img, top1_n, top1_c,
+                                     vis_dir, os.path.basename(img_path))
+
+    total_time = time.perf_counter() - total_start
+    monitor.stop()
+
+    gpu_total, gpu_alloc, gpu_cached = _gpu_mem_snapshot()
+    peak_mem = (torch.cuda.max_memory_allocated() / (1024 ** 2)
+                if torch.cuda.is_available() else 0)
+
+    result = {
+        "model_name":        "Mood-YOLO",
+        "model_file":        os.path.basename(model_path),
+        "model_format":      fmt.upper(),
+        "model_size_mb":     model_size_mb,
+        "inference_times":   inference_times,
+        "confidences":       confidences,
+        "predictions":       predictions,
+        "total_time":        total_time,
+        "fps":               len(predictions) / total_time if total_time > 0 else 0,
+        "avg_time_ms":       np.mean(inference_times) if inference_times else 0,
+        "std_time_ms":       np.std(inference_times)  if inference_times else 0,
+        "min_time_ms":       min(inference_times)     if inference_times else 0,
+        "max_time_ms":       max(inference_times)     if inference_times else 0,
+        "avg_confidence":    np.mean(confidences)     if confidences else 0,
+        "peak_memory_mb":    peak_mem,
+        "gpu_mem_total_mb":  gpu_total,
+        "gpu_mem_alloc_mb":  gpu_alloc,
+        "gpu_mem_cached_mb": gpu_cached,
+        "avg_cpu_pct":       monitor.avg_cpu,
+        "avg_ram_pct":       monitor.avg_ram,
+        "avg_gpu_util_pct":  monitor.avg_gpu_util,
+        "max_gpu_util_pct":  monitor.max_gpu_util,
+        "total_images":      len(predictions),
+        "device":            device,
+    }
+
+    # ── Ordered teardown (Jetson-safe: collect results → del model → flush CUDA)
     del model
     _cuda_cleanup()
 
@@ -685,9 +824,11 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model-yolo",       default=None,
-                        help="Path to YOLO model (.pt / .onnx / .engine)")
+                        help="Path to YOLO age/gender model (.pt / .onnx / .engine)")
     parser.add_argument("--model-gender-age", default=None,
                         help="Path to GenderAge checkpoint (.pth)")
+    parser.add_argument("--model-mood",        default=None,
+                        help="Path to mood model (.pt) — 3 classes: angry/happy/neutral")
     parser.add_argument("--images", required=True,
                         help="Image file or folder of images to test on")
     parser.add_argument("--output", default="./comparison_output",
@@ -696,17 +837,20 @@ def main():
                         help="Max number of images to benchmark per model")
     parser.add_argument("--device",
                         default="cuda" if torch.cuda.is_available() else "cpu",
-                        choices=["cuda", "cpu"])
+                        choices=["cuda", "cpu"],
+                        help="Device to use — works on both desktop GPU and Jetson Nano")
     parser.add_argument("--recursive", action="store_true", default=True,
                         help="Recurse into image subdirectories")
     parser.add_argument("--save-vis", action="store_true", default=False,
                         help="Save annotated images per model")
     args = parser.parse_args()
 
-    if not args.model_yolo and not args.model_gender_age:
-        parser.error("Provide at least one of --model-yolo or --model-gender-age")
+    if not args.model_yolo and not args.model_gender_age and not args.model_mood:
+        parser.error("Provide at least one of --model-yolo, --model-gender-age, or --model-mood")
 
-    for attr, label in [("model_yolo", "YOLO"), ("model_gender_age", "GenderAge")]:
+    for attr, label in [("model_yolo", "YOLO"),
+                        ("model_gender_age", "GenderAge"),
+                        ("model_mood", "Mood")]:
         p = getattr(args, attr)
         if p and not os.path.exists(p):
             print(f"ERROR: {label} model not found: {p}")
@@ -728,9 +872,11 @@ def main():
 
     yolo_vis_dir = os.path.join(args.output, "YOLO_vis")      if args.save_vis else None
     ga_vis_dir   = os.path.join(args.output, "GenderAge_vis") if args.save_vis else None
+    mood_vis_dir = os.path.join(args.output, "Mood_vis")      if args.save_vis else None
     if args.save_vis:
         print(f"  [save-vis] YOLO      → {yolo_vis_dir}")
         print(f"  [save-vis] GenderAge → {ga_vis_dir}")
+        print(f"  [save-vis] Mood      → {mood_vis_dir}")
 
     # ── Run benchmarks ──────────────────────────────────────────────────────
     all_results = {}
@@ -746,6 +892,12 @@ def main():
                                  args.device, args.num_images, vis_dir=ga_vis_dir)
         if r:
             all_results["GenderAge-MobileNetV3"] = r
+
+    if args.model_mood:
+        r = benchmark_mood(args.model_mood, image_paths,
+                           args.device, args.num_images, vis_dir=mood_vis_dir)
+        if r:
+            all_results["Mood-YOLO"] = r
 
     if not all_results:
         print("ERROR: No models ran successfully.")

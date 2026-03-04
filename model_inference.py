@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 Model Inference and Performance Analysis Script
-For use with fine-tuned YOLO classification model
+Supports both the YOLO age/gender model and the mood model (angry/happy/neutral).
+
+Modes:
+  aged_gender  — run the YOLO age/gender model only (default)
+  mood         — run the 3-class mood model only
+  both         — run mood model first, then aged/gender model; print combined summary
 """
 
 import os
@@ -55,6 +60,9 @@ ALL_8_CLASSES = [
     "Female_Child", "Female_YoungAdult", "Female_MiddleAged", "Female_OldAged",
     "Male_Child", "Male_YoungAdult", "Male_MiddleAged", "Male_OldAged"
 ]
+
+# Mood model classes (angry / happy / neutral)
+MOOD_CLASSES = ["angry", "happy", "neutral"]
 
 class ModelPerformanceAnalyzer:
     """Main class for model inference and performance analysis"""
@@ -657,58 +665,30 @@ class ModelPerformanceAnalyzer:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()
 
-def main():
-    parser = argparse.ArgumentParser(description='YOLO Model Performance Analyzer')
-    parser.add_argument('--model', type=str, required=True,
-                       help='Path to the model file (.pt, .onnx, .engine)')
-    parser.add_argument('--input', type=str, required=True,
-                       help='Path to input image or folder containing images')
-    parser.add_argument('--output', type=str, default='./reports',
-                       help='Output directory for reports (default: ./reports)')
-    parser.add_argument('--device', type=str, choices=['cuda', 'cpu'],
-                       default='cuda' if torch.cuda.is_available() else 'cpu',
-                       help='Device to use (cuda/cpu)')
-    parser.add_argument('--recursive', action='store_true',
-                       help='Search images recursively in input folder')
-    parser.add_argument('--save-vis', action='store_true',
-                       help='Save annotated images to the report output directory')
-    parser.add_argument('--format', type=str, choices=['json', 'md', 'html', 'all'],
-                       default='all', help='Report format (default: all)')
-    
-    args = parser.parse_args()
-    
-    # Check if model exists
-    if not os.path.exists(args.model):
-        print(f"Error: Model file not found: {args.model}")
-        sys.exit(1)
-    
-    # Check if input exists
-    if not os.path.exists(args.input):
-        print(f"Error: Input path not found: {args.input}")
-        sys.exit(1)
-    
-    # Initialize analyzer
-    analyzer = ModelPerformanceAnalyzer(args.model, device=args.device)
-    
-    # Load model
+def _run_single_mode(model_path: str, args, label: str):
+    """
+    Run ModelPerformanceAnalyzer for one model (YOLO-based).
+    Works for both the age/gender YOLO model and the mood model.
+    Returns the analyzer instance (with full results) or None on failure.
+    """
+    output_dir = os.path.join(args.output, label)
+    os.makedirs(output_dir, exist_ok=True)
+
+    analyzer = ModelPerformanceAnalyzer(model_path, device=args.device)
+
     if not analyzer.load_model():
-        sys.exit(1)
-    
-    # Get system info
+        return None
+
     analyzer.get_system_info()
-    
-    # Run inference
+
     if os.path.isfile(args.input):
-        # Single image
         print(f"\nProcessing single image: {args.input}")
         result = analyzer.benchmark_single_image(args.input)
         if result:
-            print(f"\nResults:")
+            print(f"\nResults [{label}]:")
             print(f"  Predicted: {result['predicted_class']} (conf: {result['confidence']:.4f})")
             print(f"  Time: {result['inference_time_ms']:.2f} ms")
             print(f"  Memory: {result['memory_used_mb']:.2f} MB")
-            
-            # Update results structure
             analyzer.results['inference_stats'] = {
                 'total_images': 1,
                 'total_time_seconds': result['inference_time_ms'] / 1000,
@@ -716,7 +696,6 @@ def main():
                 'fps': 1000 / result['inference_time_ms'],
                 'memory_used_mb': result['memory_used_mb']
             }
-            
             analyzer.results['classification_report'] = {
                 'class_distribution': {result['predicted_class']: 1},
                 'avg_confidence': result['confidence'],
@@ -725,23 +704,119 @@ def main():
                 'std_confidence': 0
             }
     else:
-        # Folder of images
-        results = analyzer.run_inference_on_folder(
-            args.input, 
+        analyzer.run_inference_on_folder(
+            args.input,
             recursive=args.recursive,
             save_vis=args.save_vis,
-            output_dir=args.output
+            output_dir=output_dir
         )
-    
-    # Generate report
-    analyzer.generate_report(args.output)
-    
+
+    analyzer.generate_report(output_dir)
+    return analyzer
+
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='YOLO Model Performance Analyzer — age/gender, mood, or both'
+    )
+    parser.add_argument('--model', type=str, default=None,
+                       help='Path to the age/gender YOLO model (.pt, .onnx, .engine)')
+    parser.add_argument('--mood-model', type=str, default=None,
+                       help='Path to the mood model (.pt) — classes: angry/happy/neutral')
+    parser.add_argument('--mode', type=str,
+                       choices=['aged_gender', 'mood', 'both'],
+                       default='aged_gender',
+                       help=(
+                           'Inference mode (default: aged_gender). '
+                           '"aged_gender"=run --model only, '
+                           '"mood"=run --mood-model only, '
+                           '"both"=run mood then aged_gender on same images'
+                       ))
+    parser.add_argument('--input', type=str, required=True,
+                       help='Path to input image or folder containing images')
+    parser.add_argument('--output', type=str, default='./reports',
+                       help='Output directory for reports (default: ./reports)')
+    parser.add_argument('--device', type=str, choices=['cuda', 'cpu'],
+                       default='cuda' if torch.cuda.is_available() else 'cpu',
+                       help='Device to use — works on both desktop GPU and Jetson Nano')
+    parser.add_argument('--recursive', action='store_true',
+                       help='Search images recursively in input folder')
+    parser.add_argument('--save-vis', action='store_true',
+                       help='Save annotated images to the report output directory')
+    parser.add_argument('--format', type=str, choices=['json', 'md', 'html', 'all'],
+                       default='all', help='Report format (default: all)')
+
+    args = parser.parse_args()
+
+    # ── Validate required paths based on mode ──────────────────────────────────
+    if args.mode in ('aged_gender', 'both') and not args.model:
+        print("Error: --model is required for mode 'aged_gender' or 'both'")
+        sys.exit(1)
+    if args.mode in ('mood', 'both') and not args.mood_model:
+        print("Error: --mood-model is required for mode 'mood' or 'both'")
+        sys.exit(1)
+
+    for path_attr, label in [('model', 'age/gender model'),
+                              ('mood_model', 'mood model')]:
+        p = getattr(args, path_attr)
+        if p and not os.path.exists(p):
+            print(f"Error: {label} file not found: {p}")
+            sys.exit(1)
+
+    if not os.path.exists(args.input):
+        print(f"Error: Input path not found: {args.input}")
+        sys.exit(1)
+
+    os.makedirs(args.output, exist_ok=True)
+
+    # ── Execute chosen mode ────────────────────────────────────────────────────
+    mood_analyzer = None
+    ag_analyzer   = None
+
+    if args.mode == 'aged_gender':
+        print(f"\nMode: aged_gender | Device: {args.device}")
+        ag_analyzer = _run_single_mode(args.model, args, 'aged_gender')
+
+    elif args.mode == 'mood':
+        print(f"\nMode: mood | Device: {args.device}")
+        print(f"Classes: {MOOD_CLASSES}")
+        mood_analyzer = _run_single_mode(args.mood_model, args, 'mood')
+
+    elif args.mode == 'both':
+        print(f"\nMode: both | Device: {args.device}")
+        print(f"Step 1/2 — Mood model ({MOOD_CLASSES})")
+        mood_analyzer = _run_single_mode(args.mood_model, args, 'mood')
+
+        print(f"\nStep 2/2 — Age/Gender model")
+        ag_analyzer = _run_single_mode(args.model, args, 'aged_gender')
+
+        # ── Combined summary ──────────────────────────────────────────────────
+        print(f"\n{'='*60}")
+        print("COMBINED SUMMARY")
+        print(f"{'='*60}")
+        headers = f"  {'Model':<22} {'FPS':>7} {'Avg ms':>8} {'Avg Conf':>10}"
+        print(headers)
+        print("  " + "-" * (len(headers) - 2))
+        for label, an in [("Mood-YOLO", mood_analyzer),
+                           ("AgedGender-YOLO", ag_analyzer)]:
+            if an is None:
+                continue
+            stats = an.results.get('inference_stats', {})
+            cls_r = an.results.get('classification_report', {})
+            fps    = stats.get('fps', 0)
+            avg_ms = stats.get('avg_time_ms', 0)
+            conf   = cls_r.get('avg_confidence', 0)
+            print(f"  {label:<22} {fps:>7.1f} {avg_ms:>8.2f} {conf:>10.4f}")
+        print(f"{'='*60}")
+
     print(f"\n{'='*60}")
     print("Analysis Complete!")
     print(f"{'='*60}")
-    
+
     cleanup()
     os._exit(0)
+
 
 if __name__ == "__main__":
     main()
