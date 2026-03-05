@@ -65,7 +65,6 @@ Used to compare the performance (FPS, memory usage, confidence) of different mod
 
 ```bash
 python3 compare_models.py \
-    --model-yolo "best.pt" \
     --model-gender-age "best_checkpoint.pth" \
     --model-mood "best mood.pt" \
     --images ./images \
