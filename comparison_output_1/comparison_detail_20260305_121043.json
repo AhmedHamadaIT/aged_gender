@@ -1,0 +1,133 @@
+{
+  "GenderAge-MobileNetV3": {
+    "inference_metrics": {
+      "model_name": "GenderAge-MobileNetV3",
+      "model_file": "best_checkpoint.pth",
+      "format": "PTH",
+      "size_mb": 21.42,
+      "fps": 36.94,
+      "avg_time_ms": 21.34,
+      "peak_mem_mb": 145.68,
+      "total_time_s": 2.71,
+      "gpu_util_pct": 0.0,
+      "gpu_mem_total_mb": 15655.5,
+      "gpu_mem_alloc_mb": 15.29,
+      "gpu_mem_cached_mb": 158.0,
+      "cpu_usage_pct": 12.7,
+      "ram_usage_pct": 14.2
+    },
+    "run_summary": {
+      "total_images": 100,
+      "total_time_s": 2.71,
+      "avg_time_ms": 21.34,
+      "fps": 36.94,
+      "avg_cpu_pct": 12.7,
+      "avg_ram_pct": 14.2,
+      "avg_gpu_util_pct": 0.0
+    },
+    "system_memory": {
+      "ram_total_gb": 15.29,
+      "ram_available_gb": 12.75,
+      "ram_used_pct": 16.6,
+      "gpu_mem_total_mb": 15655.5,
+      "gpu_mem_alloc_mb": 15.29,
+      "gpu_mem_cached_mb": 158.0,
+      "peak_infer_mem_mb": 145.68
+    },
+    "class_results": [
+      {
+        "class": "Male_MiddleAged",
+        "count": 36,
+        "pct_of_total": 36.0
+      },
+      {
+        "class": "Female_MiddleAged",
+        "count": 31,
+        "pct_of_total": 31.0
+      },
+      {
+        "class": "Male_YoungAdult",
+        "count": 24,
+        "pct_of_total": 24.0
+      },
+      {
+        "class": "Female_YoungAdult",
+        "count": 3,
+        "pct_of_total": 3.0
+      },
+      {
+        "class": "Female_OldAged",
+        "count": 3,
+        "pct_of_total": 3.0
+      },
+      {
+        "class": "Female_Child",
+        "count": 1,
+        "pct_of_total": 1.0
+      },
+      {
+        "class": "Male_OldAged",
+        "count": 1,
+        "pct_of_total": 1.0
+      },
+      {
+        "class": "Male_Child",
+        "count": 1,
+        "pct_of_total": 1.0
+      }
+    ]
+  },
+  "Mood-YOLO": {
+    "inference_metrics": {
+      "model_name": "Mood-YOLO",
+      "model_file": "best mood.pt",
+      "format": "PT",
+      "size_mb": 10.52,
+      "fps": 53.82,
+      "avg_time_ms": 16.15,
+      "peak_mem_mb": 148.62,
+      "total_time_s": 1.86,
+      "gpu_util_pct": 0.0,
+      "gpu_mem_total_mb": 15655.5,
+      "gpu_mem_alloc_mb": 19.78,
+      "gpu_mem_cached_mb": 182.0,
+      "cpu_usage_pct": 11.6,
+      "ram_usage_pct": 16.6
+    },
+    "run_summary": {
+      "total_images": 100,
+      "total_time_s": 1.86,
+      "avg_time_ms": 16.15,
+      "fps": 53.82,
+      "avg_cpu_pct": 11.6,
+      "avg_ram_pct": 16.6,
+      "avg_gpu_util_pct": 0.0
+    },
+    "system_memory": {
+      "ram_total_gb": 15.29,
+      "ram_available_gb": 12.75,
+      "ram_used_pct": 16.6,
+      "gpu_mem_total_mb": 15655.5,
+      "gpu_mem_alloc_mb": 19.78,
+      "gpu_mem_cached_mb": 182.0,
+      "peak_infer_mem_mb": 148.62
+    },
+    "class_results": [
+      {
+        "class": "neutral",
+        "count": 51,
+        "pct_of_total": 51.0
+      },
+      {
+        "class": "positive",
+        "count": 26,
+        "pct_of_total": 26.0
+      },
+      {
+        "class": "negative",
+        "count": 23,
+        "pct_of_total": 23.0
+      }
+    ]
+  }
+}
