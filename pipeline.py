@@ -24,6 +24,12 @@ import numpy as np
 
 from utils import resize, annotate, save_frame
 
+from logger.logger_config import Logger
+import os
+from dotenv import load_dotenv
+load_dotenv()
+logger = Logger.get_logger(__name__)
+
 
 class CameraPipeline:
     """
@@ -59,7 +65,7 @@ class CameraPipeline:
         # Instantiate all services fresh inside this process
         services = [cls() for cls in self._service_classes]
 
-        print(f"[{self.camera_id}] Pipeline started with services: "
+        log.info(f"[{self.camera_id}] Pipeline started with services: "
               f"{[cls.__name__ for cls in self._service_classes]}")
 
         fps_counter = 0
@@ -127,8 +133,8 @@ class CameraPipeline:
         except Exception as e:
             state = self.shared_state[self.camera_id]
             self.shared_state[self.camera_id] = {**state, "error": str(e), "running": False}
-            print(f"[{self.camera_id}] Pipeline error: {e}")
+            log.info(f"[{self.camera_id}] Pipeline error: {e}")
         finally:
             state = self.shared_state[self.camera_id]
             self.shared_state[self.camera_id] = {**state, "running": False}
-            print(f"[{self.camera_id}] Pipeline stopped. Frames: {frame_count}")
+            log.info(f"[{self.camera_id}] Pipeline stopped. Frames: {frame_count}")

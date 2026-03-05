@@ -19,6 +19,12 @@ from ultralytics import YOLO
 
 load_dotenv()
 
+from logger.logger_config import Logger
+import os
+from dotenv import load_dotenv
+load_dotenv()
+logger = Logger.get_logger(__name__)
+
 
 # ─────────────────────────────────────────────
 # Detection result
@@ -83,15 +89,15 @@ class DetectorService:
         _classes_raw = os.getenv("FILTER_CLASSES", "")
         self.classes = [int(c.strip()) for c in _classes_raw.split(",") if c.strip()] or None
 
-        print(f"[DETECTOR] Loading : {model_path}")
-        print(f"[DETECTOR] Device  : {self.device}")
-        print(f"[DETECTOR] Conf    : {self.conf}")
-        print(f"[DETECTOR] Classes : {self.classes or 'All'}")
+        log.info(f"[DETECTOR] Loading : {model_path}")
+        log.info(f"[DETECTOR] Device  : {self.device}")
+        log.info(f"[DETECTOR] Conf    : {self.conf}")
+        log.info(f"[DETECTOR] Classes : {self.classes or 'All'}")
 
         self.model = YOLO(model_path)
         self.names = self.model.names
 
-        print(f"[DETECTOR] Ready — {len(self.names)} classes\n")
+        log.info(f"[DETECTOR] Ready — {len(self.names)} classes\n")
 
     def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
         frame   = context["frame"]

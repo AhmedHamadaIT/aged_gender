@@ -17,6 +17,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from logger.logger_config import Logger
+import os
+from dotenv import load_dotenv
+load_dotenv()
+logger = Logger.get_logger(__name__)
+
 USE_STREAM  = os.getenv("USE_STREAM",   "True").lower() in ("true", "1", "yes")
 RTSP_URL    = os.getenv("CAMERA_1_URL", "")
 INPUT_VIDEO = os.getenv("INPUT_VIDEO",  "./videos/sample.mp4")
@@ -29,7 +35,7 @@ class _RTSPReader:
 
     def connect(self):
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-        print(f"[STREAM] Connecting: {self.url}")
+        log.info(f"[STREAM] Connecting: {self.url}")
         self.cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if not self.cap.isOpened():
@@ -37,7 +43,7 @@ class _RTSPReader:
         w   = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h   = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = self.cap.get(cv2.CAP_PROP_FPS)
-        print(f"[STREAM] Connected — {w}x{h} @ {fps:.1f}fps")
+        log.info(f"[STREAM] Connected — {w}x{h} @ {fps:.1f}fps")
 
     def read_frame(self):
         ret, frame = self.cap.read()
@@ -54,7 +60,7 @@ class _VideoReader:
         self.cap  = None
 
     def connect(self):
-        print(f"[VIDEO] Opening: {self.path}")
+        log.info(f"[VIDEO] Opening: {self.path}")
         self.cap = cv2.VideoCapture(self.path)
         if not self.cap.isOpened():
             raise RuntimeError(f"[VIDEO] Cannot open: {self.path}")
@@ -92,7 +98,7 @@ def frames(source: str = None):
                 consecutive_fails += 1
                 if consecutive_fails >= max_fails:
                     if is_rtsp:
-                        print(f"[STREAM] Reconnecting...")
+                        log.info(f"[STREAM] Reconnecting...")
                         reader.release()
                         time.sleep(2)
                         reader.connect()
