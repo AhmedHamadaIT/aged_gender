@@ -204,8 +204,7 @@ def load_gender_age_model(checkpoint_path: str, device: str = "cpu") -> nn.Modul
 
         print("  [DEBUG] All state_dicts loaded successfully.", flush=True)
 
-        # Free the raw checkpoint bytes immediately — saves ~22 MB on Jetson
-        del backbone_sd, neck_sd, gender_head_sd, age_head_sd, state_dict, raw
+        # (Removed manual del to prevent Jetson glibc memory corruption prior to CUDA init)
 
         for name, miss, unex in [
             ("backbone",    miss_b, unex_b),
