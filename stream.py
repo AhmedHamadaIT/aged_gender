@@ -21,7 +21,7 @@ from logger.logger_config import Logger
 import os
 from dotenv import load_dotenv
 load_dotenv()
-logger = Logger.get_logger(__name__)
+log = Logger.get_logger(__name__)
 
 USE_STREAM  = os.getenv("USE_STREAM",   "True").lower() in ("true", "1", "yes")
 RTSP_URL    = os.getenv("CAMERA_1_URL", "")

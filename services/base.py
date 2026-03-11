@@ -1,19 +1,21 @@
 """
-services/base.py
-----------------
-BaseService — base class for all services.
-Services are callable and implement __call__().
+services/__init__.py
+--------------------
+Service registry — maps .env names to service classes.
+
+To add a new service:
+  1. Create services/your_service.py
+  2. Import it here and add to REGISTRY
+  3. Add its name to PIPELINE in .env
 """
 
+from .detector import DetectorService
 
-class BaseService:
-    """
-    Base class for all services.
+# from .counter import CounterService
+# from .tracker import TrackerService
 
-    Each service implements __call__() with its own signature.
-    Services are stateless by default — instantiated per call
-    or once and reused depending on the resource.
-    """
-
-    def __call__(self, *args, **kwargs):
-        raise NotImplementedError("Subclasses must implement __call__()")
+REGISTRY = {
+    "detector": DetectorService,
+    # "counter" : CounterService,
+    # "tracker" : TrackerService,
+}

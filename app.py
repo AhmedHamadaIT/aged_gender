@@ -20,6 +20,12 @@ from services.detector import DetectorService
 # from services.counter import CounterService
 # from services.tracker import TrackerService
 
+from logger.logger_config import Logger
+import os
+from dotenv import load_dotenv
+load_dotenv()
+log = Logger.get_logger(__name__)
+
 app = FastAPI(title="YOLO Detection API", version="1.0.0")
 
 
@@ -43,9 +49,9 @@ def build_pipeline(camera_id, rtsp_url, shared_state, stop_event):
 # ─────────────────────────────────────────────
 @app.on_event("startup")
 def startup():
-    print("[APP] Configuring pipeline...")
+    log.info("[APP] Configuring pipeline...")
     detection.set_pipeline(build_pipeline)
-    print("[APP] Ready.")
+    log.info("[APP] Ready.")
 
 
 # ─────────────────────────────────────────────

@@ -3,10 +3,16 @@ services/detector.py
 --------------------
 YOLO detection service.
 
-Reads frame from context, adds detections to context.
+Reads frame from context["data"]["frame"], writes detections to context["data"]["detection"].
 
-Input context:  {"frame": np.ndarray, ...}
-Output context: {"frame": np.ndarray, "detections": List[Detection], ...}
+Context structure:
+{
+    "data": {
+        "frame"    : np.ndarray,
+        "detection": { "items": List[Detection], "count": int },
+        "use_case" : {}   ← filled by downstream services
+    }
+}
 """
 
 import os
@@ -17,13 +23,11 @@ import numpy as np
 from dotenv import load_dotenv
 from ultralytics import YOLO
 
-load_dotenv()
-
 from logger.logger_config import Logger
 import os
 from dotenv import load_dotenv
 load_dotenv()
-logger = Logger.get_logger(__name__)
+log = Logger.get_logger(__name__)
 
 
 # ─────────────────────────────────────────────
@@ -57,13 +61,13 @@ class Detection:
 
     def to_dict(self):
         return {
-            "bbox"       : list(self.bbox),
-            "class_id"   : self.class_id,
-            "class_name" : self.class_name,
-            "confidence" : round(self.confidence, 4),
-            "center"     : list(self.center),
-            "width"      : self.width,
-            "height"     : self.height,
+            "bbox"      : list(self.bbox),
+            "class_id"  : self.class_id,
+            "class_name": self.class_name,
+            "confidence": round(self.confidence, 4),
+            "center"    : list(self.center),
+            "width"     : self.width,
+            "height"    : self.height,
         }
 
 
@@ -74,11 +78,14 @@ class DetectorService:
     """
     YOLO object detection service.
 
-    Reads "frame" from context dict, appends "detections".
+    Reads  context["data"]["frame"]
+    Writes context["data"]["detection"]
 
-    Usage in pipeline:
-        context = detector(context)
-        detections = context["detections"]
+    Output detection structure:
+    {
+        "items": List[Detection],
+        "count": int
+    }
     """
 
     def __init__(self):
@@ -94,13 +101,13 @@ class DetectorService:
         log.info(f"[DETECTOR] Conf    : {self.conf}")
         log.info(f"[DETECTOR] Classes : {self.classes or 'All'}")
 
-        self.model = YOLO(model_path)
+        self.model = YOLO(model_path, task='detect')
         self.names = self.model.names
 
         log.info(f"[DETECTOR] Ready — {len(self.names)} classes\n")
 
     def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        frame   = context["frame"]
+        frame   = context["data"]["frame"]
         results = self.model.predict(
             frame,
             conf    = self.conf,
@@ -126,7 +133,11 @@ class DetectorService:
                     confidence=score,
                 ))
 
-        return {**context, "detections": detections}
+        context["data"]["detection"] = {
+            "items": detections,
+            "count": len(detections),
+        }
+        return context
 
 
 YOLODetector = DetectorService

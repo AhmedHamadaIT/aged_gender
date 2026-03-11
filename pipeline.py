@@ -3,16 +3,13 @@ pipeline.py
 -----------
 CameraPipeline — runs inside each camera process.
 
-Each frame flows through all registered services in order.
-Results from each service are passed as context to the next.
-
-Pipeline context per frame:
+Context structure passed between services:
 {
-    "frame"      : np.ndarray,
-    "detections" : List[Detection],   ← set by DetectorService
-    "counts"     : dict,              ← set by CountingService (future)
-    "tracks"     : dict,              ← set by TrackingService (future)
-    ...
+    "data": {
+        "frame"    : np.ndarray,          ← raw frame
+        "detection": { "items": [...], "count": N },   ← set by DetectorService
+        "use_case" : {}                   ← set by downstream use-case services
+    }
 }
 """
 
@@ -20,15 +17,13 @@ import os
 import time
 from typing import List, Type
 
-import numpy as np
-
 from utils import resize, annotate, save_frame
 
 from logger.logger_config import Logger
 import os
 from dotenv import load_dotenv
 load_dotenv()
-logger = Logger.get_logger(__name__)
+log = Logger.get_logger(__name__)
 
 
 class CameraPipeline:
@@ -62,28 +57,24 @@ class CameraPipeline:
         """Start the pipeline loop. Blocks until stop_event is set."""
         from stream import frames
 
-        # Instantiate all services fresh inside this process
-        services = [cls() for cls in self._service_classes]
-
-        log.info(f"[{self.camera_id}] Pipeline started with services: "
-              f"{[cls.__name__ for cls in self._service_classes]}")
-
+        services   = [cls() for cls in self._service_classes]
         fps_counter = 0
         fps_timer   = time.time()
         started_at  = time.time()
         frame_count = 0
         fps         = 0.0
 
+        log.info(f"[{self.camera_id}] Pipeline started — "
+              f"services: {[cls.__name__ for cls in self._service_classes]}")
+
         self.shared_state[self.camera_id] = {
-            "camera_id"       : self.camera_id,
-            "rtsp_url"        : self.rtsp_url,
-            "running"         : True,
-            "frame_count"     : 0,
-            "fps"             : 0.0,
-            "last_detections" : 0,
-            "total_detections": 0,
-            "uptime_seconds"  : 0.0,
-            "error"           : None,
+            "camera_id"    : self.camera_id,
+            "rtsp_url"     : self.rtsp_url,
+            "running"      : True,
+            "frame_count"  : 0,
+            "fps"          : 0.0,
+            "uptime_seconds": 0.0,
+            "error"        : None,
         }
 
         if self.save_output:
@@ -103,38 +94,43 @@ class CameraPipeline:
                     fps_counter = 0
                     fps_timer   = time.time()
 
-                # ── Resize ──
-                infer_frame = resize(frame, self.width, self.height)
+                # ── Build initial context ──
+                context = {
+                    "data": {
+                        "frame"    : resize(frame, self.width, self.height),
+                        "detection": {},
+                        "use_case" : {},
+                    }
+                }
 
-                # ── Run pipeline ──
-                context = {"frame": infer_frame}
+                # ── Run all services ──
                 for service in services:
                     context = service(context)
 
-                # ── Extract detection count for status ──
-                detections = context.get("detections", [])
-
                 # ── Save annotated frame ──
                 if self.save_output:
-                    annotated = annotate(infer_frame, detections, fps, self.camera_id)
+                    detections = context["data"].get("detection", {}).get("items", [])
+                    annotated  = annotate(context["data"]["frame"], detections, fps, self.camera_id)
                     save_frame(annotated, self.out_dir, frame_count)
 
                 # ── Update shared state ──
-                state = self.shared_state[self.camera_id]
                 self.shared_state[self.camera_id] = {
-                    **state,
-                    "frame_count"     : frame_count,
-                    "fps"             : fps,
-                    "last_detections" : len(detections),
-                    "total_detections": state["total_detections"] + len(detections),
-                    "uptime_seconds"  : round(time.time() - started_at, 1),
+                    **self.shared_state[self.camera_id],
+                    "frame_count"  : frame_count,
+                    "fps"          : fps,
+                    "uptime_seconds": round(time.time() - started_at, 1),
                 }
 
         except Exception as e:
-            state = self.shared_state[self.camera_id]
-            self.shared_state[self.camera_id] = {**state, "error": str(e), "running": False}
+            self.shared_state[self.camera_id] = {
+                **self.shared_state[self.camera_id],
+                "error"  : str(e),
+                "running": False,
+            }
             log.info(f"[{self.camera_id}] Pipeline error: {e}")
         finally:
-            state = self.shared_state[self.camera_id]
-            self.shared_state[self.camera_id] = {**state, "running": False}
+            self.shared_state[self.camera_id] = {
+                **self.shared_state[self.camera_id],
+                "running": False,
+            }
             log.info(f"[{self.camera_id}] Pipeline stopped. Frames: {frame_count}")
