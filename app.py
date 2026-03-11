@@ -4,21 +4,25 @@ app.py
 Application entry point.
 Owns all routes, startup, and pipeline composition.
 
-To add a new service: import it and add pipeline.register() below.
+Pipeline services are driven entirely by .env:
+    PIPELINE=detector,age_gender
+
+To add a new service:
+    1. Create services/your_service.py
+    2. Add to REGISTRY in services/__init__.py
+    3. Add name to PIPELINE in .env
+    4. Restart container
 
 Run with:
-  uvicorn app:app --host 0.0.0.0 --port 9000
+    uvicorn app:app --host 0.0.0.0 --port 9000
 """
 
+import os
 from fastapi import FastAPI
 from pipeline import CameraPipeline
 from schemas import DetectionRequest, DetectionStatus
 from apis.detection import detection
-from services.detector import DetectorService
 
-# Register future services here:
-# from services.counter import CounterService
-# from services.tracker import TrackerService
 
 from logger.logger_config import Logger
 import os
@@ -26,22 +30,28 @@ from dotenv import load_dotenv
 load_dotenv()
 log = Logger.get_logger(__name__)
 
-app = FastAPI(title="YOLO Detection API", version="1.0.0")
+
+app = FastAPI(title="Vision Pipeline API", version="1.0.0")
 
 
 # ─────────────────────────────────────────────
-# Pipeline factory
-# Called once per camera process on start
+# Pipeline factory — called once per camera process on start
 # ─────────────────────────────────────────────
 def build_pipeline(camera_id, rtsp_url, shared_state, stop_event):
-    pipeline = CameraPipeline(camera_id, rtsp_url, shared_state, stop_event)
+    from services import REGISTRY
 
-    # ── Register services in order ────────────
-    pipeline.register(DetectorService)
-    # pipeline.register(CounterService)
-    # pipeline.register(TrackerService)
+    names        = [n.strip() for n in os.getenv("PIPELINE").split(",")]
+    cam_pipeline = CameraPipeline(camera_id, rtsp_url, shared_state, stop_event)
 
-    pipeline.run()
+    for name in names:
+        if name not in REGISTRY:
+            raise ValueError(
+                f"[APP] Unknown service '{name}'. "
+                f"Available: {list(REGISTRY.keys())}"
+            )
+        cam_pipeline.register(REGISTRY[name])
+
+    cam_pipeline.run()
 
 
 # ─────────────────────────────────────────────
@@ -49,9 +59,10 @@ def build_pipeline(camera_id, rtsp_url, shared_state, stop_event):
 # ─────────────────────────────────────────────
 @app.on_event("startup")
 def startup():
-    log.info("[APP] Configuring pipeline...")
+    print("[APP] Configuring pipeline...")
     detection.set_pipeline(build_pipeline)
-    log.info("[APP] Ready.")
+    print(f"[APP] Services : {os.getenv('PIPELINE', 'detector')}")
+    print("[APP] Ready.")
 
 
 # ─────────────────────────────────────────────
@@ -59,7 +70,11 @@ def startup():
 # ─────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"service": "YOLO Detection API", "version": "1.0.0"}
+    return {
+        "service" : "Vision Pipeline API",
+        "version" : "1.0.0",
+        "pipeline": os.getenv("PIPELINE", "detector").split(","),
+    }
 
 
 # ─────────────────────────────────────────────

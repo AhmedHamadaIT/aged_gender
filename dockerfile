@@ -50,7 +50,8 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         seaborn \
         matplotlib \
         py-cpuinfo \
-        fastapi \        
+        fastapi \   
+        onnxruntime \     
         "uvicorn[standard]"
 
 # ── Create directories ───────────────────────
