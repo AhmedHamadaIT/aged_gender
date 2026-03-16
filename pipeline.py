@@ -8,34 +8,52 @@ Context structure passed between services:
     "data": {
         "frame"    : np.ndarray,
         "detection": {"items": List[Detection], "count": int},
-        "use_case" : {}   ← filled by downstream services
+        "use_case" : {}
+    }
+}
+
+Each frame result is pushed to the shared result_queue as:
+{
+    "camera_id"  : str,
+    "frame_count": int,
+    "timestamp"  : str,
+    "frame"      : str,   ← base64 encoded raw JPEG (before annotation)
+    "data": {
+        "detection": {"items": [...], "count": N},
+        "use_case" : {...}
     }
 }
 """
 
 import os
 import time
+import base64
+import json
+from datetime import datetime
 from typing import List, Type
+
+import cv2
+import numpy as np
 
 from utils import resize, save_frame
 
 
 class CameraPipeline:
-    """
-    Runs all registered services on each frame for a single camera.
-
-    Usage:
-        pipeline = CameraPipeline(camera_id, rtsp_url, shared_state, stop_event)
-        pipeline.register(DetectorService)
-        pipeline.register(AgeGenderService)
-        pipeline.run()
-    """
-
-    def __init__(self, camera_id: str, rtsp_url: str, shared_state, stop_event):
-        self.camera_id    = camera_id
-        self.rtsp_url     = rtsp_url
-        self.shared_state = shared_state
-        self.stop_event   = stop_event
+    def __init__(
+        self,
+        camera_id   : str,
+        rtsp_url    : str,
+        shared_state,
+        stop_event,
+        result_queue,
+        pipeline_names: List[str],
+    ):
+        self.camera_id      = camera_id
+        self.rtsp_url       = rtsp_url
+        self.shared_state   = shared_state
+        self.stop_event     = stop_event
+        self.result_queue   = result_queue
+        self.pipeline_names = pipeline_names
         self._service_classes: List[Type] = []
 
         self.save_output = os.getenv("SAVE_OUTPUT", "True").lower() in ("true", "1", "yes")
@@ -44,11 +62,9 @@ class CameraPipeline:
         self.height      = int(os.getenv("HEIGHT", "0"))
 
     def register(self, service_class: Type):
-        """Register a service class to run on each frame."""
         self._service_classes.append(service_class)
 
     def run(self):
-        """Start the pipeline loop. Blocks until stop_event is set."""
         from stream import frames
 
         services    = [cls() for cls in self._service_classes]
@@ -90,23 +106,58 @@ class CameraPipeline:
                     fps_counter = 0
                     fps_timer   = time.time()
 
-                # ── Build context for this frame ──
+                resized_frame = resize(frame, self.width, self.height)
+
+                # ── Encode raw frame as base64 BEFORE annotation ──
+                _, buf      = cv2.imencode(".jpg", resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                frame_b64   = base64.b64encode(buf).decode("utf-8")
+
+                # ── Build context ──
                 context = {
                     "data": {
-                        "frame"    : resize(frame, self.width, self.height),
+                        "frame"    : resized_frame.copy(),
                         "detection": {},
                         "use_case" : {},
                     }
                 }
 
-                # ── Run all services in order ──
+                # ── Run all services ──
                 for service in services:
                     context = service(context)
 
                 # ── Save annotated frame ──
-                # Services draw onto context["data"]["frame"] directly
                 if self.save_output:
                     save_frame(context["data"]["frame"], self.out_dir, frame_count)
+
+                # ── Build result payload ──
+                detection_data = context["data"].get("detection", {})
+                use_case_data  = context["data"].get("use_case",  {})
+
+                result = {
+                    "camera_id"  : self.camera_id,
+                    "frame_count": frame_count,
+                    "timestamp"  : datetime.utcnow().isoformat(),
+                    "frame"      : frame_b64,
+                    "data": {
+                        "detection": {
+                            "count": detection_data.get("count", 0),
+                            "items": [
+                                d.to_dict()
+                                for d in detection_data.get("items", [])
+                            ],
+                        },
+                        "use_case": {
+                            k: [r.to_dict() for r in v] if isinstance(v, list) else v
+                            for k, v in use_case_data.items()
+                        },
+                    },
+                }
+
+                # ── Push to result queue ──
+                try:
+                    self.result_queue.put_nowait(result)
+                except Exception:
+                    pass  # drop frame if queue is full — never block inference
 
                 # ── Update shared state ──
                 self.shared_state[self.camera_id] = {

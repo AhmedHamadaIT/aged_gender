@@ -1,30 +1,38 @@
 """
 apis/detection.py
 -----------------
-Multi-camera detection resource.
-Each camera runs a CameraPipeline in its own process.
-Pipeline composition is handled in app.py.
+Detection resource — manages camera processes and result streaming.
+
+Routes registered in app.py:
+    POST /detection/setup   → configure pipeline services
+    POST /detection/start   → start cameras
+    POST /detection/stop    → stop cameras
+    GET  /detection/status  → current status of all cameras
+    GET  /detection/stream  → SSE stream of frame results
 """
 
-import os
 import multiprocessing
-from typing import Dict, Optional, Callable
+import queue
+from typing import Dict, Optional, Callable, List
 
 from fastapi import HTTPException
-from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from apis.base import BaseResource
+from apis.cameras import camera_registry
 from schemas import DetectionRequest, DetectionStatus, CameraStatus
 
-load_dotenv()
 
-NUM_CAMERAS = int(os.getenv("NUM_CAMERAS", "1"))
-CAMERAS     = {
-    f"cam{i}": os.getenv(f"CAMERA_{i}_URL", "")
-    for i in range(1, NUM_CAMERAS + 1)
-}
+# ─────────────────────────────────────────────
+# Setup schema
+# ─────────────────────────────────────────────
+class DetectionSetupRequest(BaseModel):
+    pipeline: List[str]   # e.g. ["detector", "age_gender"]
 
 
+# ─────────────────────────────────────────────
+# Detection resource
+# ─────────────────────────────────────────────
 class DetectionResource(BaseResource):
     def __init__(self):
         super().__init__()
@@ -33,21 +41,36 @@ class DetectionResource(BaseResource):
             "stop"    : self._stop,
             "stop_all": self._stop_all,
         }
-        self._manager      = multiprocessing.Manager()
-        self._shared_state = self._manager.dict()
-        self._processes    : Dict[str, multiprocessing.Process] = {}
-        self._stop_events  : Dict[str, multiprocessing.Event]   = {}
-        self._pipeline_fn  : Optional[Callable] = None   # set from app.py
-
-    def init(self):
-        pass
+        self._manager        = multiprocessing.Manager()
+        self._shared_state   = self._manager.dict()
+        self._result_queue   = self._manager.Queue()   # frames + results from all cameras
+        self._processes      : Dict[str, multiprocessing.Process] = {}
+        self._stop_events    : Dict[str, multiprocessing.Event]   = {}
+        self._pipeline_fn    : Optional[Callable] = None
+        self._pipeline_names : List[str] = []
 
     def set_pipeline(self, fn: Callable):
-        """
-        Register the pipeline factory function from app.py.
-        fn signature: (camera_id, rtsp_url, shared_state, stop_event) -> None
-        """
+        """Set the pipeline factory function from app.py."""
         self._pipeline_fn = fn
+
+    # ── Setup ────────────────────────────────
+
+    def on_setup(self, req: DetectionSetupRequest):
+        """Configure which services run in the pipeline."""
+        from services import REGISTRY
+        unknown = [n for n in req.pipeline if n not in REGISTRY]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown services: {unknown}. Available: {list(REGISTRY.keys())}"
+            )
+        self._pipeline_names = req.pipeline
+        return {
+            "status"  : "configured",
+            "pipeline": self._pipeline_names,
+        }
+
+    # ── Start / Stop ─────────────────────────
 
     def on_post(self, req: DetectionRequest):
         return self.get_service(req.action)(req.camera_id)
@@ -58,25 +81,39 @@ class DetectionResource(BaseResource):
             for cam_id, cam_state in self._shared_state.items()
         })
 
-    # ── Actions ──────────────────────────────
-
     def _start(self, camera_id: Optional[str] = None):
         if self._pipeline_fn is None:
-            raise HTTPException(status_code=500, detail="Pipeline not configured. Call set_pipeline() in app.py.")
+            raise HTTPException(status_code=500, detail="Pipeline not configured.")
+        if not self._pipeline_names:
+            raise HTTPException(status_code=400, detail="No pipeline configured. Call POST /detection/setup first.")
 
-        targets = [camera_id] if camera_id else list(CAMERAS.keys())
+        cameras = camera_registry.all()
+        if not cameras:
+            raise HTTPException(status_code=400, detail="No cameras configured. Call POST /cameras first.")
+
+        targets = [camera_id] if camera_id else list(cameras.keys())
         started = []
 
         for cam_id in targets:
-            if cam_id not in CAMERAS:
-                raise HTTPException(status_code=404, detail=f"Unknown camera '{cam_id}'. Available: {list(CAMERAS.keys())}")
+            if cam_id not in cameras:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Camera '{cam_id}' not found. Available: {list(cameras.keys())}"
+                )
             if cam_id in self._processes and self._processes[cam_id].is_alive():
                 raise HTTPException(status_code=409, detail=f"Camera '{cam_id}' already running.")
 
             stop_event = self._manager.Event()
             process    = multiprocessing.Process(
                 target=self._pipeline_fn,
-                args=(cam_id, CAMERAS[cam_id], self._shared_state, stop_event),
+                args=(
+                    cam_id,
+                    cameras[cam_id],
+                    self._shared_state,
+                    stop_event,
+                    self._result_queue,
+                    self._pipeline_names,
+                ),
                 daemon=True,
             )
             self._stop_events[cam_id] = stop_event
@@ -87,7 +124,11 @@ class DetectionResource(BaseResource):
         return {"status": "started", "cameras": started}
 
     def _stop(self, camera_id: Optional[str] = None):
-        targets = [camera_id] if camera_id else list(self._processes.keys())
+        running = {k: v for k, v in self._processes.items() if v.is_alive()}
+        if not running:
+            raise HTTPException(status_code=409, detail="No cameras are currently running.")
+
+        targets = [camera_id] if camera_id else list(running.keys())
         stopped = []
 
         for cam_id in targets:
@@ -102,5 +143,11 @@ class DetectionResource(BaseResource):
     def _stop_all(self, _=None):
         return self._stop(None)
 
+    # ── SSE stream ───────────────────────────
 
+    def result_queue(self):
+        return self._result_queue
+
+
+# ── Singleton ─────────────────────────────────
 detection = DetectionResource()
