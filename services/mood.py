@@ -1,7 +1,7 @@
 """
 services/mood.py
 ----------------
-Mood / Emotion service using best_mood.onnx (ONNX export of YOLOv8 3-class model).
+Mood / Emotion service using best_mood.onnx (ONNX export of YOLOv8 3 class model).
 
 Classes:  0=Angry  1=Happy  2=Neutral 
 
@@ -22,8 +22,8 @@ import numpy as np
 MOOD_LABELS = ["Angry", "Happy", "Neutral"]
 
 MOOD_COLORS = {
-    "Angry"   : (50, 50, 255),    # Red in BGR
-    "Happy"   : (0, 215, 255),    # Yellow/Gold in BGR
+    "Angry"   : (50, 50, 255),    # Red 
+    "Happy"   : (0, 215, 255),    # Yellow/Gold 
     "Neutral" : (200, 200, 200),  # Gray
 }
 
