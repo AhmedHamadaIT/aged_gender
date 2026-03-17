@@ -12,6 +12,7 @@ To add a new service:
 
 from .detector   import DetectorService
 from .age_gender import AgeGenderService
+from .mood       import MoodService
 
 # from .counter import CounterService
 # from .tracker import TrackerService
@@ -19,6 +20,7 @@ from .age_gender import AgeGenderService
 REGISTRY = {
     "detector"  : DetectorService,
     "age_gender": AgeGenderService,
+    "mood"      : MoodService,
     # "counter" : CounterService,
     # "tracker" : TrackerService,
 }
