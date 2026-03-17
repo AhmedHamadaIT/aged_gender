@@ -1,7 +1,7 @@
 outputs
-models
 torch*
-videosvenv/
+videos
+venv/
 __pycache__/
 *.resolved
 logger/app.log
