@@ -1,0 +1,324 @@
+# Vision Pipeline API
+**Backend Integration Reference**
+*Version 1.0  •  March 12, 2026*
+
+## Overview
+The Vision Pipeline API is a REST + SSE service running on the Jetson Orin device. It manages multi-camera YOLO object detection and downstream AI services (age/gender classification, mood, etc.). The backend team consumes frame results via a per-camera Server-Sent Events (SSE) stream.
+
+**Base URL**
+`http://<jetson-ip>:9000`
+
+
+## Endpoint Summary
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/` | Health check |
+| `POST` | `/cameras` | Add one or more cameras |
+| `GET` | `/cameras` | List all configured cameras |
+| `DELETE` | `/cameras/{cam_id}` | Remove a camera |
+| `POST` | `/detection/setup` | Configure pipeline services |
+| `POST` | `/detection/start` | Start detection on cameras |
+| `POST` | `/detection/stop` | Stop detection on cameras |
+| `GET` | `/detection/status` | Get live camera status |
+| `GET` | `/detection/stream/{cam_id}` | SSE stream of frame results per camera |
+
+
+## Typical Integration Flow
+1. `POST /cameras` — register camera IDs and RTSP URLs
+2. `POST /detection/setup` — specify which AI services to run
+3. `POST /detection/start` — launch camera processes
+4. `GET /detection/stream/{cam_id}` — open one SSE connection per camera to receive frame results in parallel
+5. `POST /detection/stop` — shut down when done
+
+
+## Camera Endpoints
+
+### `POST /cameras`
+Add one or more cameras. Can be called while detection is running.
+
+**Request Body**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `cameras` | array | Yes | List of camera objects |
+| `cameras[].id` | string | Yes | Unique camera identifier (e.g. cam1) |
+| `cameras[].url` | string | Yes | Full RTSP stream URL |
+
+**cURL Example**
+```bash
+curl -X POST http://<jetson-ip>:9000/cameras \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cameras": [
+      {"id": "cam1", "url": "rtsp://admin:Aa112233@10.0.3.71:554/Streaming/channels/1101"},
+      {"id": "cam2", "url": "rtsp://admin:pass@192.168.1.10:554/Streaming/channels/1401"}
+    ]
+  }'
+```
+
+**Response**
+```json
+{
+  "status": "configured",
+  "cameras": {
+    "cam1": "rtsp://admin:Aa112233@10.0.3.71:554/Streaming/channels/1101",
+    "cam2": "rtsp://admin:pass@192.168.1.10:554/Streaming/channels/1401"
+  }
+}
+```
+
+
+### `GET /cameras`
+Returns all currently configured cameras.
+
+**cURL Example**
+```bash
+curl http://<jetson-ip>:9000/cameras
+```
+
+**Response**
+```json
+{
+  "count": 2,
+  "cameras": [
+    {"id": "cam1", "url": "rtsp://..."},
+    {"id": "cam2", "url": "rtsp://..."}
+  ]
+}
+```
+
+
+### `DELETE /cameras/{cam_id}`
+Remove a camera. Can be called while detection is running.
+
+**Path Parameter**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `cam_id` | string | Yes | Camera ID to remove (e.g. cam1) |
+
+**cURL Example**
+```bash
+curl -X DELETE http://<jetson-ip>:9000/cameras/cam1
+```
+
+**Response**
+```json
+{
+  "status": "removed",
+  "camera_id": "cam1",
+  "remaining": ["cam2"]
+}
+```
+
+
+
+## Detection Endpoints
+
+### `POST /detection/setup`
+Configure which AI services run on each frame. Must be called before starting detection.
+
+**Request Body**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `pipeline` | array of strings | Yes | Ordered list of service names to run on each frame |
+
+**Available services:**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `detector` | string | — | YOLO object detection. Always runs first. |
+| `age_gender` | string | — | Age and gender classification per detected bounding box. |
+| `mood` | string | — | Emotional state classification (Angry, Happy, Neutral) per detection. |
+
+**cURL Example**
+```bash
+curl -X POST http://<jetson-ip>:9000/detection/setup \
+  -H "Content-Type: application/json" \
+  -d '{"pipeline": ["detector", "age_gender", "mood"]}'
+```
+
+**Response**
+```json
+{
+  "status": "configured",
+  "pipeline": ["detector", "age_gender", "mood"]
+}
+```
+
+
+### `POST /detection/start`
+Start detection. Omit `camera_id` to start all configured cameras.
+
+**Query Parameters (optional)**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `camera_id` | string | No | Start a specific camera only. Omit to start all. |
+
+**cURL Example — Start all cameras**
+```bash
+curl -X POST http://<jetson-ip>:9000/detection/start
+```
+
+**cURL Example — Start specific camera**
+```bash
+curl -X POST "http://<jetson-ip>:9000/detection/start?camera_id=cam1"
+```
+
+**Response**
+```json
+{
+  "status": "started",
+  "cameras": ["cam1", "cam2"]
+}
+```
+
+
+### `POST /detection/stop`
+Stop detection. Omit `camera_id` to stop all running cameras.
+
+**Query Parameters (optional)**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `camera_id` | string | No | Stop a specific camera only. Omit to stop all. |
+
+**cURL Example — Stop all cameras**
+```bash
+curl -X POST http://<jetson-ip>:9000/detection/stop
+```
+
+**cURL Example — Stop specific camera**
+```bash
+curl -X POST "http://<jetson-ip>:9000/detection/stop?camera_id=cam1"
+```
+
+**Response**
+```json
+{
+  "status": "stopped",
+  "cameras": ["cam1", "cam2"]
+}
+```
+
+
+### `GET /detection/status`
+Returns the live status of all running camera processes.
+
+**cURL Example**
+```bash
+curl http://<jetson-ip>:9000/detection/status
+```
+
+**Response Fields**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `cameras.{id}.camera_id` | string | — | Camera identifier |
+| `cameras.{id}.rtsp_url` | string | — | RTSP stream URL |
+| `cameras.{id}.running` | boolean | — | Whether the process is active |
+| `cameras.{id}.frame_count` | integer | — | Total frames processed |
+| `cameras.{id}.fps` | float | — | Current frames per second |
+| `cameras.{id}.uptime_seconds` | float | — | Seconds since camera started |
+| `cameras.{id}.error` | string | — | Last error message, or null |
+
+**Response**
+```json
+{
+  "cameras": {
+    "cam1": {
+      "camera_id": "cam1",
+      "rtsp_url": "rtsp://...",
+      "running": true,
+      "frame_count": 1240,
+      "fps": 9.1,
+      "uptime_seconds": 137.4,
+      "error": null
+    }
+  }
+}
+```
+
+
+### `GET /detection/stream/{cam_id}`
+Server-Sent Events (SSE) stream. Opens a persistent connection and emits one JSON event per frame. Each camera has its own dedicated endpoint — open one connection per camera to receive frames in parallel.
+
+**Path Parameter**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `cam_id` | string | Yes | Camera ID to stream (e.g. cam1) |
+
+**cURL Example**
+```bash
+curl -N http://<jetson-ip>:9000/detection/stream/cam1
+```
+
+**Event Fields**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `camera_id` | string | — | Source camera identifier |
+| `frame_count` | integer | — | Sequential frame number |
+| `timestamp` | string | — | UTC ISO 8601 timestamp |
+| `frame` | string | — | Base64-encoded JPEG of the raw unannotated frame |
+| `data.detection.count` | integer | — | Number of objects detected in this frame |
+| `data.detection.items` | array | — | List of detection objects (see below) |
+| `data.use_case.age_gender` | array | — | Age/gender result per detection (if service enabled) |
+| `data.use_case.mood` | array | — | Mood result per detection (if service enabled) |
+
+**Detection Item Fields**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `bbox` | array[4] | — | [x1, y1, x2, y2] pixel coordinates |
+| `class_id` | integer | — | YOLO class index |
+| `class_name` | string | — | YOLO class label (e.g. person, car) |
+| `confidence` | float | — | Detection confidence score (0.0 – 1.0) |
+| `center` | array[2] | — | [cx, cy] center of bounding box |
+| `width` | integer | — | Bounding box width in pixels |
+| `height` | integer | — | Bounding box height in pixels |
+
+**Age/Gender Item Fields**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `bbox` | array[4] | — | Same bounding box as the detection it belongs to |
+| `gender` | string | — | Male or Female |
+| `age_group` | string | — | Young, MiddleAged, Senior, or Elderly |
+| `confidence` | float | — | Gender prediction confidence (0.0 – 1.0) |
+
+**Mood Item Fields**
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `bbox` | array[4] | — | Same bounding box as the detection it belongs to |
+| `mood` | string | — | Angry, Happy, or Neutral |
+| `confidence` | float | — | Emotion prediction confidence (0.0 – 1.0) |
+
+**Example SSE Event**
+```json
+data: {
+  "camera_id": "cam1",
+  "frame_count": 42,
+  "timestamp": "2026-03-08T11:29:47.123456",
+  "frame": "<base64 JPEG string>",
+  "data": {
+    "detection": {
+      "count": 1,
+      "items": [{
+        "bbox": [120, 80, 340, 420],
+        "class_id": 0,
+        "class_name": "person",
+        "confidence": 0.91,
+        "center": [230, 250],
+        "width": 220,
+        "height": 340
+      }]
+    },
+    "use_case": {
+      "age_gender": [{
+        "bbox": [120, 80, 340, 420],
+        "gender": "Female",
+        "age_group": "MiddleAged",
+        "confidence": 0.87
+      }],
+      "mood": [{
+        "bbox": [120, 80, 340, 420],
+        "mood": "Happy",
+        "confidence": 0.94
+      }]
+    }
+  }
+}
+```
