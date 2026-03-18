@@ -2,3 +2,4 @@ outputs
 models
 torch*
 videos
+.vscode
