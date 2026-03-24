@@ -229,6 +229,7 @@ data: {
 #### Test 2: F1 Image (f1.webp) - Complete Test Results
 
 **Input Image**: `f1.webp` (WebP format, 33 KB)
+- **Local annotated version (provided)**: `/home/a7med/Downloads/f1a.png`
 
 **Annotated Output Image with All Detections:**
 
@@ -616,33 +617,6 @@ export MOOD_MODEL="./models/best_mood.onnx"
 
 ---
 
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Issue**: Models not found
-```bash
-# Ensure models directory exists with all files:
-ls -la models/
-# Expected files:
-# best_aged_gender_6.onnx
-# best_mood.onnx
-# yolov8n.pt (or .engine)
-```
-
-**Issue**: CUDA/GPU warning
-```bash
-# Safe to ignore - CPU inference works fine
-# To suppress warnings: export CUDA_VISIBLE_DEVICES=-1
-```
-
-**Issue**: Image decoding error
-```bash
-# Ensure image format is supported (JPG, PNG, WebP, BMP, etc.)
-# Check file type: file your_image.webp
-```
-
----
 
 ## 📋 API Endpoints Summary
 
@@ -676,9 +650,4 @@ http://localhost:8000/docs
 http://localhost:8000/redoc
 ```
 
----
 
-**Last Updated**: March 24, 2026  
-**Branch**: mood  
-**Status**: ✅ Production Ready  
-**Test Version**: 1.0
