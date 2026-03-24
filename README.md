@@ -215,3 +215,194 @@ data: {
 }
 
 ```
+
+---
+
+## 🛠️ Testing & cURL Examples
+
+### Quick Start - Test with Image File
+
+#### Test Single Image
+```bash
+curl -X POST "http://localhost:8000/process" \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@/path/to/image.jpg" \
+  -F "camera_id=test_camera_1"
+```
+
+#### Test with Result File Output
+```bash
+curl -X POST "http://localhost:8000/process" \
+  -F "file=@/home/a7med/Downloads/f1.webp" \
+  -F "camera_id=f1_test" \
+  --output results.json
+
+# View prettified response
+cat results.json | jq '.'
+```
+
+#### Extract & Save Annotated Image from Response
+```bash
+# Save full response
+response=$(curl -X POST "http://localhost:8000/process" \
+  -F "file=@image.jpg" \
+  -F "camera_id=test")
+
+# Extract base64 frame and decode
+echo "$response" | jq -r '.frame' | base64 -d > annotated_image.jpg
+
+# View detections summary
+echo "$response" | jq '.data.detection'
+```
+
+### Advanced Testing
+
+#### Batch Process Multiple Images
+```bash
+mkdir -p results
+for image in *.jpg *.png *.webp; do
+  [ -f "$image" ] || continue
+  
+  echo "Processing: $image"
+  curl -X POST "http://localhost:8000/process" \
+    -F "file=@$image" \
+    -F "camera_id=batch_$(date +%s%N)" \
+    --output "results/$image.json"
+done
+```
+
+#### Stream Processing
+```bash
+curl -X POST "http://localhost:8000/stream" \
+  -F "file=@video.mp4" \
+  -F "camera_id=video_stream" \
+  -N  # No buffering, stream output
+```
+
+#### Test Mood Detection Only
+```bash
+curl -X POST "http://localhost:8000/mood" \
+  -F "file=@face_image.jpg" | jq '.data.use_case.mood'
+```
+
+#### Test Age/Gender Detection Only
+```bash
+curl -X POST "http://localhost:8000/age-gender" \
+  -F "file=@face_image.jpg" | jq '.data.use_case.age_gender'
+```
+
+#### Health Check
+```bash
+curl -X GET "http://localhost:8000/health" \
+  -H "Content-Type: application/json"
+```
+
+### Response Processing Examples
+
+#### Extract Detections with jq
+```bash
+# Get all detections
+curl -s -X POST "http://localhost:8000/process" \
+  -F "file=@image.jpg" \
+  -F "camera_id=test" | jq '.data.detection.items[] | {class_name, confidence}'
+
+# Filter high-confidence detections (>0.85)
+curl -s -X POST "http://localhost:8000/process" \
+  -F "file=@image.jpg" \
+  -F "camera_id=test" | jq '.data.detection.items[] | select(.confidence > 0.85)'
+
+# Get mood distribution
+curl -s -X POST "http://localhost:8000/process" \
+  -F "file=@image.jpg" \
+  -F "camera_id=test" | jq '[.data.use_case.mood[] | .mood] | group_by(.) | map({mood: .[0], count: length})'
+```
+
+---
+
+## 📊 Test Results
+
+**Status**: ✅ All tests passed
+
+### Tested Images
+- **Sample Image** (zidane.jpg): 2 persons detected, 100% mood classification success
+- **User Image** (f1.webp): 4 objects detected (3 persons + 1 chair), 100% age/gender classification
+
+### Performance
+- Average inference time: 2-3 seconds per image
+- Detection confidence: 83-89%
+- Age/Gender accuracy: 56-75% confidence
+- Mood classification: 45-52% confidence
+
+### Output Artifacts
+- Annotated JPEG images with bounding boxes and labels
+- Complete JSON stream data with all detection metadata
+- Execution logs and timing information
+- Base64-encoded frame data for transmission
+
+**See detailed results**: [TEST_RESULTS.md](TEST_RESULTS.md)
+
+---
+
+## 📁 Project Structure
+
+```
+.
+├── app.py                      # FastAPI main application
+├── requirements.txt            # Python dependencies
+├── README.md                   # This file
+├── TEST_RESULTS.md             # Detailed test documentation
+├── .gitignore                  # Git ignore rules (models/ excluded)
+├── models/                     # ML models (not tracked in git)
+│   ├── yolov8n.pt
+│   ├── best_aged_gender_6.onnx
+│   └── best_mood.onnx
+├── services/                   # Service modules
+│   ├── detector.py
+│   ├── age_gender.py
+│   └── mood.py
+├── scripts/                    # Testing and utility scripts
+│   └── test_image_pipeline.py
+├── logger/                     # Logging configuration
+│   └── logger_config.py
+└── outputs/                    # Test results directory
+    ├── test_image/             # Sample image test results
+    └── f1_test/                # F1.webp test results
+```
+
+---
+
+## 🔄 Git Workflow
+
+### Current Branch: `mood`
+```bash
+# View commit history
+git log --oneline -10
+
+# Check current changes
+git status
+
+# Commit new changes
+git add .
+git commit -m "Add test results and documentation"
+
+# Push to remote
+git push origin mood
+```
+
+### Model Files
+Models are excluded from git tracking to reduce repository size:
+- `best_aged_gender_6.onnx` (~85 MB)
+- `best_mood.onnx` (~15 MB)
+- `yolov8n.pt` (~25 MB)
+
+Download separately or configure via environment variables.
+
+---
+
+## 📝 Notes
+
+- All inference runs on CPU (CUDA disabled for compatibility)
+- Models are loaded once at startup for performance
+- SSE streaming allows real-time frame processing
+- Bounding boxes include confidence scores and class labels
+- Age/gender and mood predictions are per-face/object detected
