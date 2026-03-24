@@ -79,15 +79,12 @@ class CameraPipeline:
             f"services: {[cls.__name__ for cls in self._service_classes]}"
         )
 
-        total_detections = 0
         self.shared_state[self.camera_id] = {
             "camera_id"       : self.camera_id,
             "rtsp_url"        : self.rtsp_url,
             "running"         : True,
             "frame_count"     : 0,
             "fps"             : 0.0,
-            "last_detections" : 0,
-            "total_detections": 0,
             "uptime_seconds"  : 0.0,
             "error"           : None,
         }
@@ -162,15 +159,11 @@ class CameraPipeline:
                 except Exception:
                     pass  # drop frame if queue is full — never block inference
 
-                count = detection_data.get("count", 0)
-                total_detections += count
                 # ── Update shared state ──
                 self.shared_state[self.camera_id] = {
                     **self.shared_state[self.camera_id],
                     "frame_count"   : frame_count,
                     "fps"           : fps,
-                    "last_detections" : count,
-                    "total_detections": total_detections,
                     "uptime_seconds": round(time.time() - started_at, 1),
                 }
 

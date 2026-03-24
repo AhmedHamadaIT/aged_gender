@@ -167,8 +167,6 @@ Returns the operational status, FPS, and detection counts for all cameras.
       "running": true,
       "frame_count": 420,
       "fps": 28.5,
-      "last_detections": 3,
-      "total_detections": 1205,
       "uptime_seconds": 14.7,
       "error": null
     }
@@ -650,24 +648,6 @@ http://localhost:8000/docs
 http://localhost:8000/redoc
 ```
 
-## 📦 Pretrained Models
-
-The pretrained models are available for download via Google Drive:
-
-👉 [Download Models](https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link)
-
-### 📁 Supported Formats
-
-- **ONNX (.onnx)**  
-  Suitable for cross-platform inference and deployment.
-
-### ⚙️ Usage Instructions
-
-1. Download the required model files from the link above.
-2. Place them in the appropriate directory (e.g., `models/`).
-3. Load the model according to your framework:
-   - Use ONNX Runtime for `.onnx` files.
-   - Use PyTorch for `.pt` files.
-
-
+## Models file 
+https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link 
 
