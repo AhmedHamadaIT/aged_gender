@@ -52,7 +52,8 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         py-cpuinfo \
         fastapi \   
         onnxruntime \     
-        "uvicorn[standard]"
+        "uvicorn[standard]"\
+        qdrant-client 
 
 # ── Create directories ───────────────────────
 RUN mkdir -p /app/models /app/videos /app/outputs
