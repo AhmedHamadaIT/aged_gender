@@ -114,7 +114,7 @@ Configure which models/services will run in the pipeline.
 **Sample Request**
 ```json
 {
-  "pipeline": ["detector", "age_gender", "mood"]
+  "pipeline": ["detector", "age_gender", "mood","ppe"]
 }
 ```
 
@@ -122,7 +122,7 @@ Configure which models/services will run in the pipeline.
 ```json
 {
   "status": "configured",
-  "pipeline": ["detector", "age_gender", "mood"]
+  "pipeline": ["detector", "age_gender", "mood","ppe"]
 }
 ```
 
@@ -207,10 +207,40 @@ data: {
         "bbox": [120, 80, 340, 420],
         "mood": "Happy",
         "confidence": 0.94
-      }]
+      }],
+      "ppe": [
+      {
+        "person_bbox": [
+          677,
+          305,
+          850,
+          523
+        ],
+        "count": 2,
+        "items": [
+          {
+            "class_id": 2,
+            "class_name": "gloves",
+            "confidence": 0.9647,
+            "x1": 742,
+            "y1": 480,
+            "x2": 805,
+            "y2": 527
+          },
+          {
+            "class_id": 1,
+            "class_name": "hairnet",
+            "confidence": 0.8999,
+            "x1": 769,
+            "y1": 312,
+            "x2": 863,
+            "y2": 374
+          }
+        ]
+    }]
+      }
     }
   }
-}
 ```
 
 ---
@@ -535,6 +565,12 @@ curl -s -X POST "http://localhost:8000/process" \
 - **Input**: Face crops (128×128 pixels)
 - **Output**: Mood class + confidence score
 
+### 4. PPE Detection (ONNX)
+- **Model**: `models/best_ppe.onnx`
+- **Framework**: ONNX Runtime
+- **Classes**: `[mask, hairnet, gloves]`
+- **Input**: person crops (224×224 pixels)
+- **Output**: PPE class + confidence score
 ---
 
 ## 📁 Project Structure
@@ -547,11 +583,13 @@ curl -s -X POST "http://localhost:8000/process" \
 ├── .gitignore                  # Git ignore rules (models/ excluded)
 ├── models/                     # ML models (not tracked in git)
 │   ├── yolov8n.pt             # YOLO v8 Nano (~25 MB)
+│   ├── best_ppe.onnx           # PPE ONNX (~38 MB)
 │   ├── best_aged_gender_6.onnx # Age/Gender ONNX (~85 MB)
 │   └── best_mood.onnx          # Mood/Emotion ONNX (~15 MB)
 ├── services/                   # Service modules
 │   ├── detector.py             # YOLO detection service
 │   ├── age_gender.py           # Age/Gender classification
+|   ├── ppe.py                  # PPE detection
 │   └── mood.py                 # Mood/Emotion detection
 ├── scripts/                    # Testing and utility scripts
 │   └── test_image_pipeline.py  # Image inference testing script
@@ -592,6 +630,8 @@ git push origin mood
 Models are excluded from git tracking to reduce repository size:
 - `best_aged_gender_6.onnx` (~85 MB)
 - `best_mood.onnx` (~15 MB)
+- `best_ppe.onnx` (~38 MB)
+
 - `yolov8n.pt` (~25 MB)
 
 Download separately or configure via environment variables.
@@ -606,6 +646,8 @@ Download separately or configure via environment variables.
 export YOLO_MODEL="./models/yolov8n.pt"
 export AGE_GENDER_MODEL="./models/best_aged_gender_6.onnx"
 export MOOD_MODEL="./models/best_mood.onnx"
+export PPE_MODEL="./models/best_PPE.onnx"
+
 ```
 
 ### Detection Thresholds
