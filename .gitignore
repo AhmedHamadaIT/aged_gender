@@ -7,3 +7,12 @@ __pycache__/
 *.resolved
 logger/app.log
 models/
+test_results/
+find_test_frame.py
+test_cashier_images.py
+run_pipeline_test.py
+README_CASHIER_TESTING.md
+evidence/
+outputs/
+*.pyc
+.env

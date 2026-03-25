@@ -4,7 +4,7 @@ The Vision Pipeline API is a FastAPI-based server for running multi-camera compu
 
 ---
 
-## 🚀 Setup & Run
+##  Setup & Run
 
 ### Prerequisites
 - Python 3.9+
@@ -24,7 +24,7 @@ The Vision Pipeline API is a FastAPI-based server for running multi-camera compu
 
 ---
 
-## 📖 API Endpoints Reference
+##  API Endpoints Reference
 
 The application lifecycle works as follows:
 1. Register Cameras.
