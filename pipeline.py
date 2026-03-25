@@ -80,13 +80,13 @@ class CameraPipeline:
         )
 
         self.shared_state[self.camera_id] = {
-            "camera_id"     : self.camera_id,
-            "rtsp_url"      : self.rtsp_url,
-            "running"       : True,
-            "frame_count"   : 0,
-            "fps"           : 0.0,
-            "uptime_seconds": 0.0,
-            "error"         : None,
+            "camera_id"       : self.camera_id,
+            "rtsp_url"        : self.rtsp_url,
+            "running"         : True,
+            "frame_count"     : 0,
+            "fps"             : 0.0,
+            "uptime_seconds"  : 0.0,
+            "error"           : None,
         }
 
         if self.save_output:

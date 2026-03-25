@@ -1,6 +1,9 @@
 outputs
-models
 torch*
 videos
 .vscode
-__pycache__
+venv/
+__pycache__/
+*.resolved
+logger/app.log
+models/
