@@ -1,18 +1,38 @@
-outputs
-torch*
-videos
-.vscode
+# Environments
+.env
 venv/
+
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
 *.resolved
-logger/app.log
+
+# IDEs
+.vscode/
+
+# Project Specific
+outputs/
 models/
-test_results/
+videos/
+logger/app.log
+evidence/
+torch*
+
+# Tests
+test_*.py
+*_test.py
+run_pipeline_test.py
 find_test_frame.py
 test_cashier_images.py
+test_results/
+test_results.log
+README_CASHIER_TESTING.md
+test_results/
 run_pipeline_test.py
 README_CASHIER_TESTING.md
-evidence/
-outputs/
-*.pyc
-.env
+run_user_frame.py
