@@ -11,3 +11,7 @@ Pillow>=9.0.0
 PyYAML>=6.0
 tqdm>=4.64.0
 onnxruntime
+
+#ReID
+torchreid==0.2.5
+qdrant-client>=1.7.0

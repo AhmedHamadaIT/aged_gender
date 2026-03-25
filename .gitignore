@@ -2,3 +2,8 @@ outputs
 models
 torch*
 videos
+.vscode
+**/__pycache__/
+**.pyc
+logger/app.log
+*.log
