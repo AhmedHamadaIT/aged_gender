@@ -1,6 +1,7 @@
 outputs
 torch*
 videos
+.vscode
 venv/
 __pycache__/
 *.resolved
