@@ -47,8 +47,7 @@ class ReIDResult:
     bbox      : tuple
     person_id : str
     confidence: float
-    is_new    : bool     # True if this person was just enrolled
-
+    is_new    : bool     
     def to_dict(self):
         return {
             "bbox"      : list(self.bbox),

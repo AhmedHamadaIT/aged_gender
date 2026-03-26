@@ -1,5 +1,5 @@
 import cv2
-from services.feature_extractor import FeatureExtractor
+from services.reid import FeatureExtractor
 # Load your pre-cropped image
 img = cv2.imread("p1.jpg")
 

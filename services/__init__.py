@@ -10,12 +10,17 @@ To add a new service:
     4. Restart container
 """
 
-from .detector          import DetectorService
-from .age_gender        import AgeGenderService
-from .feature_extractor import ReIDService
+from .detector   import DetectorService
+from .age_gender import AgeGenderService
+from .reid import ReidService
+
+# from .counter import CounterService
+# from .tracker import TrackerService
 
 REGISTRY = {
     "detector"  : DetectorService,
     "age_gender": AgeGenderService,
-    "reid"      : ReIDService,
+    "reid"      : ReidService,
+    # "counter" : CounterService,
+    # "tracker" : TrackerService,
 }

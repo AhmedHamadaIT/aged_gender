@@ -37,7 +37,6 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         --extra-index-url https://pypi.org/simple \
         ultralytics && \
     python3 -m pip install --no-cache-dir \
-        --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
         --extra-index-url https://pypi.org/simple \
         opencv-python-headless \
         "numpy<2" \
