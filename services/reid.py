@@ -19,6 +19,7 @@ Environment variables:
 """
 
 import os
+import gdown
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
@@ -62,7 +63,15 @@ class ReIDResult:
 # ─────────────────────────────────────────────
 class ReIDService:
     def __init__(self):
-        model_path        = os.getenv("REID_MODEL_PATH", "models/osnet_x1_0.pt")
+        model_path = os.getenv("REID_MODEL_PATH", "models/osnet_x1_0.pt")
+        drive_url = "https://drive.google.com/uc?id=1iTOZeBtDTE2zC6f-zjqGZIJlk1T2i8iN"
+        
+        # Download logic
+        if not os.path.exists(model_path):
+            log.info(f"[REID] Model not found. Downloading to {model_path}...")
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            gdown.download(drive_url, model_path, quiet=False)
+            x   
         _device_raw       = os.getenv("DEVICE", "cpu")
         self.device       = int(_device_raw) if _device_raw.isdigit() else _device_raw
         self.auto_register = os.getenv("REID_AUTO_REGISTER", "True").lower() in ("true", "1", "yes")
