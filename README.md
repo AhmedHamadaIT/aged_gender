@@ -518,6 +518,710 @@ curl -X GET "http://localhost:8000/health" \
   -H "Content-Type: application/json"
 ```
 
+---
+
+## SSE / SSH Stream Logs (Cashier + Mood + Age/Gender)
+
+### Cashier-ready pipeline setup
+```bash
+curl -X POST "http://<jetson-ip>:9000/detection/setup" \
+  -H "Content-Type: application/json" \
+  -d '{"pipeline": ["detector", "age_gender", "mood", "cashier"]}'
+```
+
+### SSE live stream command
+```bash
+curl -N "http://<jetson-ip>:9000/detection/stream"
+```
+
+### SSH log tail command (server-side)
+```bash
+ssh <user>@<jetson-ip> "tail -f /path/to/repo/logger/app.log"
+```
+
+### Stream event source image (annotated)
+The following stream event example is taken from an annotated frame generated in the production simulation run:
+- Image: `outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096720.jpg`
+
+![Annotated Frame Used For Stream Example](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096720.jpg)
+
+### SSE event shape with `cashier` in `use_case`
+```json
+data: {
+  "camera_id": "main_room",
+  "frame_count": 1,
+  "timestamp": "2026-03-26T05:09:39.567737+00:00",
+  "data": {
+    "detection": {
+      "count": 8,
+      "items": [
+        {
+          "bbox": [597, 0, 1069, 291],
+          "class_id": 0,
+          "class_name": "person",
+          "confidence": 0.9002,
+          "center": [833, 145],
+          "width": 472,
+          "height": 291
+        }
+      ]
+    },
+    "use_case": {
+      "age_gender": [
+        {
+          "bbox": [597, 0, 1069, 291],
+          "gender": "Female",
+          "age_group": "Senior",
+          "confidence": 0.5617
+        }
+      ],
+      "mood": [
+        {
+          "bbox": [597, 0, 1069, 291],
+          "mood": "Happy",
+          "confidence": 0.4575
+        }
+      ],
+      "cashier": {
+        "cashier_zone": { "persons": 1, "drawers": 1, "cash": 3 },
+        "customer_zone": { "persons": 1, "drawers": 0, "cash": 0 },
+        "case_id": "N3",
+        "severity": "NORMAL",
+        "alerts": ["N3 EVENT: Transaction in progress"],
+        "transaction": true,
+        "frame_saved": true,
+        "evidence_path": "outputs/.../evidence/normal/N3/cam_*.jpg",
+        "frame_id": 1,
+        "timestamp": "2026-03-26T05:09:39.257797+00:00"
+      }
+    }
+  }
+}
+```
+
+### Example Events Sourced From Annotated Frames (N3 / N5 / A2)
+Each event below corresponds to an annotated image under:
+`outputs/cashier_production_sim/20260326T050929Z/annotated/`
+
+#### N3 example (frame_096750.jpg)
+Annotated frame:
+![Annotated Frame N3](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096750.jpg)
+
+SSE event (shape):
+```json
+data: {
+  "camera_id": "main_room",
+  "frame_count": 2,
+  "timestamp": "2026-03-26T05:09:39.740780+00:00",
+  "frame": "<base64 JPEG from annotated corresponding frame>",
+  "data": {
+    "detection": {
+      "count": 8,
+      "items": [
+        {
+          "bbox": [
+            608,
+            0,
+            1077,
+            292
+          ],
+          "class_id": 0,
+          "class_name": "person",
+          "confidence": 0.9016,
+          "center": [
+            842,
+            146
+          ],
+          "width": 469,
+          "height": 292
+        },
+        {
+          "bbox": [
+            767,
+            826,
+            1290,
+            1080
+          ],
+          "class_id": 0,
+          "class_name": "person",
+          "confidence": 0.8708,
+          "center": [
+            1028,
+            953
+          ],
+          "width": 523,
+          "height": 254
+        },
+        {
+          "bbox": [
+            843,
+            687,
+            1182,
+            919
+          ],
+          "class_id": 1,
+          "class_name": "drawer_open",
+          "confidence": 0.8577,
+          "center": [
+            1012,
+            803
+          ],
+          "width": 339,
+          "height": 232
+        },
+        {
+          "bbox": [
+            980,
+            702,
+            1048,
+            807
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.7952,
+          "center": [
+            1014,
+            754
+          ],
+          "width": 68,
+          "height": 105
+        },
+        {
+          "bbox": [
+            858,
+            726,
+            930,
+            828
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.7949,
+          "center": [
+            894,
+            777
+          ],
+          "width": 72,
+          "height": 102
+        },
+        {
+          "bbox": [
+            1086,
+            690,
+            1163,
+            804
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.7549,
+          "center": [
+            1124,
+            747
+          ],
+          "width": 77,
+          "height": 114
+        },
+        {
+          "bbox": [
+            1042,
+            694,
+            1102,
+            798
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.4363,
+          "center": [
+            1072,
+            746
+          ],
+          "width": 60,
+          "height": 104
+        },
+        {
+          "bbox": [
+            994,
+            697,
+            1058,
+            803
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.2973,
+          "center": [
+            1026,
+            750
+          ],
+          "width": 64,
+          "height": 106
+        }
+      ]
+    },
+    "use_case": {
+      "age_gender": [
+        {
+          "bbox": [
+            608,
+            0,
+            1077,
+            292
+          ],
+          "gender": "Female",
+          "age_group": "Senior",
+          "confidence": 0.5521
+        },
+        {
+          "bbox": [
+            767,
+            826,
+            1290,
+            1080
+          ],
+          "gender": "Male",
+          "age_group": "MiddleAged",
+          "confidence": 0.656
+        }
+      ],
+      "mood": [
+        {
+          "bbox": [
+            608,
+            0,
+            1077,
+            292
+          ],
+          "mood": "Happy",
+          "confidence": 0.4224
+        },
+        {
+          "bbox": [
+            767,
+            826,
+            1290,
+            1080
+          ],
+          "mood": "Happy",
+          "confidence": 0.3664
+        }
+      ],
+      "cashier": {
+        "cashier_zone": {
+          "persons": 1,
+          "drawers": 1,
+          "cash": 3
+        },
+        "customer_zone": {
+          "persons": 1,
+          "drawers": 0,
+          "cash": 0
+        },
+        "case_id": "N3",
+        "severity": "NORMAL",
+        "alerts": [
+          "N3 EVENT: Transaction in progress"
+        ],
+        "transaction": true,
+        "frame_saved": true,
+        "evidence_path": "/home/a7med/ml-server/outputs/cashier_production_sim/20260326T050929Z/evidence/normal/N3/cam_20260326T050939_702981.jpg",
+        "frame_id": 2,
+        "timestamp": "2026-03-26T05:09:39.693950+00:00",
+        "cashier_persons": [
+          {
+            "bbox": [
+              767,
+              826,
+              1290,
+              1080
+            ],
+            "confidence": 0.8708,
+            "zone": "ROI_CASHIER"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+#### N5 example (frame_096810.jpg)
+Annotated frame:
+![Annotated Frame N5](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096810.jpg)
+
+SSE event (shape):
+```json
+data: {
+  "camera_id": "main_room",
+  "frame_count": 4,
+  "timestamp": "2026-03-26T05:09:40.092435+00:00",
+  "frame": "<base64 JPEG from annotated corresponding frame>",
+  "data": {
+    "detection": {
+      "count": 2,
+      "items": [
+        {
+          "bbox": [
+            752,
+            0,
+            1238,
+            316
+          ],
+          "class_id": 0,
+          "class_name": "person",
+          "confidence": 0.9031,
+          "center": [
+            995,
+            158
+          ],
+          "width": 486,
+          "height": 316
+        },
+        {
+          "bbox": [
+            803,
+            686,
+            1319,
+            1080
+          ],
+          "class_id": 0,
+          "class_name": "person",
+          "confidence": 0.8941,
+          "center": [
+            1061,
+            883
+          ],
+          "width": 516,
+          "height": 394
+        }
+      ]
+    },
+    "use_case": {
+      "age_gender": [
+        {
+          "bbox": [
+            752,
+            0,
+            1238,
+            316
+          ],
+          "gender": "Male",
+          "age_group": "Senior",
+          "confidence": 0.5167
+        },
+        {
+          "bbox": [
+            803,
+            686,
+            1319,
+            1080
+          ],
+          "gender": "Male",
+          "age_group": "Senior",
+          "confidence": 0.5238
+        }
+      ],
+      "mood": [
+        {
+          "bbox": [
+            752,
+            0,
+            1238,
+            316
+          ],
+          "mood": "Happy",
+          "confidence": 0.4273
+        },
+        {
+          "bbox": [
+            803,
+            686,
+            1319,
+            1080
+          ],
+          "mood": "Happy",
+          "confidence": 0.4924
+        }
+      ],
+      "cashier": {
+        "cashier_zone": {
+          "persons": 1,
+          "drawers": 0,
+          "cash": 0
+        },
+        "customer_zone": {
+          "persons": 1,
+          "drawers": 0,
+          "cash": 0
+        },
+        "case_id": "N5",
+        "severity": "NORMAL",
+        "alerts": [],
+        "transaction": false,
+        "frame_saved": false,
+        "evidence_path": null,
+        "frame_id": 4,
+        "timestamp": "2026-03-26T05:09:40.049337+00:00",
+        "cashier_persons": [
+          {
+            "bbox": [
+              803,
+              686,
+              1319,
+              1080
+            ],
+            "confidence": 0.8941,
+            "zone": "ROI_CASHIER"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+#### A2 example (frame_097530.jpg)
+Annotated frame:
+![Annotated Frame A2](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_097530.jpg)
+
+SSE event (shape):
+```json
+data: {
+  "camera_id": "main_room",
+  "frame_count": 28,
+  "timestamp": "2026-03-26T05:09:44.558313+00:00",
+  "frame": "<base64 JPEG from annotated corresponding frame>",
+  "data": {
+    "detection": {
+      "count": 8,
+      "items": [
+        {
+          "bbox": [
+            636,
+            0,
+            1159,
+            329
+          ],
+          "class_id": 0,
+          "class_name": "person",
+          "confidence": 0.9005,
+          "center": [
+            897,
+            164
+          ],
+          "width": 523,
+          "height": 329
+        },
+        {
+          "bbox": [
+            803,
+            875,
+            1277,
+            1080
+          ],
+          "class_id": 0,
+          "class_name": "person",
+          "confidence": 0.8751,
+          "center": [
+            1040,
+            977
+          ],
+          "width": 474,
+          "height": 205
+        },
+        {
+          "bbox": [
+            845,
+            693,
+            1187,
+            918
+          ],
+          "class_id": 1,
+          "class_name": "drawer_open",
+          "confidence": 0.8661,
+          "center": [
+            1016,
+            805
+          ],
+          "width": 342,
+          "height": 225
+        },
+        {
+          "bbox": [
+            858,
+            725,
+            933,
+            832
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.8498,
+          "center": [
+            895,
+            778
+          ],
+          "width": 75,
+          "height": 107
+        },
+        {
+          "bbox": [
+            1038,
+            697,
+            1106,
+            804
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.8352,
+          "center": [
+            1072,
+            750
+          ],
+          "width": 68,
+          "height": 107
+        },
+        {
+          "bbox": [
+            974,
+            705,
+            1044,
+            810
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.8256,
+          "center": [
+            1009,
+            757
+          ],
+          "width": 70,
+          "height": 105
+        },
+        {
+          "bbox": [
+            1100,
+            690,
+            1167,
+            799
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.7996,
+          "center": [
+            1133,
+            744
+          ],
+          "width": 67,
+          "height": 109
+        },
+        {
+          "bbox": [
+            991,
+            699,
+            1061,
+            816
+          ],
+          "class_id": 2,
+          "class_name": "cash",
+          "confidence": 0.2027,
+          "center": [
+            1026,
+            757
+          ],
+          "width": 70,
+          "height": 117
+        }
+      ]
+    },
+    "use_case": {
+      "age_gender": [
+        {
+          "bbox": [
+            636,
+            0,
+            1159,
+            329
+          ],
+          "gender": "Male",
+          "age_group": "Senior",
+          "confidence": 0.5673
+        },
+        {
+          "bbox": [
+            803,
+            875,
+            1277,
+            1080
+          ],
+          "gender": "Male",
+          "age_group": "Senior",
+          "confidence": 0.7524
+        }
+      ],
+      "mood": [
+        {
+          "bbox": [
+            636,
+            0,
+            1159,
+            329
+          ],
+          "mood": "Happy",
+          "confidence": 0.4712
+        },
+        {
+          "bbox": [
+            803,
+            875,
+            1277,
+            1080
+          ],
+          "mood": "Happy",
+          "confidence": 0.4951
+        }
+      ],
+      "cashier": {
+        "cashier_zone": {
+          "persons": 1,
+          "drawers": 1,
+          "cash": 4
+        },
+        "customer_zone": {
+          "persons": 0,
+          "drawers": 0,
+          "cash": 0
+        },
+        "case_id": "A2",
+        "severity": "ALERT",
+        "alerts": [
+          "A2 ALERT: Unexpected person in cashier zone"
+        ],
+        "transaction": false,
+        "frame_saved": false,
+        "evidence_path": null,
+        "frame_id": 28,
+        "timestamp": "2026-03-26T05:09:44.499561+00:00",
+        "cashier_persons": [
+          {
+            "bbox": [
+              803,
+              875,
+              1277,
+              1080
+            ],
+            "confidence": 0.8751,
+            "zone": "ROI_CASHIER"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+### Production simulation artifacts (latest run)
+- `outputs/cashier_production_sim/20260326T050929Z/annotated_sequence.gif`
+- `outputs/cashier_production_sim/20260326T050929Z/stream.jsonl`
+- `outputs/cashier_production_sim/20260326T050929Z/summary.json`
+- `outputs/cashier_production_sim/20260326T050929Z/annotated/`
+
 ### Response Processing Examples
 
 #### Extract Detections with jq

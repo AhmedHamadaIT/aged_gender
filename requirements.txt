@@ -1,6 +1,11 @@
 # Core
 ultralytics>=8.0.0          # YOLOv8
 opencv-python-headless      # OpenCV (headless for Docker/server)
+fastapi                     # Web framework
+pydantic                    # Data validation
+uvicorn[standard]           # ASGI server
+numpy<2                     # Numerical computing
+psutil                      # System monitoring
 
 # Config loading
 python-dotenv>=1.0.0        # Reads .env file
