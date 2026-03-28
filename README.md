@@ -520,16 +520,41 @@ curl -X GET "http://localhost:8000/health" \
 
 ---
 
-## SSE / SSH Stream Logs (Cashier + Mood + Age/Gender)
+## Complete Cashier Pipeline Lifecycle
 
-### Cashier-ready pipeline setup
+This sequence demonstrates how to configure zones, set up the pipeline, and stream the results.
+
+### 1. Configure Zones (Rectangle / Polygon)
+```bash
+curl -X POST "http://<jetson-ip>:9000/cashier/zones" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ROI_CASHIER": {
+      "shape": "rectangle",
+      "points": [[0.0, 0.0], [0.5, 1.0]],
+      "active": true
+    },
+    "ROI_CUSTOMER": {
+      "shape": "polygon",
+      "points": [[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]],
+      "active": true
+    }
+  }'
+```
+
+### 2. Setup Detection Pipeline
 ```bash
 curl -X POST "http://<jetson-ip>:9000/detection/setup" \
   -H "Content-Type: application/json" \
   -d '{"pipeline": ["detector", "age_gender", "mood", "cashier"]}'
 ```
 
-### SSE live stream command
+### 3. Start Pipeline
+```bash
+curl -X POST "http://<jetson-ip>:9000/detection/start?camera_id=main_room"
+```
+
+### 4. Consume SSE Stream
 ```bash
 curl -N "http://<jetson-ip>:9000/detection/stream"
 ```
@@ -539,6 +564,10 @@ curl -N "http://<jetson-ip>:9000/detection/stream"
 ssh <user>@<jetson-ip> "tail -f /path/to/repo/logger/app.log"
 ```
 
+---
+
+## SSE / SSH Stream Logs (Cashier + Mood + Age/Gender)
+
 ### Stream event source image (annotated)
 The following stream event example is taken from an annotated frame generated in the production simulation run:
 - Image: `outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096720.jpg`
@@ -546,587 +575,56 @@ The following stream event example is taken from an annotated frame generated in
 ![Annotated Frame Used For Stream Example](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096720.jpg)
 
 ### SSE event shape with `cashier` in `use_case`
+
+The `cashier` block inside `use_case` follows this structure:
+
 ```json
-data: {
-  "camera_id": "main_room",
-  "frame_count": 1,
-  "timestamp": "2026-03-26T05:09:39.567737+00:00",
-  "data": {
-    "detection": {
-      "count": 8,
-      "items": [
-        {
-          "bbox": [597, 0, 1069, 291],
-          "class_id": 0,
-          "class_name": "person",
-          "confidence": 0.9002,
-          "center": [833, 145],
-          "width": 472,
-          "height": 291
-        }
-      ]
-    },
-    "use_case": {
-      "age_gender": [
-        {
-          "bbox": [597, 0, 1069, 291],
-          "gender": "Female",
-          "age_group": "Senior",
-          "confidence": 0.5617
-        }
-      ],
-      "mood": [
-        {
-          "bbox": [597, 0, 1069, 291],
-          "mood": "Happy",
-          "confidence": 0.4575
-        }
-      ],
-      "cashier": {
-        "cashier_zone": { "persons": 1, "drawers": 1, "cash": 3 },
-        "customer_zone": { "persons": 1, "drawers": 0, "cash": 0 },
-        "case_id": "N3",
-        "severity": "NORMAL",
-        "alerts": ["N3 EVENT: Transaction in progress"],
-        "transaction": true,
-        "frame_saved": true,
-        "evidence_path": "outputs/.../evidence/normal/N3/cam_*.jpg",
-        "frame_id": 1,
-        "timestamp": "2026-03-26T05:09:39.257797+00:00"
-      }
-    }
-  }
-}
-```
-
-### Example Events Sourced From Annotated Frames (N3 / N5 / A2)
-Each event below corresponds to an annotated image under:
-`outputs/cashier_production_sim/20260326T050929Z/annotated/`
-
-#### N3 example (frame_096750.jpg)
-Annotated frame:
-![Annotated Frame N3](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096750.jpg)
-
-SSE event (shape):
-```json
-data: {
-  "camera_id": "main_room",
-  "frame_count": 2,
-  "timestamp": "2026-03-26T05:09:39.740780+00:00",
-  "frame": "<base64 JPEG from annotated corresponding frame>",
-  "data": {
-    "detection": {
-      "count": 8,
-      "items": [
-        {
-          "bbox": [
-            608,
-            0,
-            1077,
-            292
-          ],
-          "class_id": 0,
-          "class_name": "person",
-          "confidence": 0.9016,
-          "center": [
-            842,
-            146
-          ],
-          "width": 469,
-          "height": 292
-        },
-        {
-          "bbox": [
-            767,
-            826,
-            1290,
-            1080
-          ],
-          "class_id": 0,
-          "class_name": "person",
-          "confidence": 0.8708,
-          "center": [
-            1028,
-            953
-          ],
-          "width": 523,
-          "height": 254
-        },
-        {
-          "bbox": [
-            843,
-            687,
-            1182,
-            919
-          ],
-          "class_id": 1,
-          "class_name": "drawer_open",
-          "confidence": 0.8577,
-          "center": [
-            1012,
-            803
-          ],
-          "width": 339,
-          "height": 232
-        },
-        {
-          "bbox": [
-            980,
-            702,
-            1048,
-            807
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.7952,
-          "center": [
-            1014,
-            754
-          ],
-          "width": 68,
-          "height": 105
-        },
-        {
-          "bbox": [
-            858,
-            726,
-            930,
-            828
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.7949,
-          "center": [
-            894,
-            777
-          ],
-          "width": 72,
-          "height": 102
-        },
-        {
-          "bbox": [
-            1086,
-            690,
-            1163,
-            804
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.7549,
-          "center": [
-            1124,
-            747
-          ],
-          "width": 77,
-          "height": 114
-        },
-        {
-          "bbox": [
-            1042,
-            694,
-            1102,
-            798
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.4363,
-          "center": [
-            1072,
-            746
-          ],
-          "width": 60,
-          "height": 104
-        },
-        {
-          "bbox": [
-            994,
-            697,
-            1058,
-            803
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.2973,
-          "center": [
-            1026,
-            750
-          ],
-          "width": 64,
-          "height": 106
-        }
-      ]
-    },
-    "use_case": {
-      "age_gender": [
-        {
-          "bbox": [
-            608,
-            0,
-            1077,
-            292
-          ],
-          "gender": "Female",
-          "age_group": "Senior",
-          "confidence": 0.5521
-        },
-        {
-          "bbox": [
-            767,
-            826,
-            1290,
-            1080
-          ],
-          "gender": "Male",
-          "age_group": "MiddleAged",
-          "confidence": 0.656
-        }
-      ],
-      "mood": [
-        {
-          "bbox": [
-            608,
-            0,
-            1077,
-            292
-          ],
-          "mood": "Happy",
-          "confidence": 0.4224
-        },
-        {
-          "bbox": [
-            767,
-            826,
-            1290,
-            1080
-          ],
-          "mood": "Happy",
-          "confidence": 0.3664
-        }
-      ],
-      "cashier": {
-        "cashier_zone": {
-          "persons": 1,
-          "drawers": 1,
-          "cash": 3
-        },
-        "customer_zone": {
-          "persons": 1,
-          "drawers": 0,
-          "cash": 0
-        },
-        "case_id": "N3",
-        "severity": "NORMAL",
-        "alerts": [
-          "N3 EVENT: Transaction in progress"
-        ],
-        "transaction": true,
-        "frame_saved": true,
-        "evidence_path": "/home/a7med/ml-server/outputs/cashier_production_sim/20260326T050929Z/evidence/normal/N3/cam_20260326T050939_702981.jpg",
-        "frame_id": 2,
-        "timestamp": "2026-03-26T05:09:39.693950+00:00",
-        "cashier_persons": [
-          {
-            "bbox": [
-              767,
-              826,
-              1290,
-              1080
-            ],
-            "confidence": 0.8708,
-            "zone": "ROI_CASHIER"
-          }
-        ]
-      }
-    }
-  }
-}
-```
-
-#### N5 example (frame_096810.jpg)
-Annotated frame:
-![Annotated Frame N5](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096810.jpg)
-
-SSE event (shape):
-```json
-data: {
-  "camera_id": "main_room",
-  "frame_count": 4,
-  "timestamp": "2026-03-26T05:09:40.092435+00:00",
-  "frame": "<base64 JPEG from annotated corresponding frame>",
+{
+  "input": {
+    "path": "/home/a7med/Documents/all_original_frames/Cashier Drawer/others/frame_097440.jpg",
+    "name": "frame_097440.jpg"
+  },
+  "outputs": {
+    "annotated_image": "outputs/cashier_aged_gender_single/20260326T064528Z/annotated/frame_097440.jpg"
+  },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
   "data": {
     "detection": {
       "count": 2,
       "items": [
         {
           "bbox": [
-            752,
+            684,
             0,
-            1238,
-            316
+            1169,
+            275
           ],
           "class_id": 0,
-          "class_name": "person",
-          "confidence": 0.9031,
+          "class_name": "Person",
+          "confidence": 0.8949,
           "center": [
-            995,
-            158
+            926,
+            137
           ],
-          "width": 486,
-          "height": 316
+          "width": 485,
+          "height": 275
         },
         {
           "bbox": [
-            803,
-            686,
-            1319,
+            811,
+            874,
+            1264,
             1080
           ],
           "class_id": 0,
-          "class_name": "person",
-          "confidence": 0.8941,
+          "class_name": "Person",
+          "confidence": 0.8725,
           "center": [
-            1061,
-            883
-          ],
-          "width": 516,
-          "height": 394
-        }
-      ]
-    },
-    "use_case": {
-      "age_gender": [
-        {
-          "bbox": [
-            752,
-            0,
-            1238,
-            316
-          ],
-          "gender": "Male",
-          "age_group": "Senior",
-          "confidence": 0.5167
-        },
-        {
-          "bbox": [
-            803,
-            686,
-            1319,
-            1080
-          ],
-          "gender": "Male",
-          "age_group": "Senior",
-          "confidence": 0.5238
-        }
-      ],
-      "mood": [
-        {
-          "bbox": [
-            752,
-            0,
-            1238,
-            316
-          ],
-          "mood": "Happy",
-          "confidence": 0.4273
-        },
-        {
-          "bbox": [
-            803,
-            686,
-            1319,
-            1080
-          ],
-          "mood": "Happy",
-          "confidence": 0.4924
-        }
-      ],
-      "cashier": {
-        "cashier_zone": {
-          "persons": 1,
-          "drawers": 0,
-          "cash": 0
-        },
-        "customer_zone": {
-          "persons": 1,
-          "drawers": 0,
-          "cash": 0
-        },
-        "case_id": "N5",
-        "severity": "NORMAL",
-        "alerts": [],
-        "transaction": false,
-        "frame_saved": false,
-        "evidence_path": null,
-        "frame_id": 4,
-        "timestamp": "2026-03-26T05:09:40.049337+00:00",
-        "cashier_persons": [
-          {
-            "bbox": [
-              803,
-              686,
-              1319,
-              1080
-            ],
-            "confidence": 0.8941,
-            "zone": "ROI_CASHIER"
-          }
-        ]
-      }
-    }
-  }
-}
-```
-
-#### A2 example (frame_097530.jpg)
-Annotated frame:
-![Annotated Frame A2](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_097530.jpg)
-
-SSE event (shape):
-```json
-data: {
-  "camera_id": "main_room",
-  "frame_count": 28,
-  "timestamp": "2026-03-26T05:09:44.558313+00:00",
-  "frame": "<base64 JPEG from annotated corresponding frame>",
-  "data": {
-    "detection": {
-      "count": 8,
-      "items": [
-        {
-          "bbox": [
-            636,
-            0,
-            1159,
-            329
-          ],
-          "class_id": 0,
-          "class_name": "person",
-          "confidence": 0.9005,
-          "center": [
-            897,
-            164
-          ],
-          "width": 523,
-          "height": 329
-        },
-        {
-          "bbox": [
-            803,
-            875,
-            1277,
-            1080
-          ],
-          "class_id": 0,
-          "class_name": "person",
-          "confidence": 0.8751,
-          "center": [
-            1040,
+            1037,
             977
           ],
-          "width": 474,
-          "height": 205
-        },
-        {
-          "bbox": [
-            845,
-            693,
-            1187,
-            918
-          ],
-          "class_id": 1,
-          "class_name": "drawer_open",
-          "confidence": 0.8661,
-          "center": [
-            1016,
-            805
-          ],
-          "width": 342,
-          "height": 225
-        },
-        {
-          "bbox": [
-            858,
-            725,
-            933,
-            832
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.8498,
-          "center": [
-            895,
-            778
-          ],
-          "width": 75,
-          "height": 107
-        },
-        {
-          "bbox": [
-            1038,
-            697,
-            1106,
-            804
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.8352,
-          "center": [
-            1072,
-            750
-          ],
-          "width": 68,
-          "height": 107
-        },
-        {
-          "bbox": [
-            974,
-            705,
-            1044,
-            810
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.8256,
-          "center": [
-            1009,
-            757
-          ],
-          "width": 70,
-          "height": 105
-        },
-        {
-          "bbox": [
-            1100,
-            690,
-            1167,
-            799
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.7996,
-          "center": [
-            1133,
-            744
-          ],
-          "width": 67,
-          "height": 109
-        },
-        {
-          "bbox": [
-            991,
-            699,
-            1061,
-            816
-          ],
-          "class_id": 2,
-          "class_name": "cash",
-          "confidence": 0.2027,
-          "center": [
-            1026,
-            757
-          ],
-          "width": 70,
-          "height": 117
+          "width": 453,
+          "height": 206
         }
       ]
     },
@@ -1134,93 +632,605 @@ data: {
       "age_gender": [
         {
           "bbox": [
-            636,
+            684,
             0,
-            1159,
-            329
+            1169,
+            275
           ],
-          "gender": "Male",
+          "gender": "Female",
           "age_group": "Senior",
-          "confidence": 0.5673
+          "confidence": 0.5035
         },
         {
           "bbox": [
-            803,
-            875,
-            1277,
+            811,
+            874,
+            1264,
             1080
           ],
           "gender": "Male",
           "age_group": "Senior",
-          "confidence": 0.7524
-        }
-      ],
-      "mood": [
-        {
-          "bbox": [
-            636,
-            0,
-            1159,
-            329
-          ],
-          "mood": "Happy",
-          "confidence": 0.4712
-        },
-        {
-          "bbox": [
-            803,
-            875,
-            1277,
-            1080
-          ],
-          "mood": "Happy",
-          "confidence": 0.4951
+          "confidence": 0.742
         }
       ],
       "cashier": {
-        "cashier_zone": {
-          "persons": 1,
-          "drawers": 1,
-          "cash": 4
-        },
-        "customer_zone": {
-          "persons": 0,
-          "drawers": 0,
-          "cash": 0
-        },
-        "case_id": "A2",
-        "severity": "ALERT",
-        "alerts": [
-          "A2 ALERT: Unexpected person in cashier zone"
-        ],
-        "transaction": false,
-        "frame_saved": false,
-        "evidence_path": null,
-        "frame_id": 28,
-        "timestamp": "2026-03-26T05:09:44.499561+00:00",
-        "cashier_persons": [
+        "persons": [
           {
-            "bbox": [
-              803,
-              875,
-              1277,
+            "person_bbox": [
+              811,
+              874,
+              1264,
               1080
             ],
-            "confidence": 0.8751,
-            "zone": "ROI_CASHIER"
+            "confidence": 0.8725,
+            "zone": "ROI_CASHIER",
+            "transaction": true,
+            "items": {
+              "drawers": [
+                {
+                  "bbox": [
+                    845,
+                    692,
+                    1186,
+                    922
+                  ],
+                  "confidence": 0.87
+                }
+              ],
+              "cash": [
+                {
+                  "bbox": [
+                    858,
+                    727,
+                    934,
+                    832
+                  ],
+                  "confidence": 0.85
+                },
+                {
+                  "bbox": [
+                    1038,
+                    697,
+                    1107,
+                    804
+                  ],
+                  "confidence": 0.85
+                },
+                {
+                  "bbox": [
+                    973,
+                    705,
+                    1045,
+                    811
+                  ],
+                  "confidence": 0.85
+                },
+                {
+                  "bbox": [
+                    1100,
+                    690,
+                    1168,
+                    800
+                  ],
+                  "confidence": 0.85
+                }
+              ]
+            }
+          },
+          {
+            "person_bbox": [
+              684,
+              0,
+              1169,
+              275
+            ],
+            "confidence": 0.8949,
+            "zone": "ROI_CUSTOMER",
+            "transaction": false,
+            "items": {
+              "drawers": [],
+              "cash": []
+            }
           }
-        ]
+        ],
+        "summary": {
+          "cashier_zone": {
+            "persons": 1,
+            "drawers": 1,
+            "cash": 4
+          },
+          "customer_zone": {
+            "persons": 1,
+            "drawers": 0,
+            "cash": 0
+          },
+          "case_id": "N3",
+          "severity": "NORMAL",
+          "alerts": [
+            "N3 EVENT: Transaction in progress"
+          ],
+          "transaction": true,
+          "frame_saved": true,
+          "evidence_path": "/home/a7med/ml-server/outputs/cashier_aged_gender_single/20260326T064528Z/evidence/normal/N3/cam_20260326T064542_598744.jpg",
+          "frame_id": 1,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [
+            {
+              "bbox": [
+                811,
+                874,
+                1264,
+                1080
+              ],
+              "confidence": 0.8725,
+              "zone": "ROI_CASHIER"
+            }
+          ]
+        }
       }
     }
   }
 }
 ```
+
+**Cashier Field Reference:**
+- **persons**: Array of all detected persons with their zone assignment and associated items
+  - **person_bbox**: `[x1, y1, x2, y2]` bounding box of the person
+  - **zone**: Either `ROI_CASHIER` (behind the register) or `ROI_CUSTOMER` (customer-facing side)
+  - **transaction**: `true` if this person is involved in an active transaction
+  - **items.drawers**: List of open drawer detections associated with this person
+  - **items.cash**: List of cash detections associated with this person
+- **summary**: Aggregated zone counts and case classification
+  - **cashier_zone / customer_zone**: Count of `persons`, `drawers`, and `cash` per zone
+  - **case_id**: Classified scenario (see case table below)
+  - **severity**: `NORMAL`, `ALERT`, or `CRITICAL`
+  - **alerts**: List of human-readable alert messages for this frame
+  - **transaction**: `true` if an active transaction is in progress
+  - **frame_saved**: `true` if an evidence frame was written to disk
+  - **evidence_path**: Absolute path to the saved evidence image (null if not saved)
+  - **cashier_persons**: Subset list of persons confirmed to be in the cashier zone
+
+---
+
+### Cashier Case IDs (All Cases)
+
+#### Normal Cases
+| Case | Severity | Condition |
+|------|----------|-----------|
+| **N1** | NORMAL | Idle register — nothing happening |
+| **N2** | NORMAL | Cashier on duty, no customer |
+| **N3** | NORMAL | Active transaction (cashier + drawer + customer + cash, nearby) |
+| **N4** | NORMAL | Staff handover / supervisor at register (2 persons near drawer) |
+| **N5** | NORMAL | Customer waiting (no transaction started) |
+| **N6** | NORMAL | Drawer open, no cash (card transaction / float check) |
+
+#### Alert Cases
+| Case | Severity | Condition |
+|------|----------|-----------|
+| **A1** | ALERT / CRITICAL | Unattended open drawer (CRITICAL if customer present) |
+| **A2** | ALERT | Unexpected person in cashier zone |
+| **A3** | CRITICAL | Cash + open drawer, no cashier (theft signature) |
+| **A4** | CRITICAL | Unauthorised person at open register with cash |
+| **A5** | ALERT | Customer waiting too long (>30s) without cashier |
+| **A6** | ALERT | Drawer open too long (>30s) |
+| **A7** | ALERT | Cash in customer zone, no cashier present |
+
+---
+
+### Target Format Reference: Cashier Test Cases (Normal & Alert)
+
+All cashier test cases (both normal operations and anomalies) yield an annotated image mapped to a detailed `result.json` log. The structure below demonstrates exactly how the response block changes for every single case:
+
+#### N1 (Idle register — nothing happening)
+```json
+{
+  "input": { "path": "...", "name": "frame_N1.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_N1.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 0, "items": [] },
+    "use_case": {
+      "cashier": {
+        "persons": [],
+        "summary": {
+          "cashier_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "N1",
+          "severity": "NORMAL",
+          "alerts": [],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/normal/N1/cam_N1.jpg",
+          "frame_id": 1,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": []
+        }
+      }
+    }
+  }
+}
+```
+
+#### N2 (Cashier on duty, no customer)
+```json
+{
+  "input": { "path": "...", "name": "frame_N2.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_N2.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 1, "items": [{ "class_name": "Person" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [{ "zone": "ROI_CASHIER", "transaction": false, "items": { "drawers": [], "cash": [] } }],
+        "summary": {
+          "cashier_zone": { "persons": 1, "drawers": 0, "cash": 0 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "N2",
+          "severity": "NORMAL",
+          "alerts": [],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/normal/N2/cam_N2.jpg",
+          "frame_id": 2,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [{ "zone": "ROI_CASHIER" }]
+        }
+      }
+    }
+  }
+}
+```
+
+#### N3 (Active transaction — e.g. frame_097440.jpg)
+```json
+{
+  "input": { "path": "...", "name": "frame_097440.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_097440.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 6, "items": [{ "class_name": "Person" }, { "class_name": "Person" }, "..."] },
+    "use_case": {
+      "cashier": {
+        "persons": [
+          { "zone": "ROI_CASHIER", "transaction": true, "items": { "drawers": [{...}], "cash": [{...}] } },
+          { "zone": "ROI_CUSTOMER", "transaction": false, "items": { "drawers": [], "cash": [] } }
+        ],
+        "summary": {
+          "cashier_zone": { "persons": 1, "drawers": 1, "cash": 4 },
+          "customer_zone": { "persons": 1, "drawers": 0, "cash": 0 },
+          "case_id": "N3",
+          "severity": "NORMAL",
+          "alerts": ["N3 EVENT: Transaction in progress"],
+          "transaction": true,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/normal/N3/cam_N3.jpg",
+          "frame_id": 3,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [{ "zone": "ROI_CASHIER" }]
+        }
+      }
+    }
+  }
+}
+```
+
+#### N4 (Staff handover / supervisor at register)
+```json
+{
+  "input": { "path": "...", "name": "frame_N4.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_N4.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 2, "items": [{ "class_name": "Person" }, { "class_name": "Person" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [
+          { "zone": "ROI_CASHIER", "transaction": false, "items": { "drawers": [], "cash": [] } },
+          { "zone": "ROI_CASHIER", "transaction": false, "items": { "drawers": [], "cash": [] } }
+        ],
+        "summary": {
+          "cashier_zone": { "persons": 2, "drawers": 0, "cash": 0 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "N4",
+          "severity": "NORMAL",
+          "alerts": ["N4 EVENT: Multiple staff at register"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/normal/N4/cam_N4.jpg",
+          "frame_id": 4,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [{ "zone": "ROI_CASHIER" }, { "zone": "ROI_CASHIER" }]
+        }
+      }
+    }
+  }
+}
+```
+
+#### N5 (Customer waiting without transaction)
+```json
+{
+  "input": { "path": "...", "name": "frame_N5.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_N5.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 1, "items": [{ "class_name": "Person" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [{ "zone": "ROI_CUSTOMER", "transaction": false, "items": { "drawers": [], "cash": [] } }],
+        "summary": {
+          "cashier_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "customer_zone": { "persons": 1, "drawers": 0, "cash": 0 },
+          "case_id": "N5",
+          "severity": "NORMAL",
+          "alerts": ["N5 EVENT: Customer waiting"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/normal/N5/cam_N5.jpg",
+          "frame_id": 5,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": []
+        }
+      }
+    }
+  }
+}
+```
+
+#### N6 (Drawer open, no cash — card transaction)
+```json
+{
+  "input": { "path": "...", "name": "frame_N6.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_N6.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 2, "items": [{ "class_name": "Person" }, { "class_name": "drawer_open" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [{ "zone": "ROI_CASHIER", "transaction": true, "items": { "drawers": [{...}], "cash": [] } }],
+        "summary": {
+          "cashier_zone": { "persons": 1, "drawers": 1, "cash": 0 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "N6",
+          "severity": "NORMAL",
+          "alerts": [],
+          "transaction": true,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/normal/N6/cam_N6.jpg",
+          "frame_id": 6,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [{ "zone": "ROI_CASHIER" }]
+        }
+      }
+    }
+  }
+}
+```
+
+#### A1 (Unattended open drawer)
+```json
+{
+  "input": { "path": "...", "name": "frame_A1.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_A1.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 1, "items": [{ "class_name": "drawer_open" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [],
+        "summary": {
+          "cashier_zone": { "persons": 0, "drawers": 1, "cash": 0 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "A1",
+          "severity": "ALERT",
+          "alerts": ["A1 WARNING: Unattended open drawer"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/alert/A1/cam_A1.jpg",
+          "frame_id": 7,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": []
+        }
+      }
+    }
+  }
+}
+```
+
+#### A2 (Unexpected person in cashier zone)
+```json
+{
+  "input": { "path": "...", "name": "frame_A2.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_A2.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 2, "items": [{ "class_name": "Person" }, { "class_name": "Person" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [
+          { "zone": "ROI_CASHIER", "transaction": false, "items": { "drawers": [], "cash": [] } },
+          { "zone": "ROI_CASHIER", "transaction": false, "items": { "drawers": [], "cash": [] } }
+        ],
+        "summary": {
+          "cashier_zone": { "persons": 2, "drawers": 0, "cash": 0 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "A2",
+          "severity": "ALERT",
+          "alerts": ["A2 WARNING: Unexpected person in cashier zone"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/alert/A2/cam_A2.jpg",
+          "frame_id": 8,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [{ "zone": "ROI_CASHIER" }, { "zone": "ROI_CASHIER" }]
+        }
+      }
+    }
+  }
+}
+```
+
+#### A3 (Cash + open drawer, no cashier - theft signature)
+```json
+{
+  "input": { "path": "...", "name": "frame_A3.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_A3.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 2, "items": [{ "class_name": "drawer_open" }, { "class_name": "cash" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [],
+        "summary": {
+          "cashier_zone": { "persons": 0, "drawers": 1, "cash": 1 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "A3",
+          "severity": "CRITICAL",
+          "alerts": ["A3 CRITICAL: Cash + open drawer, no cashier"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/alert/A3/cam_A3.jpg",
+          "frame_id": 9,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": []
+        }
+      }
+    }
+  }
+}
+```
+
+#### A4 (Unauthorised person at open register with cash)
+```json
+{
+  "input": { "path": "...", "name": "frame_A4.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_A4.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 3, "items": [{ "class_name": "Person" }, { "class_name": "drawer_open" }, { "class_name": "cash" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [{ "zone": "ROI_CASHIER", "transaction": true, "items": { "drawers": [{...}], "cash": [{...}] } }],
+        "summary": {
+          "cashier_zone": { "persons": 1, "drawers": 1, "cash": 1 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "A4",
+          "severity": "CRITICAL",
+          "alerts": ["A4 CRITICAL: Unauthorised person at open register with cash"],
+          "transaction": true,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/alert/A4/cam_A4.jpg",
+          "frame_id": 10,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [{ "zone": "ROI_CASHIER" }]
+        }
+      }
+    }
+  }
+}
+```
+
+#### A5 (Customer waiting too long >30s)
+```json
+{
+  "input": { "path": "...", "name": "frame_A5.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_A5.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 1, "items": [{ "class_name": "Person" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [{ "zone": "ROI_CUSTOMER", "transaction": false, "items": { "drawers": [], "cash": [] } }],
+        "summary": {
+          "cashier_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "customer_zone": { "persons": 1, "drawers": 0, "cash": 0 },
+          "case_id": "A5",
+          "severity": "ALERT",
+          "alerts": ["A5 WARNING: Customer waiting too long"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/alert/A5/cam_A5.jpg",
+          "frame_id": 11,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": []
+        }
+      }
+    }
+  }
+}
+```
+
+#### A6 (Drawer open too long >30s)
+```json
+{
+  "input": { "path": "...", "name": "frame_A6.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_A6.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 2, "items": [{ "class_name": "Person" }, { "class_name": "drawer_open" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [{ "zone": "ROI_CASHIER", "transaction": false, "items": { "drawers": [{...}], "cash": [] } }],
+        "summary": {
+          "cashier_zone": { "persons": 1, "drawers": 1, "cash": 0 },
+          "customer_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "case_id": "A6",
+          "severity": "ALERT",
+          "alerts": ["A6 WARNING: Drawer open too long"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/alert/A6/cam_A6.jpg",
+          "frame_id": 12,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": [{ "zone": "ROI_CASHIER" }]
+        }
+      }
+    }
+  }
+}
+```
+
+#### A7 (Cash in customer zone, no cashier present)
+```json
+{
+  "input": { "path": "...", "name": "frame_A7.jpg" },
+  "outputs": { "annotated_image": "outputs/cashier_aged_gender_single/.../annotated/frame_A7.jpg" },
+  "timestamp": "2026-03-26T06:45:42.941111+00:00",
+  "data": {
+    "detection": { "count": 2, "items": [{ "class_name": "Person" }, { "class_name": "cash" }] },
+    "use_case": {
+      "cashier": {
+        "persons": [{ "zone": "ROI_CUSTOMER", "transaction": false, "items": { "drawers": [], "cash": [{...}] } }],
+        "summary": {
+          "cashier_zone": { "persons": 0, "drawers": 0, "cash": 0 },
+          "customer_zone": { "persons": 1, "drawers": 0, "cash": 1 },
+          "case_id": "A7",
+          "severity": "ALERT",
+          "alerts": ["A7 WARNING: Cash in customer zone, no cashier present"],
+          "transaction": false,
+          "frame_saved": true,
+          "evidence_path": "outputs/.../evidence/alert/A7/cam_A7.jpg",
+          "frame_id": 13,
+          "timestamp": "2026-03-26T06:45:42.588678+00:00",
+          "cashier_persons": []
+        }
+      }
+    }
+  }
+}
+```
+
 
 ### Production simulation artifacts (latest run)
 - `outputs/cashier_production_sim/20260326T050929Z/annotated_sequence.gif`
 - `outputs/cashier_production_sim/20260326T050929Z/stream.jsonl`
 - `outputs/cashier_production_sim/20260326T050929Z/summary.json`
 - `outputs/cashier_production_sim/20260326T050929Z/annotated/`
+
+### Single-frame test output (cashier + aged-gender)
+For the one-off test on `frame_097440`, outputs are saved to:
+- Annotated frame: `outputs/cashier_aged_gender_single/20260326T064528Z/annotated/frame_097440.jpg`
+- JSON results: `outputs/cashier_aged_gender_single/20260326T064528Z/result.json`
 
 ### Response Processing Examples
 
@@ -1240,6 +1250,14 @@ curl -s -X POST "http://localhost:8000/process" \
 curl -s -X POST "http://localhost:8000/process" \
   -F "file=@image.jpg" \
   -F "camera_id=test" | jq '[.data.use_case.mood[] | .mood] | group_by(.) | map({mood: .[0], count: length})'
+
+# Get cashier case summary
+curl -s -N "http://<jetson-ip>:9000/detection/stream" \
+  | jq '.data.use_case.cashier.summary | {case_id, severity, alerts}'
+
+# List all persons with their zones
+curl -s -N "http://<jetson-ip>:9000/detection/stream" \
+  | jq '.data.use_case.cashier.persons[] | {zone, transaction, drawers: .items.drawers | length, cash: .items.cash | length}'
 ```
 
 ---
@@ -1275,6 +1293,7 @@ curl -s -X POST "http://localhost:8000/process" \
 - **Classes**: `[mask, hairnet, gloves]`
 - **Input**: person crops (224×224 pixels)
 - **Output**: PPE class + confidence score
+
 ---
 
 ## 📁 Project Structure
@@ -1335,7 +1354,6 @@ Models are excluded from git tracking to reduce repository size:
 - `best_aged_gender_6.onnx` (~85 MB)
 - `best_mood.onnx` (~15 MB)
 - `best_ppe.onnx` (~38 MB)
-
 - `yolov8n.pt` (~25 MB)
 
 Download separately or configure via environment variables.
@@ -1351,7 +1369,6 @@ export YOLO_MODEL="./models/yolov8n.pt"
 export AGE_GENDER_MODEL="./models/best_aged_gender_6.onnx"
 export MOOD_MODEL="./models/best_mood.onnx"
 export PPE_MODEL="./models/best_PPE.onnx"
-
 ```
 
 ### Detection Thresholds
@@ -1360,7 +1377,6 @@ export PPE_MODEL="./models/best_PPE.onnx"
 - **Mood Classification**: All 3 classes enabled
 
 ---
-
 
 ## 📋 API Endpoints Summary
 
@@ -1394,6 +1410,5 @@ http://localhost:8000/docs
 http://localhost:8000/redoc
 ```
 
-## Models file 
-https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link 
-
+## Models file
+https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link
