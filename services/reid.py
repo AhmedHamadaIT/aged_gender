@@ -1,21 +1,8 @@
 """
 services/feature_extractor.py
 -----------------------------
-Person Re-Identification service using OSNet feature extraction + Qdrant identity gallery.
-
-Reads  context["data"]["frame"]
-       context["data"]["detection"]["items"]  — List[Detection]
-
-Writes context["data"]["use_case"]["reid"]    — List[ReIDResult]
-
-If SAVE_OUTPUT=True, draws person ID labels below each bbox on the frame.
-
-Environment variables:
-    REID_MODEL_PATH       — Path to JIT-traced OSNet model (default: models/osnet_x1_0.pt)
-    DEVICE                — Inference device                (default: cpu)
-    REID_AUTO_REGISTER    — Auto-enroll unknown persons     (default: True)
-    REID_PADDING          — Bbox padding in pixels          (default: 10)
-    SAVE_OUTPUT           — Draw annotations on frame       (default: True)
+Event-Based Person Re-Identification using OSNet + Qdrant.
+Triggers identification only when a local track ends.
 """
 
 import os
@@ -37,53 +24,35 @@ from store.identity_manager import IdentityManager
 load_dotenv()
 log = Logger.get_logger(__name__)
 
-PADDING = int(os.getenv("REID_PADDING", "10"))
+PADDING             = int(os.getenv("REID_PADDING", "10"))
+MAX_TRACK_AGE       = int(os.getenv("MAX_TRACK_AGE", "30"))      # Frames to wait before confirming track is gone
+MAX_CROPS_PER_TRACK = int(os.getenv("MAX_CROPS_PER_TRACK", "5")) # Buffer size per track
 
 
-# ─────────────────────────────────────────────
-# Result dataclass
-# ─────────────────────────────────────────────
 @dataclass
-class ReIDResult:
-    bbox      : tuple
+class ReIDEvent:
+    track_id  : int
     person_id : str
     confidence: float
-    is_new    : bool     
+    is_new    : bool
+    last_bbox : tuple
+
     def to_dict(self):
         return {
-            "bbox"      : list(self.bbox),
+            "track_id"  : self.track_id,
             "person_id" : self.person_id,
             "confidence": round(self.confidence, 4),
             "is_new"    : self.is_new,
+            "last_bbox" : list(self.last_bbox)
         }
 
 
-# ─────────────────────────────────────────────
-# ReID service
-# ─────────────────────────────────────────────
 class ReIDService:
     def __init__(self):
         model_path = os.getenv("REID_MODEL_PATH", "models/osnet_x1_0.pt")
-        drive_url = "https://drive.google.com/uc?id=1iTOZeBtDTE2zC6f-zjqGZIJlk1T2i8iN"
+        # ... (Keep your existing download and model loading logic here) ...
         
-        # Download logic
-        if not os.path.exists(model_path):
-            log.info(f"[REID] Model not found. Downloading to {model_path}...")
-            os.makedirs(os.path.dirname(model_path), exist_ok=True)
-            gdown.download(drive_url, model_path, quiet=False)
-            x   
-        _device_raw       = os.getenv("DEVICE", "cpu")
-        self.device       = int(_device_raw) if _device_raw.isdigit() else _device_raw
-        self.auto_register = os.getenv("REID_AUTO_REGISTER", "True").lower() in ("true", "1", "yes")
-        self.save          = os.getenv("SAVE_OUTPUT", "True").lower() in ("true", "1", "yes")
-
-        log.info(f"[REID] Loading model : {model_path}")
-        log.info(f"[REID] Device        : {self.device}")
-        log.info(f"[REID] Auto-register : {self.auto_register}")
-
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"[REID] Model not found: {model_path}")
-
+        self.device = torch.device(os.getenv("DEVICE", "cpu"))
         self.model = torch.jit.load(model_path, map_location=str(self.device))
         self.model.eval()
 
@@ -93,97 +62,123 @@ class ReIDService:
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
-        # Initialize identity store
         self.identity_manager = IdentityManager()
+        self.auto_register    = os.getenv("REID_AUTO_REGISTER", "True").lower() in ("true", "1", "yes")
 
-        log.info("[REID] Ready\n")
+        # ── State Management for Tracking ──
+        self.active_tracks = {}  # { track_id: {"crops": [(area, img)], "last_seen": int, "bbox": tuple} }
+        self.frame_count   = 0
 
-    # ── Pipeline entry point ─────────────────
+        log.info("[REID] Tracking Buffer Ready\n")
+
 
     def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        self.frame_count += 1
         frame      = context["data"]["frame"]
         detections = context["data"]["detection"].get("items", [])
-        results    = []
+        
+        events = []
 
+        # ─────────────────────────────────────────────
+        # 1. Update Track Buffer
+        # ─────────────────────────────────────────────
         for det in detections:
+            track_id = getattr(det, "track_id", None)
+            if track_id is None:
+                continue
+
             crop = self._crop_bbox(frame, det.x1, det.y1, det.x2, det.y2)
             if crop.size == 0:
                 continue
 
-            # Extract feature vector
-            feature = self._extract(crop)
-            if feature is None:
+            # We use bounding box area as a simple proxy for "image quality/closeness"
+            area = (det.x2 - det.x1) * (det.y2 - det.y1)
+
+            if track_id not in self.active_tracks:
+                self.active_tracks[track_id] = {
+                    "crops": [], 
+                    "last_seen": self.frame_count,
+                    "bbox": det.bbox
+                }
+
+            track_data = self.active_tracks[track_id]
+            track_data["last_seen"] = self.frame_count
+            track_data["bbox"]      = det.bbox
+            
+            # Store crop, sort by area (largest first), keep top N
+            track_data["crops"].append((area, crop))
+            track_data["crops"].sort(key=lambda x: x[0], reverse=True)
+            track_data["crops"] = track_data["crops"][:MAX_CROPS_PER_TRACK]
+
+
+        # ─────────────────────────────────────────────
+        # 2. Check for Lost Tracks & Trigger ReID
+        # ─────────────────────────────────────────────
+        lost_track_ids = []
+        for tid, data in self.active_tracks.items():
+            if self.frame_count - data["last_seen"] > MAX_TRACK_AGE:
+                lost_track_ids.append(tid)
+
+        for tid in lost_track_ids:
+            track_data = self.active_tracks.pop(tid)
+            
+            # Extract features for all saved crops
+            features = []
+            for _, crop in track_data["crops"]:
+                tensor_feat = self._extract_raw_tensor(crop)
+                if tensor_feat is not None:
+                    features.append(tensor_feat)
+            
+            if not features:
                 continue
 
-            # Identify against gallery
-            match = self.identity_manager.identify(feature)
+            # Stack, Average, and Re-Normalize
+            stacked_features = torch.stack(features)           # Shape: [N, Embedding_Dim]
+            avg_feature      = torch.mean(stacked_features, dim=0) # Shape: [Embedding_Dim]
+            final_embedding  = F.normalize(avg_feature, p=2, dim=0).cpu().numpy().tolist()
+
+            # Identify against Qdrant gallery
+            match = self.identity_manager.identify(final_embedding)
 
             if match is not None:
-                results.append(ReIDResult(
-                    bbox       = det.bbox,
+                events.append(ReIDEvent(
+                    track_id   = tid,
                     person_id  = match["person_id"],
                     confidence = match["confidence"],
                     is_new     = False,
+                    last_bbox  = track_data["bbox"]
                 ))
             elif self.auto_register:
-                new_id = self.identity_manager.register(feature)
-                results.append(ReIDResult(
-                    bbox       = det.bbox,
+                new_id = self.identity_manager.register(final_embedding)
+                events.append(ReIDEvent(
+                    track_id   = tid,
                     person_id  = new_id,
                     confidence = 1.0,
                     is_new     = True,
+                    last_bbox  = track_data["bbox"]
                 ))
-            # else: skip — unknown person, auto-register disabled
 
-        context["data"]["use_case"]["reid"] = results
-
-        # ── Draw labels on frame if saving ──
-        if self.save:
-            context["data"]["frame"] = self._draw(frame, results)
-
+        # This will now contain a list of completed visit events, not frame-by-frame detections
+        context["data"]["use_case"]["reid_events"] = events
         return context
 
     # ── Internal methods ─────────────────────
 
     def _crop_bbox(self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
-        """Crop bbox region with padding, clamped to frame bounds."""
         h, w = frame.shape[:2]
-        x1 = max(0, x1 - PADDING)
-        y1 = max(0, y1 - PADDING)
-        x2 = min(w, x2 + PADDING)
-        y2 = min(h, y2 + PADDING)
+        x1, y1 = max(0, x1 - PADDING), max(0, y1 - PADDING)
+        x2, y2 = min(w, x2 + PADDING), min(h, y2 + PADDING)
         return frame[y1:y2, x1:x2]
 
-    def _extract(self, cropped_bgr: np.ndarray) -> Optional[list]:
-        """Extract a normalized feature vector from a BGR crop. Returns None on error."""
+    def _extract_raw_tensor(self, cropped_bgr: np.ndarray) -> Optional[torch.Tensor]:
+        """Returns the un-normalized tensor directly for mathematical averaging."""
         try:
             img_rgb = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2RGB)
             tensor  = self.transform(Image.fromarray(img_rgb)).unsqueeze(0).to(self.device)
 
             with torch.no_grad():
                 feature = self.model(tensor)[0]
-
-            feat_norm = F.normalize(feature, p=2, dim=0)
-            return feat_norm.cpu().numpy().tolist()
+            return feature
         except Exception as e:
             log.warning(f"[REID] Feature extraction failed: {e}")
             return None
-
-    def _draw(self, frame: np.ndarray, results: List[ReIDResult]) -> np.ndarray:
-        """Draw person ID labels below each detection bbox."""
-        out = frame.copy()
-        for r in results:
-            x1, y1, x2, y2 = r.bbox
-            # Use short ID for readability (first 8 chars of UUID)
-            short_id = r.person_id[:8] if len(r.person_id) > 8 else r.person_id
-            label    = f"ID:{short_id}"
-            color    = (0, 255, 0) if not r.is_new else (0, 165, 255)  # green=known, orange=new
-
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-            cv2.rectangle(out, (x1, y2), (x1 + tw + 4, y2 + th + 8), color, -1)
-            cv2.putText(
-                out, label, (x1 + 2, y2 + th + 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (255, 255, 255), 1, cv2.LINE_AA,
-            )
-        return out

@@ -52,6 +52,7 @@ class Detection:
     class_id  : int
     class_name: str
     confidence: float
+    track_id  : int = None  
 
     @property
     def bbox(self):
@@ -78,6 +79,7 @@ class Detection:
             "center"    : list(self.center),
             "width"     : self.width,
             "height"    : self.height,
+            "track_id"  : self.track_id,
         }
 
 
@@ -106,11 +108,13 @@ class DetectorService:
 
     def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
         frame   = context["data"]["frame"]
-        results = self.model.predict(
+        results = self.model.track(
             frame,
             conf    = self.conf,
             device  = self.device,
             classes = self.classes,
+            persist  = True, 
+            tracker = "bytetrack.yaml",
             verbose = False,
         )
 
@@ -122,6 +126,9 @@ class DetectorService:
                 score = float(box.conf[0])
                 if score < self.conf:
                     continue
+
+                track_id = int(box.id[0]) if box.id is not None else None
+
                 cls_id         = int(box.cls[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 detections.append(Detection(
@@ -129,6 +136,7 @@ class DetectorService:
                     class_id=cls_id,
                     class_name=self.names[cls_id],
                     confidence=score,
+                    track_id=track_id,
                 ))
 
         context["data"]["detection"] = {
@@ -148,7 +156,8 @@ class DetectorService:
         out = frame.copy()
         for det in detections:
             color = COLORS[det.class_id % len(COLORS)]
-            label = f"{det.class_name} {det.confidence:.2f}"
+            id_str = f"ID:{det.track_id} " if det.track_id is not None else ""
+            label  = f"{id_str}{det.class_name} {det.confidence:.2f}"
 
             cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 2)
 
