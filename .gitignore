@@ -1,6 +1,10 @@
 # Environments
 
 venv/
+.venv/
+.env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -14,6 +18,19 @@ htmlcov/
 
 # IDEs
 .vscode/
+.cursor/
+.scripts/
+
+# Local scripts (not tracked)
+scripts/
+tests/
+# Specify / Speckit (local tooling & generated specs)
+.specify/
+specs/
+
+# Integration test temp config (copied from config/cashier_zones.yaml)
+test_reports/tmp_cashier_zones_integration.yaml
+test_reports/tmp_detection_stream_capture.lines
 
 # Project Specific
 outputs/
@@ -23,6 +40,27 @@ logger/app.log
 evidence/
 torch*
 
+# Local secrets / OS noise
+*.pem
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Cashier frame batch tests / YOLO tooling (outputs/ already ignores test runs)
+runs/
+wandb/
+*.engine
+
+# YOLOv8n weights (often large; use models/ or env YOLO_MODEL)
+yolov8n.pt
+yolov8n.onnx
+yolov8n.yaml
+
 # Tests
 test_*.py
 *_test.py
@@ -31,8 +69,5 @@ find_test_frame.py
 test_cashier_images.py
 test_results/
 test_results.log
-README_CASHIER_TESTING.md
-test_results/
-run_pipeline_test.py
 README_CASHIER_TESTING.md
 run_user_frame.py

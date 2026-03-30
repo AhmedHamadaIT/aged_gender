@@ -28,7 +28,7 @@ from apis.detection import detection, DetectionSetupRequest
 from apis.cashier  import router as cashier_router
 from pipeline import CameraPipeline
 from schemas import DetectionRequest, DetectionStatus
-from apis.cashier import router as cashier_router 
+
 app = FastAPI(title="Vision Pipeline API", version="1.0.0")
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
 

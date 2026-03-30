@@ -13,7 +13,7 @@ gif:
   fps: 10
   quality: 85
 meta:
-  version: 1.0.0
+  version: 1.2.0
 thresholds:
   config_reload_interval: 60
   customer_wait_max_seconds: 30
@@ -23,24 +23,16 @@ zones:
   ROI_CASHIER:
     active: true
     points:
-    - - 0.313
-      - 0.561
-    - - 0.693
-      - 0.538
-    - - 0.733
-      - 1.001
-    - - 0.260
-      - 1.001
-    shape: polygon
+    - - 0.0
+      - 0.0
+    - - 0.5
+      - 1.0
+    shape: rectangle
   ROI_CUSTOMER:
     active: true
     points:
-    - - 0.634
-      - 0.282
-    - - 0.630
-      - 0.003
-    - - 0.295
-      - 0.000
-    - - 0.295
-      - 0.326
-    shape: polygon
+    - - 0.5
+      - 0.0
+    - - 1.0
+      - 1.0
+    shape: rectangle

@@ -1029,6 +1029,22 @@ class CashierService:
         # 3. Business logic evaluation
         case_id, severity, alerts, transaction = self._evaluate(cz, kz, now)
 
+        if os.getenv("CASHIER_DEBUG_ZONES", "").lower() in ("1", "true", "yes", "on"):
+            log.info(
+                "[CASHIER] zones | frame=%d | CZ P=%d D=%d C=%d | KZ P=%d D=%d C=%d | "
+                "case=%s | transaction=%s | alerts=%s",
+                frame_id,
+                cz.persons,
+                cz.drawers,
+                cz.cash,
+                kz.persons,
+                kz.drawers,
+                kz.cash,
+                case_id,
+                transaction,
+                alerts if alerts else "—",
+            )
+
         # 4. Detect event resolution (alert case changed)
         self._check_resolved(camera_id, case_id, now)
 

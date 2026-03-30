@@ -1,6 +1,6 @@
 # Vision Pipeline API
 
-The Vision Pipeline API is a FastAPI-based server for running multi-camera computer vision pipelines. It supports adding multiple RTSP streams, composing custom execution pipelines (e.g., object detection, age/gender estimation, mood detection), and streaming the visual results to clients via Server-Sent Events (SSE).
+The Vision Pipeline API is a FastAPI-based server for multi-camera computer vision. It registers RTSP sources, composes pipelines from **detector**, **age/gender**, **mood**, **PPE**, and **cashier** services, and exposes results over **Server-Sent Events** (`/detection/stream`) plus dedicated **cashier** REST and SSE routes under `/cashier`.
 
 ---
 
@@ -21,6 +21,252 @@ The Vision Pipeline API is a FastAPI-based server for running multi-camera compu
    ```
 
 *(Alternatively, you can run it via Docker Compose if standard deployment is configured).*
+
+**Default base URL:** `http://localhost:9000` — use `http://<host>:9000` on a Jetson or remote machine. Interactive OpenAPI: `/docs`, `/redoc`.
+
+---
+
+## Features
+
+- **Multi-camera RTSP** — Register streams with `POST /cameras`; list with `GET /cameras`; remove with `DELETE /cameras/{cam_id}`.
+- **Composable pipeline** — `POST /detection/setup` chooses services from: `detector`, `age_gender`, `mood`, `ppe`, `cashier` (see `services/__init__.py`).
+- **Runtime control** — `POST /detection/start` and `POST /detection/stop` (optional `camera_id` query); `GET /detection/status` for FPS, frame counts, and errors.
+- **Global SSE** — `GET /detection/stream` streams one JSON payload per processed frame from all cameras; each event may include a base64 JPEG in `frame`.
+- **Cashier monitor** — Zone geometry and timers via `GET` / `POST /cashier/zones` and `POST /cashier/zones/reset`; scenarios **N1–N6** (normal) and **A1–A7** (alert/critical). `GET /cashier/status` for latest per-camera summary; `GET` / `DELETE /cashier/events` for the in-memory alert/transaction log; `GET /cashier/evidence` and `GET /cashier/evidence/{path}` for saved JPEGs. Per-camera SSE: `GET /cashier/stream/{camera_id}` and `GET /cashier/stream/{camera_id}/only` (alerts-focused). Media helpers under `/cashier/media/...` (latest JPG/GIF, per-event assets, `drawer_count`). Case evaluation order in code: critical **A3/A4** → unattended drawer **A1** → timed **A5** (customer wait) / **A6** (drawer duration) → **A7** → normal **N3/N4/N6** → **N5/N2** → fallback **A2** ([`services/cashier.py`](services/cashier.py) `_evaluate`).
+- **Configuration on disk** — Cashier YAML/JSON path from env `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); evidence directory from `CASHIER_EVIDENCE_DIR` (default `./evidence/cashier`).
+
+---
+
+## Sample configuration file (`config/cashier_zones.yaml`)
+
+The cashier service loads **`CASHIER_CONFIG`** (default `./config/cashier_zones.yaml`). On disk, each zone uses **`points` as `[[x, y], …]`** with normalized coordinates in `[0, 1]`. **`POST /cashier/zones`** must send **`points` as `[{"x":…,"y":…}, …]`**; the API writes the nested-list form back to the file. `GET /cashier/zones` returns the merged file (zones, thresholds, and any extra keys such as `buffer`, `debounce`, `evidence`, `gif`, `meta`).
+
+Abbreviated example (see repository file for full values):
+
+```yaml
+thresholds:
+  config_reload_interval: 60
+  customer_wait_max_seconds: 30
+  drawer_open_max_seconds: 30
+  proximity_iou: 0.05
+zones:
+  ROI_CASHIER:
+    active: true
+    shape: polygon
+    points:
+      - [0.313, 0.561]
+      - [0.693, 0.538]
+      - [0.733, 1.001]
+      - [0.260, 1.001]
+  ROI_CUSTOMER:
+    active: true
+    shape: polygon
+    points:
+      - [0.634, 0.282]
+      - [0.630, 0.003]
+      - [0.295, 0.000]
+      - [0.295, 0.326]
+buffer:
+  jpeg_quality: 75
+  size: 100
+debounce:
+  default: 3
+  A3: 1
+  A4: 1
+evidence:
+  save_gif: true
+  save_thumbnail: true
+  log_rotate_mb: 100
+gif:
+  fps: 10
+  quality: 85
+meta:
+  version: 1.0.0
+```
+
+---
+
+## Complete cURL reference (all HTTP routes)
+
+Set `BASE` to your server root, for example:
+
+```bash
+export BASE=http://localhost:9000
+# or: export BASE=http://<jetson-ip>:9000
+```
+
+### `GET /`
+
+```bash
+curl -s "$BASE/"
+```
+
+### Cameras — `POST` / `GET` / `DELETE /cameras/{cam_id}`
+
+```bash
+curl -s -X POST "$BASE/cameras" \
+  -H "Content-Type: application/json" \
+  -d '{"cameras":[{"id":"cam1","url":"rtsp://user:pass@192.168.1.10/stream"}]}'
+
+curl -s "$BASE/cameras"
+
+curl -s -X DELETE "$BASE/cameras/cam1"
+```
+
+### Detection — `setup`, `start`, `stop`, `status`, `stream`
+
+```bash
+curl -s -X POST "$BASE/detection/setup" \
+  -H "Content-Type: application/json" \
+  -d '{"pipeline":["detector","age_gender","mood","cashier"]}'
+
+curl -s -X POST "$BASE/detection/start?camera_id=cam1"
+curl -s -X POST "$BASE/detection/start"
+curl -s -X POST "$BASE/detection/stop?camera_id=cam1"
+curl -s -X POST "$BASE/detection/stop"
+
+curl -s "$BASE/detection/status"
+
+curl -N "$BASE/detection/stream"
+```
+
+### Cashier — zones (`GET` / `POST` / `POST …/reset`)
+
+```bash
+curl -s "$BASE/cashier/zones"
+
+curl -s "$BASE/cashier/zones" | jq '.thresholds'
+
+curl -s -X POST "$BASE/cashier/zones" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "thresholds": {
+      "drawer_open_max_seconds": 45,
+      "customer_wait_max_seconds": 45,
+      "proximity_iou": 0.06,
+      "config_reload_interval": 60
+    }
+  }'
+
+curl -s -X POST "$BASE/cashier/zones" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ROI_CASHIER": {
+      "shape": "rectangle",
+      "points": [{"x": 0.0, "y": 0.0}, {"x": 0.5, "y": 1.0}],
+      "active": true
+    },
+    "ROI_CUSTOMER": {
+      "shape": "polygon",
+      "points": [
+        {"x": 0.5, "y": 0.0},
+        {"x": 1.0, "y": 0.0},
+        {"x": 1.0, "y": 1.0},
+        {"x": 0.5, "y": 1.0}
+      ],
+      "active": true
+    },
+    "thresholds": {
+      "drawer_open_max_seconds": 30,
+      "customer_wait_max_seconds": 30
+    }
+  }'
+
+curl -s -X POST "$BASE/cashier/zones/reset"
+```
+
+Successful `POST /cashier/zones` returns `{"status":"updated","config":{...}}` with the full merged config (including `zones` as `[[x,y],…]`).
+
+### Cashier — `status`, `events`, `evidence`
+
+```bash
+curl -s "$BASE/cashier/status"
+
+curl -s "$BASE/cashier/events?severity=ALERT&case_id=A5&camera_id=cam1&limit=50&offset=0"
+
+curl -s -X DELETE "$BASE/cashier/events"
+
+curl -s "$BASE/cashier/evidence?severity=alert&case_id=A5&limit=20"
+
+curl -s -o evidence.jpg "$BASE/cashier/evidence/<relative/path/from/list>"
+```
+
+### Cashier — per-camera SSE and media
+
+```bash
+curl -N "$BASE/cashier/stream/cam1"
+curl -N "$BASE/cashier/stream/cam1/only"
+
+curl -s -o latest.jpg "$BASE/cashier/media/cam1/latest/jpg"
+curl -s -o latest.gif "$BASE/cashier/media/cam1/latest/gif"
+curl -s -o event.jpg "$BASE/cashier/media/cam1/event/<event_id>/jpg"
+curl -s -o event.gif "$BASE/cashier/media/cam1/event/<event_id>/gif"
+
+# Logged "triggered" event count — NOT total frames with drawer open (see curl_cashier.md)
+curl -s "$BASE/cashier/media/cam1/drawer_count"
+```
+
+### Cashier — thresholds & timers (A5 / A6)
+
+- **`customer_wait_max_seconds`** → **A5** (customer in customer zone, no cashier, wait exceeds limit).  
+- **`drawer_open_max_seconds`** → **A6** (drawer open duration exceeds limit).  
+
+Full **thresholds → logic → output** table: [`curl_cashier.md`](curl_cashier.md) (*A5 / A6: thresholds → logic → output*).
+
+```bash
+curl -s "$BASE/cashier/zones" | jq '.thresholds'
+curl -s "$BASE/cashier/zones" | jq '.zones'
+```
+
+### After `POST /detection/start` (runtime checks)
+
+```bash
+curl -s "$BASE/detection/status"
+curl -s "$BASE/cashier/status"
+curl -s "$BASE/cashier/events?limit=20"
+```
+
+### jq examples (detection SSE)
+
+```bash
+curl -sN "$BASE/detection/stream" \
+  | grep "^data:" | sed 's/^data: //' \
+  | jq '.data.use_case.cashier.summary | {case_id, severity, alerts}'
+
+curl -sN "$BASE/detection/stream" \
+  | grep "^data:" | sed 's/^data: //' \
+  | jq '.data.use_case.cashier.persons[] | {zone, transaction}'
+
+curl -s "$BASE/cashier/zones" | jq '.thresholds'
+```
+
+### SSH — tail batch JSONL, evidence log, or app log
+
+Replace `<user>`, `<jetson-ip>`, and the repo path on the device.
+
+**Batch JSONL** (same logical shape as live SSE bodies, without the `data: ` prefix):
+
+```bash
+# Full-dataset run (includes summary.json in repo when present)
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T060741_7464/stream.jsonl"
+
+# Local cashier-YOLO batch (multiple_persons frames)
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T135320_10106/stream.jsonl"
+```
+
+**Cashier evidence log** (`triggered` / `resolved` lines, GIF paths after compile):
+
+```bash
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/evidence/cashier/logs/events.jsonl"
+```
+
+**Application log** (if your deployment writes here):
+
+```bash
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/logger/app.log"
+```
+
+More detail: [`curl_cashier.md`](curl_cashier.md), SSE examples: [`sse_cashier.md`](sse_cashier.md).
 
 ---
 
@@ -439,137 +685,119 @@ Chair (Right Side)
 
 ---
 
-## 🛠️ cURL Testing Examples
+HTTP examples for every route are in **[Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes)** above. This repository’s running app exposes **no** `/process`, `/stream` (POST), `/mood`, `/age-gender`, or `/health` routes — use RTSP cameras plus `/detection/*` and `/cashier/*` as documented.
 
-### Quick Start - Test with Image File
+---
 
-#### Test Single Image
-```bash
-curl -X POST "http://localhost:8000/process" \
-  -H "Content-Type: multipart/form-data" \
-  -F "file=@/path/to/image.jpg" \
-  -F "camera_id=test_camera_1"
-```
+## Cashier full-dataset validation report
 
-#### Test with Result File Output
-```bash
-curl -X POST "http://localhost:8000/process" \
-  -F "file=@/home/a7med/Downloads/f1.webp" \
-  -F "camera_id=f1_test" \
-  --output results.json
+**Run ID:** `20260329T060741_7464`  
+**Authoritative metrics:** [`outputs/cashier_test/20260329T060741_7464/summary.json`](outputs/cashier_test/20260329T060741_7464/summary.json) (aggregated from [`stream.jsonl`](outputs/cashier_test/20260329T060741_7464/stream.jsonl)).
 
-# View prettified response
-cat results.json | jq '.'
-```
+### Executive summary
 
-#### Extract & Save Annotated Image from Response
-```bash
-# Save full response
-response=$(curl -X POST "http://localhost:8000/process" \
-  -F "file=@image.jpg" \
-  -F "camera_id=test")
+| Metric | Value |
+|--------|------:|
+| Total frames processed | 22,537 |
+| Wall-clock span (first → last record timestamp) | 4,798.03 s (**1h 19m 58s**) |
+| Average throughput | **4.6971 FPS** (frames ÷ duration) |
+| **Total times drawer open (frame count)** | **0** |
 
-# Extract base64 frame and decode
-echo "$response" | jq -r '.frame' | base64 -d > annotated_image.jpg
+The **drawer-open frame count** is the number of frames whose `case_id` is one of **N3, N6, A1, A3, A4, A6** (cases where the cashier-zone drawer is treated as open in the business logic). For this dataset run, no frames fell into those classes, so the aggregate is zero.
 
-# View detections summary
-echo "$response" | jq '.data.detection'
-```
+### Severity breakdown (observed)
 
-### Advanced Testing
+| Severity | Frames | Share of total |
+|----------|-------:|---------------:|
+| NORMAL | 20,626 | 91.52% |
+| ALERT | 1,911 | 8.48% |
+| CRITICAL | 0 | 0.00% |
 
-#### Batch Process Multiple Images
-```bash
-mkdir -p results
-for image in *.jpg *.png *.webp; do
-  [ -f "$image" ] || continue
-  
-  echo "Processing: $image"
-  curl -X POST "http://localhost:8000/process" \
-    -F "file=@$image" \
-    -F "camera_id=batch_$(date +%s%N)" \
-    --output "results/$image.json"
-done
-```
+### Case distribution (N1–N6, A1–A7)
 
-#### Stream Processing
-```bash
-curl -X POST "http://localhost:8000/stream" \
-  -F "file=@video.mp4" \
-  -F "camera_id=video_stream" \
-  -N  # No buffering, stream output
-```
+Counts are **per-frame classifications** over the full run. Cases not observed are listed as **0**.
 
-#### Test Mood Detection Only
-```bash
-curl -X POST "http://localhost:8000/mood" \
-  -F "file=@face_image.jpg" | jq '.data.use_case.mood'
-```
+| case_id | Severity (typical) | Frames |
+|---------|-------------------|-------:|
+| N1 | NORMAL | 18,058 |
+| N2 | NORMAL | 2,568 |
+| N3 | NORMAL | 0 |
+| N4 | NORMAL | 0 |
+| N5 | NORMAL | 0 |
+| N6 | NORMAL | 0 |
+| A1 | ALERT / CRITICAL | 0 |
+| A2 | ALERT | 68 |
+| A3 | CRITICAL | 0 |
+| A4 | CRITICAL | 0 |
+| A5 | ALERT | 1,843 |
+| A6 | ALERT | 0 |
+| A7 | ALERT | 0 |
 
-#### Test Age/Gender Detection Only
-```bash
-curl -X POST "http://localhost:8000/age-gender" \
-  -F "file=@face_image.jpg" | jq '.data.use_case.age_gender'
-```
+### Visual evidence
 
-#### Health Check
-```bash
-curl -X GET "http://localhost:8000/health" \
-  -H "Content-Type: application/json"
-```
+**Animated summary (GIF)** — when generated by your batch pipeline, place it next to the run artifacts:
+
+![Cashier test run animation](outputs/cashier_test/20260329T060741_7464/cashier_test.gif)
+
+*If the file is not present in the repository yet, add `cashier_test.gif` under the run directory after export from annotated frames or your tooling.*
+
+**Representative stills from this run** (annotated / evidence paths under `outputs/cashier_test/20260329T060741_7464/`):
+
+| Case | Role | Example path |
+|------|------|----------------|
+| N1 | Idle | [`evidence/normal/N1/frame_000000_time_00m00s_1of3.jpg`](outputs/cashier_test/20260329T060741_7464/evidence/normal/N1/frame_000000_time_00m00s_1of3.jpg) |
+| N2 | Cashier only | [`evidence/normal/N2/frame_000465_time_02m35s_1of3.jpg`](outputs/cashier_test/20260329T060741_7464/evidence/normal/N2/frame_000465_time_02m35s_1of3.jpg) |
+| A5 | Customer waiting | [`evidence/alert/A5/frame_000386_time_02m08s_3of3.jpg`](outputs/cashier_test/20260329T060741_7464/evidence/alert/A5/frame_000386_time_02m08s_3of3.jpg) |
+| A2 | Unexpected persons in cashier zone | [`evidence/alert/A2/frame_000404_time_02m14s_3of3.jpg`](outputs/cashier_test/20260329T060741_7464/evidence/alert/A2/frame_000404_time_02m14s_3of3.jpg) |
+
+**Critical cases (A3, A4, …)** — no CRITICAL frames in this run; when they occur, evidence follows the same layout, e.g. `evidence/critical/A3/…`, `evidence/critical/A4/…`.
+
+![N1 idle](outputs/cashier_test/20260329T060741_7464/evidence/normal/N1/frame_000000_time_00m00s_1of3.jpg)
+
+![N2 cashier only](outputs/cashier_test/20260329T060741_7464/evidence/normal/N2/frame_000465_time_02m35s_1of3.jpg)
+
+![A5 customer waiting](outputs/cashier_test/20260329T060741_7464/evidence/alert/A5/frame_000386_time_02m08s_3of3.jpg)
+
+![A2 unexpected in cashier zone](outputs/cashier_test/20260329T060741_7464/evidence/alert/A2/frame_000404_time_02m14s_3of3.jpg)
+
+### Artifacts for this run
+
+- [`stream.jsonl`](outputs/cashier_test/20260329T060741_7464/stream.jsonl) — one JSON record per frame  
+- [`events/`](outputs/cashier_test/20260329T060741_7464/events/) — per-frame JSON mirrors  
+- [`annotated/`](outputs/cashier_test/20260329T060741_7464/annotated/) — annotated JPEGs  
+- [`evidence/`](outputs/cashier_test/20260329T060741_7464/evidence/) — normal / alert / critical evidence by case  
+- [`summary.json`](outputs/cashier_test/20260329T060741_7464/summary.json) — aggregates documented above  
 
 ---
 
 ## Complete Cashier Pipeline Lifecycle
 
-This sequence demonstrates how to configure zones, set up the pipeline, and stream the results.
+Recommended order:
 
-### 1. Configure Zones (Rectangle / Polygon)
-```bash
-curl -X POST "http://<jetson-ip>:9000/cashier/zones" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "ROI_CASHIER": {
-      "shape": "rectangle",
-      "points": [[0.0, 0.0], [0.5, 1.0]],
-      "active": true
-    },
-    "ROI_CUSTOMER": {
-      "shape": "polygon",
-      "points": [[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]],
-      "active": true
-    }
-  }'
-```
+1. **`POST /cameras`** — register RTSP sources.  
+2. **`POST /detection/setup`** — e.g. `["detector","age_gender","mood","cashier"]`.  
+3. **`POST /cashier/zones`** (optional) — zones/thresholds; defaults come from `CASHIER_CONFIG`.  
+4. **`GET /cashier/zones`** (optional) — verify merged YAML on disk.  
+5. **`POST /detection/start`** — start workers (`?camera_id=…` or all cameras).  
+6. **`GET /detection/stream`** or **`GET /cashier/status`** — consume results.  
 
-### 2. Setup Detection Pipeline
-```bash
-curl -X POST "http://<jetson-ip>:9000/detection/setup" \
-  -H "Content-Type: application/json" \
-  -d '{"pipeline": ["detector", "age_gender", "mood", "cashier"]}'
-```
-
-### 3. Start Pipeline
-```bash
-curl -X POST "http://<jetson-ip>:9000/detection/start?camera_id=main_room"
-```
-
-### 4. Consume SSE Stream
-```bash
-curl -N "http://<jetson-ip>:9000/detection/stream"
-```
-
-### SSH log tail command (server-side)
-```bash
-ssh <user>@<jetson-ip> "tail -f /path/to/repo/logger/app.log"
-```
+Copy-paste **`curl`** for each step: [Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes). SSH tail examples are in that section.
 
 ---
 
 ## SSE / SSH Stream Logs (Cashier + Mood + Age/Gender)
 
-### Stream event source image (annotated)
-The following stream event example is taken from an annotated frame generated in the production simulation run:
+### Stream event sources
+
+**Full dataset batch (2026-03-29)** — Line-delimited JSON is archived as [`outputs/cashier_test/20260329T060741_7464/stream.jsonl`](outputs/cashier_test/20260329T060741_7464/stream.jsonl). **Additional batch:** [`outputs/cashier_test/20260329T135320_10106/stream.jsonl`](outputs/cashier_test/20260329T135320_10106/stream.jsonl) (local cashier-YOLO run). Inspect on the Jetson:
+
+```bash
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T060741_7464/stream.jsonl"
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T135320_10106/stream.jsonl"
+```
+
+**Earlier simulation (reference still)** — Annotated frame from the production simulation run:
+
 - Image: `outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096720.jpg`
 
 ![Annotated Frame Used For Stream Example](outputs/cashier_production_sim/20260326T050929Z/annotated/frame_096720.jpg)
@@ -1221,7 +1449,13 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 
-### Production simulation artifacts (latest run)
+### Full-dataset cashier test (2026-03-29)
+- `outputs/cashier_test/20260329T060741_7464/summary.json` — metrics and case table (source of truth for the validation report above)
+- `outputs/cashier_test/20260329T060741_7464/stream.jsonl` — per-frame pipeline JSON
+- `outputs/cashier_test/20260329T060741_7464/annotated/`, `evidence/`, `events/`
+- `outputs/cashier_test/20260329T060741_7464/cashier_test.gif` — optional animated export
+
+### Production simulation artifacts (earlier reference run)
 - `outputs/cashier_production_sim/20260326T050929Z/annotated_sequence.gif`
 - `outputs/cashier_production_sim/20260326T050929Z/stream.jsonl`
 - `outputs/cashier_production_sim/20260326T050929Z/summary.json`
@@ -1232,32 +1466,35 @@ For the one-off test on `frame_097440`, outputs are saved to:
 - Annotated frame: `outputs/cashier_aged_gender_single/20260326T064528Z/annotated/frame_097440.jpg`
 - JSON results: `outputs/cashier_aged_gender_single/20260326T064528Z/result.json`
 
-### Response Processing Examples
+### Response processing examples (SSE + jq)
 
-#### Extract Detections with jq
+Use `export BASE=http://localhost:9000`. Strip the SSE `data: ` prefix before `jq` (see [Complete cURL reference](#complete-curl-reference-all-http-routes)).
+
 ```bash
-# Get all detections
-curl -s -X POST "http://localhost:8000/process" \
-  -F "file=@image.jpg" \
-  -F "camera_id=test" | jq '.data.detection.items[] | {class_name, confidence}'
+# First streamed frame: detection class + confidence
+curl -sN "$BASE/detection/stream" \
+  | grep "^data:" | head -1 | sed 's/^data: //' \
+  | jq '.data.detection.items[]? | {class_name, confidence}'
 
-# Filter high-confidence detections (>0.85)
-curl -s -X POST "http://localhost:8000/process" \
-  -F "file=@image.jpg" \
-  -F "camera_id=test" | jq '.data.detection.items[] | select(.confidence > 0.85)'
+# Same frame: high-confidence detections only
+curl -sN "$BASE/detection/stream" \
+  | grep "^data:" | head -1 | sed 's/^data: //' \
+  | jq '.data.detection.items[]? | select(.confidence > 0.85)'
 
-# Get mood distribution
-curl -s -X POST "http://localhost:8000/process" \
-  -F "file=@image.jpg" \
-  -F "camera_id=test" | jq '[.data.use_case.mood[] | .mood] | group_by(.) | map({mood: .[0], count: length})'
+# Mood histogram for one frame (if mood is in the pipeline)
+curl -sN "$BASE/detection/stream" \
+  | grep "^data:" | head -1 | sed 's/^data: //' \
+  | jq '[.data.use_case.mood[]? | .mood] | group_by(.) | map({mood: .[0], count: length})'
 
-# Get cashier case summary
-curl -s -N "http://<jetson-ip>:9000/detection/stream" \
+# Cashier summary (continuous; interrupt with Ctrl+C)
+curl -sN "$BASE/detection/stream" \
+  | grep "^data:" | sed 's/^data: //' \
   | jq '.data.use_case.cashier.summary | {case_id, severity, alerts}'
 
-# List all persons with their zones
-curl -s -N "http://<jetson-ip>:9000/detection/stream" \
-  | jq '.data.use_case.cashier.persons[] | {zone, transaction, drawers: .items.drawers | length, cash: .items.cash | length}'
+# Cashier persons with drawer/cash counts
+curl -sN "$BASE/detection/stream" \
+  | grep "^data:" | sed 's/^data: //' \
+  | jq '.data.use_case.cashier.persons[]? | {zone, transaction, drawers: (.items.drawers | length), cash: (.items.cash | length)}'
 ```
 
 ---
@@ -1294,6 +1531,10 @@ curl -s -N "http://<jetson-ip>:9000/detection/stream" \
 - **Input**: person crops (224×224 pixels)
 - **Output**: PPE class + confidence score
 
+### 5. Cashier monitor (YOLO + zone logic)
+- **Purpose**: Assign persons to `ROI_CASHIER` / `ROI_CUSTOMER`, detect drawers and cash, classify **N1–N6** / **A1–A7**, optional evidence GIFs and logs under `CASHIER_EVIDENCE_DIR`.
+- **Config**: `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); see [Sample configuration file](#sample-configuration-file-configcashier_zonesyaml).
+
 ---
 
 ## 📁 Project Structure
@@ -1301,6 +1542,13 @@ curl -s -N "http://<jetson-ip>:9000/detection/stream" \
 ```
 .
 ├── app.py                      # FastAPI main application
+├── pipeline.py                 # Per-camera worker pipeline
+├── apis/                       # Route handlers
+│   ├── cameras.py
+│   ├── detection.py
+│   └── cashier.py              # /cashier/* (zones, SSE, evidence, media)
+├── config/                     # Default cashier zones YAML
+│   └── cashier_zones.yaml
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # This file (complete documentation)
 ├── .gitignore                  # Git ignore rules (models/ excluded)
@@ -1313,9 +1561,11 @@ curl -s -N "http://<jetson-ip>:9000/detection/stream" \
 │   ├── detector.py             # YOLO detection service
 │   ├── age_gender.py           # Age/Gender classification
 |   ├── ppe.py                  # PPE detection
-│   └── mood.py                 # Mood/Emotion detection
+│   ├── mood.py                 # Mood/Emotion detection
+│   └── cashier.py              # Cashier zone + case logic
 ├── scripts/                    # Testing and utility scripts
 │   └── test_image_pipeline.py  # Image inference testing script
+├── tests/                      # pytest suite (`pytest.ini`)
 ├── logger/                     # Logging configuration
 │   └── logger_config.py        # Logger setup
 └── outputs/                    # Test results directory
@@ -1333,20 +1583,12 @@ curl -s -N "http://<jetson-ip>:9000/detection/stream" \
 
 ## 🔄 Git Workflow
 
-### Current Branch: `mood`
 ```bash
-# View commit history
 git log --oneline -10
-
-# Check current changes
 git status
-
-# Commit new changes
 git add .
 git commit -m "Description of changes"
-
-# Push to remote
-git push origin mood
+git push origin <your-branch>
 ```
 
 ### Model Files
@@ -1382,33 +1624,43 @@ export PPE_MODEL="./models/best_PPE.onnx"
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/` | GET | Health check / service info |
-| `/process` | POST | Single image inference |
-| `/stream` | POST | Video/stream processing |
-| `/mood` | POST | Mood detection only |
-| `/age-gender` | POST | Age/gender detection only |
+| `/` | GET | Service info |
 | `/cameras` | POST | Configure cameras |
 | `/cameras` | GET | List configured cameras |
 | `/cameras/{cam_id}` | DELETE | Remove camera |
 | `/detection/setup` | POST | Configure pipeline services |
-| `/detection/start` | POST | Start processing |
-| `/detection/stop` | POST | Stop processing |
-| `/detection/status` | GET | Get operational status |
-| `/detection/stream` | GET | SSE stream endpoint |
-| `/docs` | GET | Interactive API documentation |
+| `/detection/start` | POST | Start processing (optional `camera_id`) |
+| `/detection/stop` | POST | Stop processing (optional `camera_id`) |
+| `/detection/status` | GET | Operational status per camera |
+| `/detection/stream` | GET | SSE: all cameras, one JSON per frame |
+| `/cashier/status` | GET | Latest cashier summary per camera |
+| `/cashier/events` | GET | Paginated alert/transaction log (`severity`, `case_id`, `camera_id`, `limit`, `offset`) |
+| `/cashier/events` | DELETE | Clear in-memory event log |
+| `/cashier/evidence` | GET | List evidence JPEGs (`severity`, `case_id`, `limit`) |
+| `/cashier/evidence/{path}` | GET | Download one evidence JPEG |
+| `/cashier/zones` | GET | Read `CASHIER_CONFIG` |
+| `/cashier/zones` | POST | Update zones and/or thresholds |
+| `/cashier/zones/reset` | POST | Restore default zones to config file |
+| `/cashier/stream/{camera_id}` | GET | Per-camera SSE (all events) |
+| `/cashier/stream/{camera_id}/only` | GET | Per-camera SSE (alerts-oriented) |
+| `/cashier/media/{camera_id}/latest/jpg` | GET | Latest evidence JPG |
+| `/cashier/media/{camera_id}/latest/gif` | GET | Latest evidence GIF |
+| `/cashier/media/{camera_id}/event/{event_id}/jpg` | GET | JPG for event |
+| `/cashier/media/{camera_id}/event/{event_id}/gif` | GET | GIF for event |
+| `/cashier/media/{camera_id}/drawer_count` | GET | Drawer-open count from JSONL log |
+| `/docs` | GET | Swagger UI |
+| `/redoc` | GET | ReDoc |
 
 ---
 
 ## 📞 Support & Documentation
 
-For detailed API documentation and interactive testing:
-```bash
-# Access Swagger UI after starting server
-http://localhost:8000/docs
+After starting the server (`uvicorn` on port **9000** by default):
 
-# Access ReDoc documentation
-http://localhost:8000/redoc
-```
+- Swagger UI: `http://localhost:9000/docs`
+- ReDoc: `http://localhost:9000/redoc`
+
+Supplementary handoff docs: [`curl_cashier.md`](curl_cashier.md), [`sse_cashier.md`](sse_cashier.md).
 
 ## Models file
 https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link
