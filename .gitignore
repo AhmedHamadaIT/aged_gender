@@ -28,9 +28,9 @@ tests/
 .specify/
 specs/
 
-# Integration test temp config (copied from config/cashier_zones.yaml)
-test_reports/tmp_cashier_zones_integration.yaml
-test_reports/tmp_detection_stream_capture.lines
+# Local pytest / integration test workspace (entire tree)
+test_reports/
+pytest.ini
 
 # Project Specific
 outputs/
@@ -62,6 +62,7 @@ yolov8n.onnx
 yolov8n.yaml
 
 # Tests
+TESTING_AND_SSH_STREAMS.md
 test_*.py
 *_test.py
 run_pipeline_test.py
