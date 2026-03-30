@@ -5,12 +5,12 @@ Application entry point.
 Owns all routes, startup, and pipeline composition.
 
 Typical usage from a web app:
-    1. POST /cameras            → configure cameras
-    2. POST /detection/setup    → configure pipeline services
-    3. POST /detection/start    → start pipeline
-    4. GET  /detection/stream   → SSE stream of frame results
-    5. GET  /detection/status   → monitor camera status
-    6. POST /detection/stop     → stop pipeline
+    1. POST /cameras               → configure cameras
+    2. POST /detection/setup       → configure pipeline services
+    3. POST /detection/start       → start pipeline
+    4. GET  /detection/stream/{id} → SSE stream per camera (parallel)
+    5. GET  /detection/status      → monitor camera status
+    6. POST /detection/stop        → stop pipeline
 
 Run with:
     uvicorn app:app --host 0.0.0.0 --port 9000
@@ -23,11 +23,13 @@ import os
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from apis.cameras  import camera_registry, CameraSetupRequest
+from apis.cameras import camera_registry, CameraSetupRequest
+from apis.test_responses import get_test_responses
 from apis.detection import detection, DetectionSetupRequest
-from apis.cashier  import router as cashier_router
+from apis.cashier import router as cashier_router
+from error_codes.response import error
 from pipeline import CameraPipeline
-from schemas import DetectionRequest, DetectionStatus
+from schemas import DetectionStatus
 
 app = FastAPI(title="Vision Pipeline API", version="1.0.0")
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
@@ -38,13 +40,11 @@ app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
 # ─────────────────────────────────────────────
 def build_pipeline(camera_id, rtsp_url, shared_state, stop_event, result_queue, pipeline_names):
     from services import REGISTRY
-
     cam_pipeline = CameraPipeline(
         camera_id, rtsp_url, shared_state, stop_event, result_queue, pipeline_names
     )
     for name in pipeline_names:
         cam_pipeline.register(REGISTRY[name])
-
     cam_pipeline.run()
 
 
@@ -94,14 +94,12 @@ def detection_setup(req: DetectionSetupRequest):
 
 @app.post("/detection/start")
 def detection_start(camera_id: str = None):
-    from schemas import DetectionRequest
-    return detection.on_post(DetectionRequest(action="start", camera_id=camera_id))
+    return detection.on_post("start", camera_id)
 
 
 @app.post("/detection/stop")
 def detection_stop(camera_id: str = None):
-    from schemas import DetectionRequest
-    return detection.on_post(DetectionRequest(action="stop_all" if not camera_id else "stop", camera_id=camera_id))
+    return detection.on_post("stop", camera_id)
 
 
 @app.get("/detection/status", response_model=DetectionStatus)
@@ -109,10 +107,18 @@ def detection_status():
     return detection.on_get()
 
 
-@app.get("/detection/stream")
-async def detection_stream():
+# ─────────────────────────────────────────────
+# Test route — remove in production
+# ─────────────────────────────────────────────
+@app.get("/test/responses")
+def test_responses():
+    return get_test_responses()
+
+
+@app.get("/detection/stream/{cam_id}")
+async def detection_stream(cam_id: str):
     """
-    SSE stream — yields one JSON event per frame from all cameras.
+    SSE stream per camera. Open one connection per camera for parallel streaming.
 
     Each event:
     {
@@ -126,7 +132,9 @@ async def detection_stream():
         }
     }
     """
-    result_queue = detection.result_queue()
+    result_queue, err = detection.get_result_queue(cam_id)
+    if err:
+        return error(err, detail=cam_id)
 
     async def event_generator():
         while True:
@@ -134,7 +142,7 @@ async def detection_stream():
                 result = result_queue.get_nowait()
                 yield f"data: {json.dumps(result)}\n\n"
             except Exception:
-                await asyncio.sleep(0.01)  # no frame ready, yield control
+                await asyncio.sleep(0.01)
 
     return StreamingResponse(
         event_generator(),
