@@ -675,6 +675,29 @@ class CashierService:
             for p in persons
         )
 
+    def _enforce_single_open_drawer(self, detections: List[Any]) -> List[Any]:
+        """
+        Business rule:
+        Only one drawer can be open at a time.
+        If the model emits multiple drawer detections in a frame, keep the
+        highest-confidence one and drop the rest.
+        """
+        drawer_dets = [d for d in detections if getattr(d, "class_id", None) == 1]
+        if len(drawer_dets) <= 1:
+            return detections
+
+        best_drawer = max(drawer_dets, key=lambda d: float(getattr(d, "confidence", 0.0)))
+        filtered = [
+            d for d in detections
+            if getattr(d, "class_id", None) != 1 or d is best_drawer
+        ]
+        log.debug(
+            "[CASHIER] Multiple drawers detected (%d) — keeping top confidence %.3f",
+            len(drawer_dets),
+            float(getattr(best_drawer, "confidence", 0.0)),
+        )
+        return filtered
+
     def _evaluate(
         self, cz: ZoneCount, kz: ZoneCount, now: float
     ) -> Tuple[str, str, List[str], bool]:
@@ -1024,6 +1047,7 @@ class CashierService:
         frame_id = self._frame_count
 
         # 2. Zone assignment + counts (uses full detections incl drawers/cash)
+        detections = self._enforce_single_open_drawer(detections)
         cz, kz = self._count_zones(detections, w, h)
 
         # 3. Business logic evaluation

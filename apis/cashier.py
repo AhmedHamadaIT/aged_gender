@@ -31,9 +31,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+
+from error_codes.error_codes import ErrorCode
+from error_codes.response import error
 
 
 # ─────────────────────────────────────────────
@@ -270,11 +273,17 @@ def download_evidence(file_path: str):
     """Download a single evidence JPEG by its relative path (from ``GET /cashier/evidence``)."""
     full_path = _evidence_dir / file_path
     if not full_path.exists() or not full_path.is_file():
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+        return JSONResponse(
+            status_code=404,
+            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=file_path),
+        )
     try:
         full_path.resolve().relative_to(_evidence_dir.resolve())
     except ValueError:
-        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+        return JSONResponse(
+            status_code=403,
+            content=error(ErrorCode.CASHIER_PATH_TRAVERSAL, detail=file_path),
+        )
     return FileResponse(str(full_path), media_type="image/jpeg", filename=full_path.name)
 
 
@@ -290,7 +299,10 @@ def get_zones():
         with open(config_path) as f:
             return json.load(f)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read config: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content=error(ErrorCode.CASHIER_CONFIG_READ_FAILED, detail=str(exc)),
+        )
 
 
 @router.post("/zones", summary="Update zone configuration (live, no restart needed)")
@@ -346,7 +358,10 @@ def update_zones(body: ZoneConfigRequest):
         else:
             config_path.write_text(json.dumps(cfg, indent=2))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write config: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content=error(ErrorCode.CASHIER_CONFIG_WRITE_FAILED, detail=str(exc)),
+        )
 
     return {"status": "updated", "config": cfg}
 
@@ -367,7 +382,10 @@ def reset_zones():
         else:
             config_path.write_text(json.dumps(cfg, indent=2))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write config: {exc}")
+        return JSONResponse(
+            status_code=500,
+            content=error(ErrorCode.CASHIER_CONFIG_WRITE_FAILED, detail=str(exc)),
+        )
 
     return {"status": "reset_to_default", "config": cfg}
 
@@ -418,7 +436,10 @@ async def latest_jpg(camera_id: str):
     files = [f for f in sorted(_evidence_dir.rglob(f"{camera_id}_*.jpg"))
              if "_thumb" not in f.name]
     if not files:
-        raise HTTPException(404, "No JPG found")
+        return JSONResponse(
+            status_code=404,
+            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=camera_id),
+        )
     return FileResponse(str(files[-1]), media_type="image/jpeg")
 
 
@@ -426,7 +447,10 @@ async def latest_jpg(camera_id: str):
 async def latest_gif(camera_id: str):
     files = sorted(_evidence_dir.rglob(f"{camera_id}_*.gif"))
     if not files:
-        raise HTTPException(404, "No GIF found yet")
+        return JSONResponse(
+            status_code=404,
+            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=camera_id),
+        )
     return FileResponse(str(files[-1]), media_type="image/gif")
 
 
@@ -436,7 +460,10 @@ async def event_jpg(camera_id: str, event_id: str):
     ts    = "_".join(parts[1:4]) if len(parts) >= 4 else event_id
     f     = _find_evidence(f"{camera_id}_{ts}*.jpg")
     if not f or "_thumb" in f.name:
-        raise HTTPException(404, "JPG not found")
+        return JSONResponse(
+            status_code=404,
+            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=event_id),
+        )
     return FileResponse(str(f), media_type="image/jpeg")
 
 
@@ -446,7 +473,10 @@ async def event_gif(camera_id: str, event_id: str):
     ts    = "_".join(parts[1:4]) if len(parts) >= 4 else event_id
     f     = _find_evidence(f"{camera_id}_{ts}*.gif")
     if not f:
-        raise HTTPException(404, "GIF not ready yet")
+        return JSONResponse(
+            status_code=404,
+            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=event_id),
+        )
     return FileResponse(str(f), media_type="image/gif")
 
 

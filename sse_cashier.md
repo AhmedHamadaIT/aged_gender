@@ -47,6 +47,30 @@ data: { ...JSON payload... }
 
 ---
 
+## HTTP error payloads for media/routes
+
+Cashier media/evidence HTTP endpoints return standardized error JSON:
+
+```json
+{
+  "status": "error",
+  "error": {
+    "code": "404",
+    "message": "Cashier evidence not found.",
+    "detail": "cashier_cam_01"
+  }
+}
+```
+
+For debugging over SSH or terminal, include headers:
+
+```bash
+curl -si "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/latest/gif"
+curl -si "http://<jetson-ip>:9000/cashier/evidence/missing.jpg"
+```
+
+---
+
 ## Event-level media (GIF vs JPEG)
 
 The multiplexed stream (`GET /detection/stream`) carries **per-frame** cashier results under `data.use_case.cashier.summary`. **JPEG evidence** and **GIF clips** are produced by different mechanisms in [`services/cashier.py`](services/cashier.py).
@@ -131,6 +155,20 @@ Per-frame JSON is in [`outputs/cashier_test/20260329T135320_10106/stream.jsonl`]
 ```bash
 ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T135320_10106/stream.jsonl"
 ```
+
+### First 70 frames batch (updated ROIs, run `outputs/test_70`)
+
+Batch executed on the first 70 images from `/mnt/01DA3A868F4FC7D0/frames_with_people/multiple_persons` with updated polygon ROIs in `config/cashier_zones.yaml`.
+
+- Artifacts: `outputs/test_70/*.jpg` (annotated frames) and `outputs/test_70/*.json` (per-frame payloads)
+- Count: **70 JPEG + 70 JSON**
+- First frame: `1000.jpg` / `1000.json`
+- Last frame: `1146.jpg` / `1146.json`
+
+Updated normalized polygons used in this run:
+
+- `ROI_CUSTOMER`: `[[0.32031, 0.28472], [0.64297, 0.25556], [0.63516, 0.00000], [0.31172, 0.00000]]`
+- `ROI_CASHIER`: `[[0.32969, 0.54861], [0.65000, 0.52778], [0.69297, 0.99444], [0.33516, 0.98750]]`
 
 ### Full-dataset validation run (`20260329T060741_7464`)
 

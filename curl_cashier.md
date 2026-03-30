@@ -8,7 +8,7 @@ Run locally (default port from app): `uvicorn app:app --host 0.0.0.0 --port 9000
 
 Interactive schemas: `http://<jetson-ip>:9000/docs`
 
-**Batch logs:** Local cashier-YOLO run [`outputs/cashier_test/20260329T135320_10106/stream.jsonl`](outputs/cashier_test/20260329T135320_10106/stream.jsonl) (73 frames; see [`sse_cashier.md`](sse_cashier.md)). Full-dataset aggregates: [`outputs/cashier_test/20260329T060741_7464/summary.json`](outputs/cashier_test/20260329T060741_7464/summary.json) (see **Cashier full-dataset validation report** in [`README.md`](README.md)).
+**Batch logs:** Local cashier-YOLO run [`outputs/cashier_test/20260329T135320_10106/stream.jsonl`](outputs/cashier_test/20260329T135320_10106/stream.jsonl) (73 frames), plus first-70-frames run [`outputs/test_70`](outputs/test_70) with updated ROI polygons (see [`sse_cashier.md`](sse_cashier.md)). Full-dataset aggregates: [`outputs/cashier_test/20260329T060741_7464/summary.json`](outputs/cashier_test/20260329T060741_7464/summary.json) (see **Cashier full-dataset validation report** in [`README.md`](README.md)).
 
 ---
 
@@ -94,6 +94,50 @@ Each SSE line is `data: ` followed by one JSON object (then blank line). Example
 ```
 
 **Implementation note:** Live events from `/detection/stream` also include a top-level **`frame`** field: a base64-encoded JPEG string. It is omitted above because it is large; strip or ignore it when piping to `jq` for debugging.
+
+---
+
+## Standardized error response (current)
+
+Detection and cashier endpoints now return a unified error payload:
+
+```json
+{
+  "status": "error",
+  "error": {
+    "code": "404",
+    "message": "Cashier evidence not found.",
+    "detail": "cam1"
+  }
+}
+```
+
+Use `-i` to display HTTP status code with the JSON body.
+
+### Cashier error examples
+
+```bash
+# Missing evidence file
+curl -si "http://<jetson-ip>:9000/cashier/evidence/missing.jpg"
+
+# No latest JPG/GIF for this camera
+curl -si "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/latest/jpg"
+curl -si "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/latest/gif"
+
+# Missing event media
+curl -si "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/event/A2_20260329_135421_001/jpg"
+curl -si "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/event/A2_20260329_135421_001/gif"
+```
+
+### Detection error examples
+
+```bash
+# No cameras running -> code 203 in JSON body
+curl -si -X POST "http://<jetson-ip>:9000/detection/stop"
+
+# Unknown stream camera -> code 301 in JSON body
+curl -si "http://<jetson-ip>:9000/detection/stream/cam999"
+```
 
 ---
 
@@ -288,7 +332,7 @@ Omit `camera_id` to start every configured camera.
 - `status` — `"started"` on success.  
 - `cameras` — List of camera ids that were started in this call.  
 
-**Typical errors:** `400` if no cameras or setup missing; `404` if `camera_id` unknown; `409` if already running.
+**Typical error body:** standardized JSON (`status=error`, `error.code`, `error.message`, optional `error.detail`).
 
 ---
 
@@ -404,12 +448,12 @@ curl -s "http://<jetson-ip>:9000/cashier/zones" | jq '.thresholds'
     "ROI_CASHIER": {
       "active": true,
       "shape": "polygon",
-      "points": [[0.313, 0.561], [0.693, 0.538], [0.733, 1.001], [0.26, 1.001]]
+      "points": [[0.32969, 0.54861], [0.65000, 0.52778], [0.69297, 0.99444], [0.33516, 0.98750]]
     },
     "ROI_CUSTOMER": {
       "active": true,
       "shape": "polygon",
-      "points": [[0.634, 0.282], [0.63, 0.003], [0.295, 0.0], [0.295, 0.326]]
+      "points": [[0.32031, 0.28472], [0.64297, 0.25556], [0.63516, 0.00000], [0.31172, 0.00000]]
     }
   }
 }
@@ -693,20 +737,20 @@ curl -s -X POST "http://<jetson-ip>:9000/cashier/zones" \
       "shape": "polygon",
       "active": true,
       "points": [
-        {"x": 0.313, "y": 0.561},
-        {"x": 0.693, "y": 0.538},
-        {"x": 0.733, "y": 1.001},
-        {"x": 0.260, "y": 1.001}
+        {"x": 0.32969, "y": 0.54861},
+        {"x": 0.65000, "y": 0.52778},
+        {"x": 0.69297, "y": 0.99444},
+        {"x": 0.33516, "y": 0.98750}
       ]
     },
     "ROI_CUSTOMER": {
       "shape": "polygon",
       "active": true,
       "points": [
-        {"x": 0.634, "y": 0.282},
-        {"x": 0.630, "y": 0.003},
-        {"x": 0.295, "y": 0.000},
-        {"x": 0.295, "y": 0.326}
+        {"x": 0.32031, "y": 0.28472},
+        {"x": 0.64297, "y": 0.25556},
+        {"x": 0.63516, "y": 0.00000},
+        {"x": 0.31172, "y": 0.00000}
       ]
     },
     "thresholds": {
@@ -735,10 +779,10 @@ curl -s -X POST "http://<jetson-ip>:9000/cashier/zones" \
       "shape": "polygon",
       "active": true,
       "points": [
-        {"x": 0.634, "y": 0.282},
-        {"x": 0.630, "y": 0.003},
-        {"x": 0.295, "y": 0.000},
-        {"x": 0.295, "y": 0.326}
+        {"x": 0.32031, "y": 0.28472},
+        {"x": 0.64297, "y": 0.25556},
+        {"x": 0.63516, "y": 0.00000},
+        {"x": 0.31172, "y": 0.00000}
       ]
     }
   }'

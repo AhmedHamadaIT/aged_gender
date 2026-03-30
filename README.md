@@ -54,18 +54,18 @@ zones:
     active: true
     shape: polygon
     points:
-      - [0.313, 0.561]
-      - [0.693, 0.538]
-      - [0.733, 1.001]
-      - [0.260, 1.001]
+      - [0.32969, 0.54861]
+      - [0.65000, 0.52778]
+      - [0.69297, 0.99444]
+      - [0.33516, 0.98750]
   ROI_CUSTOMER:
     active: true
     shape: polygon
     points:
-      - [0.634, 0.282]
-      - [0.630, 0.003]
-      - [0.295, 0.000]
-      - [0.295, 0.326]
+      - [0.32031, 0.28472]
+      - [0.64297, 0.25556]
+      - [0.63516, 0.00000]
+      - [0.31172, 0.00000]
 buffer:
   jpeg_quality: 75
   size: 100
@@ -81,7 +81,7 @@ gif:
   fps: 10
   quality: 85
 meta:
-  version: 1.0.0
+  version: 1.2.0
 ```
 
 ---
@@ -252,6 +252,9 @@ ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329
 
 # Local cashier-YOLO batch (multiple_persons frames)
 ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T135320_10106/stream.jsonl"
+
+# First-70-frames batch with updated zones
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/test_70/*.json"
 ```
 
 **Cashier evidence log** (`triggered` / `resolved` lines, GIF paths after compile):
@@ -789,7 +792,7 @@ Copy-paste **`curl`** for each step: [Complete cURL reference (all HTTP routes)]
 
 ### Stream event sources
 
-**Full dataset batch (2026-03-29)** — Line-delimited JSON is archived as [`outputs/cashier_test/20260329T060741_7464/stream.jsonl`](outputs/cashier_test/20260329T060741_7464/stream.jsonl). **Additional batch:** [`outputs/cashier_test/20260329T135320_10106/stream.jsonl`](outputs/cashier_test/20260329T135320_10106/stream.jsonl) (local cashier-YOLO run). Inspect on the Jetson:
+**Full dataset batch (2026-03-29)** — Line-delimited JSON is archived as [`outputs/cashier_test/20260329T060741_7464/stream.jsonl`](outputs/cashier_test/20260329T060741_7464/stream.jsonl). **Additional batches:** [`outputs/cashier_test/20260329T135320_10106/stream.jsonl`](outputs/cashier_test/20260329T135320_10106/stream.jsonl) (local cashier-YOLO run) and [`outputs/test_70`](outputs/test_70) (first 70 `multiple_persons` frames with updated ROI polygons).
 
 ```bash
 ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T060741_7464/stream.jsonl"
