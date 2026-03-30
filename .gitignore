@@ -20,18 +20,19 @@ htmlcov/
 .vscode/
 .cursor/
 .scripts/
+.github/
 
+requirements-ci.txt
 # Local scripts (not tracked)
 scripts/
-tests/
+
 # Specify / Speckit (local tooling & generated specs)
 .specify/
 specs/
-
 # Local pytest / integration test workspace (entire tree)
 test_reports/
 pytest.ini
-
+curl_smoke.sh 
 # Project Specific
 outputs/
 models/
@@ -61,14 +62,11 @@ yolov8n.pt
 yolov8n.onnx
 yolov8n.yaml
 
-# Tests
+# Tests (repo-wide patterns; allow tracked suite under tests/pipeline_test/)
 TESTING_AND_SSH_STREAMS.md
 test_*.py
+!tests/pipeline_test/test_*.py
 *_test.py
-run_pipeline_test.py
-find_test_frame.py
-test_cashier_images.py
 test_results/
 test_results.log
 README_CASHIER_TESTING.md
-run_user_frame.py
