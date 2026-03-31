@@ -7,6 +7,7 @@ Ranges:
     1xx — Camera errors
     2xx — Detection errors
     3xx — Stream errors
+    4xx — Cashier errors
     5xx — System errors
 """
 
@@ -28,6 +29,12 @@ class ErrorCode(Enum):
 
     # 3xx Stream
     STREAM_CAMERA_NOT_FOUND = 301, "Stream not found for the requested camera."
+
+    # 4xx Cashier
+    CASHIER_CONFIG_READ_FAILED  = 401, "Could not read cashier config."
+    CASHIER_CONFIG_WRITE_FAILED = 402, "Could not write cashier config."
+    CASHIER_PATH_TRAVERSAL       = 403, "Path traversal not allowed."
+    CASHIER_EVIDENCE_NOT_FOUND   = 404, "Cashier evidence not found."
 
     # 5xx System
     PIPELINE_NOT_SET        = 501, "Pipeline factory not set."

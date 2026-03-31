@@ -1,9 +1,72 @@
-outputs
-torch*
-videos
-.vscode
+# Environments
+
 venv/
+.venv/
+.env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
 *.resolved
-logger/app.log
+
+# IDEs
+.vscode/
+.cursor/
+.scripts/
+.github/
+
+requirements-ci.txt
+# Local scripts (not tracked)
+scripts/
+
+# Specify / Speckit (local tooling & generated specs)
+.specify/
+specs/
+# Local pytest / integration test workspace (entire tree)
+test_reports/
+pytest.ini
+curl_smoke.sh 
+# Project Specific
+outputs/
 models/
+videos/
+logger/app.log
+evidence/
+torch*
+
+# Local secrets / OS noise
+*.pem
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Cashier frame batch tests / YOLO tooling (outputs/ already ignores test runs)
+runs/
+wandb/
+*.engine
+
+# YOLOv8n weights (often large; use models/ or env YOLO_MODEL)
+yolov8n.pt
+yolov8n.onnx
+yolov8n.yaml
+
+# Tests (repo-wide patterns; allow tracked suite under tests/pipeline_test/)
+TESTING_AND_SSH_STREAMS.md
+test_*.py
+!tests/pipeline_test/test_*.py
+*_test.py
+test_results/
+test_results.log
+README_CASHIER_TESTING.md
