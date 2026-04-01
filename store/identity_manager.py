@@ -15,11 +15,12 @@ Environment variables:
 
 import os
 import uuid
-from typing import Optional
+from typing import Optional, List, Dict
 
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
+
 
 from logger.logger_config import Logger
 

@@ -12,7 +12,7 @@ To add a new service:
 
 from .detector   import DetectorService
 from .age_gender import AgeGenderService
-from .reid import ReidService
+from .reid import ReIDService
 
 # from .counter import CounterService
 # from .tracker import TrackerService
@@ -20,7 +20,7 @@ from .reid import ReidService
 REGISTRY = {
     "detector"  : DetectorService,
     "age_gender": AgeGenderService,
-    "reid"      : ReidService,
+    "reid"      : ReIDService,
     # "counter" : CounterService,
     # "tracker" : TrackerService,
 }
