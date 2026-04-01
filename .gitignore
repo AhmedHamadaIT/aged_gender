@@ -7,3 +7,4 @@ videos
 **.pyc
 logger/app.log
 *.log
+gallery
