@@ -108,6 +108,7 @@ class DetectorService:
 
     def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
         frame   = context["data"]["frame"]
+        context["data"]["clean_frame"] = frame.copy() 
         results = self.model.track(
             frame,
             conf    = self.conf,

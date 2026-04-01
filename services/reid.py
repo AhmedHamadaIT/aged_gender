@@ -31,27 +31,14 @@ MAX_CROPS_PER_TRACK = int(os.getenv("MAX_CROPS_PER_TRACK", "5")) # Buffer size p
 
 @dataclass
 class ReIDEvent:
-    track_id  : int
-    person_id : str
-    confidence: float
-    is_new    : bool
-    last_bbox : tuple
-
-    def to_dict(self):
-        return {
-            "track_id"  : self.track_id,
-            "person_id" : self.person_id,
-            "confidence": round(self.confidence, 4),
-            "is_new"    : self.is_new,
-            "last_bbox" : list(self.last_bbox)
-        }
+    track_id: int
+    image_path: str
+    frame_number: int   
 
 
 class ReIDService:
     def __init__(self):
-        model_path = os.getenv("REID_MODEL_PATH", "models/osnet_x1_0.pt")
-        # ... (Keep your existing download and model loading logic here) ...
-        
+        model_path = os.getenv("REID_MODEL_PATH", "models/osnet_x1_0.pt")        
         self.device = torch.device(os.getenv("DEVICE", "cpu"))
         self.model = torch.jit.load(model_path, map_location=str(self.device))
         self.model.eval()
@@ -63,11 +50,16 @@ class ReIDService:
         ])
 
         self.identity_manager = IdentityManager()
-        self.auto_register    = os.getenv("REID_AUTO_REGISTER", "True").lower() in ("true", "1", "yes")
+        
+        self.gallery_dir = os.getenv("GALLERY_DIR", "./gallery")
+        os.makedirs(self.gallery_dir, exist_ok=True)
 
-        # ── State Management for Tracking ──
-        self.active_tracks = {}  # { track_id: {"crops": [(area, img)], "last_seen": int, "bbox": tuple} }
-        self.frame_count   = 0
+        # 30 frames = 1 second (assuming 30fps video)
+        self.throttle_frames = int(os.getenv("REID_THROTTLE", "30")) 
+        self.padding = int(os.getenv("REID_PADDING", "10"))
+                           
+        self.last_extracted = {}  # { track_id: frame_number }
+        self.frame_count = 0
 
         log.info("[REID] Tracking Buffer Ready\n")
 
@@ -76,8 +68,12 @@ class ReIDService:
         self.frame_count += 1
         frame      = context["data"]["frame"]
         detections = context["data"]["detection"].get("items", [])
+
+        clean_frame = context["data"].get("clean_frame", frame)
+
         
         events = []
+        current_track_ids = set()
 
         # ─────────────────────────────────────────────
         # 1. Update Track Buffer
@@ -87,79 +83,60 @@ class ReIDService:
             if track_id is None:
                 continue
 
-            crop = self._crop_bbox(frame, det.x1, det.y1, det.x2, det.y2)
-            if crop.size == 0:
-                continue
+            current_track_ids.add(track_id)
 
-            # We use bounding box area as a simple proxy for "image quality/closeness"
-            area = (det.x2 - det.x1) * (det.y2 - det.y1)
+            # If this is a new person, set their last extracted frame far in the past 
+            # so they trigger an extraction immediately on frame 1.
+            if track_id not in self.last_extracted:
+                self.last_extracted[track_id] = -self.throttle_frames
 
-            if track_id not in self.active_tracks:
-                self.active_tracks[track_id] = {
-                    "crops": [], 
-                    "last_seen": self.frame_count,
-                    "bbox": det.bbox
-                }
+            frames_since_last = self.frame_count - self.last_extracted[track_id]
 
-            track_data = self.active_tracks[track_id]
-            track_data["last_seen"] = self.frame_count
-            track_data["bbox"]      = det.bbox
-            
-            # Store crop, sort by area (largest first), keep top N
-            track_data["crops"].append((area, crop))
-            track_data["crops"].sort(key=lambda x: x[0], reverse=True)
-            track_data["crops"] = track_data["crops"][:MAX_CROPS_PER_TRACK]
-
-
-        # ─────────────────────────────────────────────
-        # 2. Check for Lost Tracks & Trigger ReID
-        # ─────────────────────────────────────────────
-        lost_track_ids = []
-        for tid, data in self.active_tracks.items():
-            if self.frame_count - data["last_seen"] > MAX_TRACK_AGE:
-                lost_track_ids.append(tid)
-
-        for tid in lost_track_ids:
-            track_data = self.active_tracks.pop(tid)
-            
-            # Extract features for all saved crops
-            features = []
-            for _, crop in track_data["crops"]:
+            if frames_since_last >= self.throttle_frames:
+                
+                # 1. Crop
+                crop = self._crop_bbox(clean_frame, det.x1, det.y1, det.x2, det.y2)
+                if crop.size == 0:
+                    continue
+                
+                # 2. Extract Embedding
                 tensor_feat = self._extract_raw_tensor(crop)
-                if tensor_feat is not None:
-                    features.append(tensor_feat)
-            
-            if not features:
-                continue
+                if tensor_feat is None:
+                    continue
+                
+                final_embedding = F.normalize(tensor_feat, p=2, dim=0).cpu().numpy().tolist()
 
-            # Stack, Average, and Re-Normalize
-            stacked_features = torch.stack(features)           # Shape: [N, Embedding_Dim]
-            avg_feature      = torch.mean(stacked_features, dim=0) # Shape: [Embedding_Dim]
-            final_embedding  = F.normalize(avg_feature, p=2, dim=0).cpu().numpy().tolist()
+                # 3. Save Image locally
+                img_filename = f"track_{track_id}_frame_{self.frame_count}.jpg"
+                img_path = os.path.join(self.gallery_dir, img_filename)
+                cv2.imwrite(img_path, crop)
 
-            # Identify against Qdrant gallery
-            match = self.identity_manager.identify(final_embedding)
+                # 4. Insert to Vector DB with Metadata
+                metadata = {
+                    "image_path": img_path, 
+                    "track_id": track_id,
+                    "frame": self.frame_count
+                }
+                # NOTE: You will need to ensure your IdentityManager handles passing this metadata dict to Qdrant!
+                self.identity_manager.register(final_embedding, payload=metadata)
 
-            if match is not None:
-                events.append(ReIDEvent(
-                    track_id   = tid,
-                    person_id  = match["person_id"],
-                    confidence = match["confidence"],
-                    is_new     = False,
-                    last_bbox  = track_data["bbox"]
-                ))
-            elif self.auto_register:
-                new_id = self.identity_manager.register(final_embedding)
-                events.append(ReIDEvent(
-                    track_id   = tid,
-                    person_id  = new_id,
-                    confidence = 1.0,
-                    is_new     = True,
-                    last_bbox  = track_data["bbox"]
-                ))
+                # 5. Update State
+                self.last_extracted[track_id] = self.frame_count
+                events.append(ReIDEvent(track_id, img_path, self.frame_count))
 
-        # This will now contain a list of completed visit events, not frame-by-frame detections
-        context["data"]["use_case"]["reid_events"] = events
+                # 6. Visual Hint: Flash Green Box over the YOLO box
+                cv2.rectangle(frame, (det.x1, det.y1), (det.x2, det.y2), (0, 255, 0), 4)
+                cv2.putText(frame, "SAVED", (det.x1, det.y1 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        # ── Cleanup Memory ──
+        # Remove tracks we haven't seen in a while (e.g., 60 frames) to prevent memory leaks
+        stale_tracks = [
+            tid for tid, last_frame in self.last_extracted.items() 
+            if (self.frame_count - last_frame > 60) and (tid not in current_track_ids)
+        ]
+        for tid in stale_tracks:
+            del self.last_extracted[tid]
+        context["data"]["use_case"]["reid_events"] = [e.__dict__ for e in events]
         return context
 
     # ── Internal methods ─────────────────────

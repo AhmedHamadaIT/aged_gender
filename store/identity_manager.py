@@ -64,47 +64,34 @@ class IdentityManager:
 
     # ── Public API ────────────────────────────
 
-    def identify(self, feature_vector: list[float]) -> Optional[dict]:
+    def search(self, feature_vector: list[float], limit: int = 10) -> List[Dict]:
         """
-        Search the gallery for the closest match.
-
-        Returns:
-            {"person_id": str, "confidence": float}  if score >= threshold
-            None                                      if no match found
+        Query the gallery for the top N closest matches to build the UI gallery.
         """
         try:
-            hits = self.client.search(
+            hits = self.client.query_points(
                 collection_name=self.collection,
-                query_vector=feature_vector,
-                limit=1,
-            )
+                query=feature_vector,
+                limit=limit,
+            ).points
+            
+            return [
+                {
+                    "score": round(hit.score, 4),
+                    "metadata": hit.payload
+                }
+                for hit in hits
+            ]
         except Exception as e:
-            log.error(f"[IDENTITY] Qdrant search failed: {e}")
-            return None
+            # log.error(f"[IDENTITY] Qdrant search failed: {e}")
+            return []
 
-        if hits and hits[0].score >= self.threshold:
-            return {
-                "person_id":  hits[0].payload["person_id"],
-                "confidence": round(hits[0].score, 4),
-            }
-
-        return None
-
-    def register(self, feature_vector: list[float], person_id: str = None) -> str:
+    def register(self, feature_vector: list[float], payload: dict = None) -> str:
         """
-        Enroll a new person into the gallery.
-
-        Args:
-            feature_vector: Normalized embedding vector.
-            person_id:      Optional explicit ID. If None, a UUID is generated.
-
-        Returns:
-            The person_id that was stored.
+        Save the extracted embedding and metadata (image_path, frame, etc.) to the gallery.
         """
-        if person_id is None:
-            person_id = str(uuid.uuid4())
-
-        point_id = str(uuid.uuid4())   # Qdrant point ID (unique per vector)
+        point_id = str(uuid.uuid4())
+        payload = payload or {}
 
         try:
             self.client.upsert(
@@ -113,13 +100,13 @@ class IdentityManager:
                     PointStruct(
                         id=point_id,
                         vector=feature_vector,
-                        payload={"person_id": person_id},
+                        payload=payload,
                     )
                 ],
             )
-            log.info(f"[IDENTITY] Registered new person: {person_id}")
+            # log.info(f"[IDENTITY] Registered new vector with payload: {payload}")
         except Exception as e:
-            log.error(f"[IDENTITY] Failed to register person: {e}")
+            # log.error(f"[IDENTITY] Failed to register vector: {e}")
             raise
 
-        return person_id
+        return point_id
