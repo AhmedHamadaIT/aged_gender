@@ -20,11 +20,12 @@ import asyncio
 import json
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI,UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
 from apis.cameras import camera_registry, CameraSetupRequest
 from apis.detection import detection, DetectionSetupRequest
+from apis.reid import reid_api
 from pipeline import CameraPipeline
 from schemas import DetectionRequest, DetectionStatus
 
@@ -143,3 +144,10 @@ async def detection_stream():
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+# ─────────────────────────────────────────────
+# ReID routes
+# ─────────────────────────────────────────────
+@app.post("/reid/search")
+async def reid_search(file: UploadFile = File(...), top_k: int = Form(10)):
+    return await reid_api.search(file, top_k)

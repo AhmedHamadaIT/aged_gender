@@ -159,3 +159,27 @@ class ReIDService:
         except Exception as e:
             log.warning(f"[REID] Feature extraction failed: {e}")
             return None
+        
+    def search_by_image(self, image_bytes: bytes, top_k: int = 10) -> list[dict]:
+        """
+        Reads raw image bytes from an API request, extracts its ReID embedding, 
+        and returns top N matches from Qdrant.
+        """
+        # Convert raw bytes to a numpy array, then decode into an OpenCV BGR image
+        np_arr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            log.error("[REID] Failed to decode image bytes from API request.")
+            return []
+
+        # Extract embedding using the existing pipeline
+        tensor_feat = self._extract_raw_tensor(img)
+        if tensor_feat is None:
+            return []
+
+        # Normalize to match registration format
+        query_vector = F.normalize(tensor_feat, p=2, dim=0).cpu().numpy().tolist()
+
+        # Query the database
+        return self.identity_manager.search(query_vector, limit=top_k)
