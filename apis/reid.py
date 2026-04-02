@@ -11,7 +11,7 @@ from fastapi import HTTPException, UploadFile, File, Form
 from typing import Dict, Any
 
 from apis.base import BaseResource
-from services.feature_extractor import ReIDService
+from services.reid import ReIDService
 from logger.logger_config import Logger
 
 log = Logger.get_logger(__name__)
