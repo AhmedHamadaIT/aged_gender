@@ -55,7 +55,8 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         onnxruntime \     
         "uvicorn[standard]"\
         qdrant-client \
-        gdown
+        gdown \
+        python-multipart
 
 # ── Create directories ───────────────────────
 RUN mkdir -p /app/models /app/videos /app/outputs
