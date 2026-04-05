@@ -15,6 +15,7 @@ from .age_gender import AgeGenderService
 from .ppe import PPEService
 from .mood       import MoodService
 from .cashier    import CashierService
+from .face       import FaceService
 
 # from .counter import CounterService
 # from .tracker import TrackerService
@@ -25,6 +26,7 @@ REGISTRY = {
     "ppe"       :PPEService,
     "mood"      : MoodService,
     "cashier"   : CashierService,
+    "face"      : FaceService,
     # "counter" : CounterService,
     # "tracker" : TrackerService,
 }

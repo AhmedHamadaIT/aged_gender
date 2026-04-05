@@ -27,12 +27,14 @@ from apis.cameras import camera_registry, CameraSetupRequest
 from apis.test_responses import get_test_responses
 from apis.detection import detection, DetectionSetupRequest
 from apis.cashier import router as cashier_router
+from apis.face import router as face_router
 from error_codes.response import error
 from pipeline import CameraPipeline
 from schemas import DetectionStatus
 
 app = FastAPI(title="Vision Pipeline API", version="1.0.0")
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
+app.include_router(face_router, prefix="/face", tags=["Face Recognition"])
 
 
 # ─────────────────────────────────────────────
