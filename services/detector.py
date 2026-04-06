@@ -52,6 +52,7 @@ class Detection:
     class_id  : int
     class_name: str
     confidence: float
+    track_id  : int = -1   # set by FrameBus tracker; -1 means untracked
 
     @property
     def bbox(self):
@@ -78,6 +79,7 @@ class Detection:
             "center"    : list(self.center),
             "width"     : self.width,
             "height"    : self.height,
+            "track_id"  : self.track_id,
         }
 
 
