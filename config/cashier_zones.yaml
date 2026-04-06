@@ -5,6 +5,14 @@ debounce:
   A3: 1
   A4: 1
   default: 3
+detail_config:
+  drawerOpenLimit: 30
+  enableStaffList: true
+  serviceWaitLimit: 30
+  staffIds:
+  - 1001
+  - 1002
+  - 1003
 evidence:
   log_rotate_mb: 100
   save_gif: true
@@ -14,33 +22,40 @@ gif:
   quality: 85
 meta:
   version: 1.2.0
+task:
+  algorithmType: CASHIER_BOX_OPEN
+  channelId: 2
+  channelName: CAM-02-MAIN
+  taskId: 101
+  taskName: cashier_drawer_monitor
 thresholds:
   config_reload_interval: 60
   customer_wait_max_seconds: 30
+  detection_threshold: 45
   drawer_open_max_seconds: 30
   proximity_iou: 0.05
 zones:
   ROI_CASHIER:
     active: true
     points:
-    - - 0.32969
-      - 0.54861
-    - - 0.65000
-      - 0.52778
-    - - 0.69297
-      - 0.99444
-    - - 0.33516
-      - 0.98750
+    - - 0.215
+      - 0.662
+    - - 0.349
+      - 0.562
+    - - 0.421
+      - 0.75
+    - - 0.257
+      - 0.886
     shape: polygon
   ROI_CUSTOMER:
     active: true
     points:
-    - - 0.32031
-      - 0.28472
-    - - 0.64297
-      - 0.25556
-    - - 0.63516
-      - 0.00000
-    - - 0.31172
-      - 0.00000
+    - - 0.421
+      - 0.75
+    - - 0.6
+      - 0.6
+    - - 0.8
+      - 0.8
+    - - 0.257
+      - 0.886
     shape: polygon

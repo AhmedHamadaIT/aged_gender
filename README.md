@@ -1,6 +1,12 @@
 # Vision Pipeline API
 
-The Vision Pipeline API is a FastAPI-based server for multi-camera computer vision. It registers RTSP sources, composes pipelines from **detector**, **age/gender**, **mood**, **PPE**, and **cashier** services, and exposes results over **Server-Sent Events** (`/detection/stream`) plus dedicated **cashier** REST and SSE routes under `/cashier`.
+**Version 2.0.0** — FastAPI server for multi-camera computer vision.
+
+The runtime path is **task-based**: you register RTSP cameras (`POST /cameras`), define **tasks** per channel (`POST /api/tasks` with an `algorithmType` such as `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, or `CASHIER_DRAWER`), then start workers (`POST /detection/start`). **FrameBus** captures each stream once, runs a shared YOLO+tracker, and fans frames to **task workers** (`task_worker.py`). Task results (for example line-crossing events) are merged onto **`GET /detection/stream`** (SSE).
+
+**Cashier** is integrated as task type **`CASHIER_DRAWER`** — class **`CashierDrawerTask`** in [`services/cashier.py`](services/cashier.py) (same module as **`CashierService`**). Live cashier state, zones, evidence, and per-camera SSE remain under **`/cashier/*`**. For cashier, configure **`YOLO_MODEL`** (and related env) so FrameBus outputs the expected classes (person / drawer / cash) on that channel; see [Cashier + FrameBus model](#cashier--framebus-model).
+
+The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detector`, `age_gender`, `mood`, `ppe`, `cashier`) is still in the repo for scripts and batch tooling; the **HTTP app does not** expose `POST /detection/setup`.
 
 ---
 
@@ -28,12 +34,16 @@ The Vision Pipeline API is a FastAPI-based server for multi-camera computer visi
 
 ## Features
 
-- **Multi-camera RTSP** — Register streams with `POST /cameras`; list with `GET /cameras`; remove with `DELETE /cameras/{cam_id}`.
-- **Composable pipeline** — `POST /detection/setup` chooses services from: `detector`, `age_gender`, `mood`, `ppe`, `cashier` (see `services/__init__.py`).
-- **Runtime control** — `POST /detection/start` and `POST /detection/stop` (optional `camera_id` query); `GET /detection/status` for FPS, frame counts, and errors.
-- **Global SSE** — `GET /detection/stream` streams one JSON payload per processed frame from all cameras; each event may include a base64 JPEG in `frame`.
-- **Cashier monitor** — Zone geometry and timers via `GET` / `POST /cashier/zones` and `POST /cashier/zones/reset`; scenarios **N1–N6** (normal) and **A1–A7** (alert/critical). `GET /cashier/status` for latest per-camera summary; `GET` / `DELETE /cashier/events` for the in-memory alert/transaction log; `GET /cashier/evidence` and `GET /cashier/evidence/{path}` for saved JPEGs. Per-camera SSE: `GET /cashier/stream/{camera_id}` and `GET /cashier/stream/{camera_id}/only` (alerts-focused). Media helpers under `/cashier/media/...` (latest JPG/GIF, per-event assets, `drawer_count`). Case evaluation order in code: critical **A3/A4** → unattended drawer **A1** → timed **A5** (customer wait) / **A6** (drawer duration) → **A7** → normal **N3/N4/N6** → **N5/N2** → fallback **A2** ([`services/cashier.py`](services/cashier.py) `_evaluate`).
-- **Configuration on disk** — Cashier YAML/JSON path from env `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); evidence directory from `CASHIER_EVIDENCE_DIR` (default `./evidence/cashier`).
+- **Multi-camera RTSP** — `POST /cameras`, `GET /cameras`, `DELETE /cameras/{cam_id}`. Successful bodies often use the standardized envelope `{ ..., "error": null }` (see `error_codes/response.py`).
+- **Tasks per channel** — `POST /api/tasks` (and GET/PUT/DELETE) registers algorithms keyed by `algorithmType`: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_DRAWER`**. Each enabled task with a matching registered camera gets a **task worker**; shared **FrameBus** processes per `channelId`.
+- **Runtime control** — `POST /detection/start` / `POST /detection/stop` (optional `camera_id`); `GET /detection/status` for FPS, frame counts, and errors.
+- **Detection SSE** — `GET /detection/stream` streams **task events** (e.g. line-crossing JSON), not full per-frame pipeline frames. Shape depends on the task (see `app.py` docstring example).
+- **Cashier monitor** — Register a task with `algorithmType: "CASHIER_DRAWER"` (and `channelId` matching your camera id). HTTP: `GET` / `POST /cashier/zones`, `POST /cashier/zones/reset`, `GET /cashier/status`, `GET` / `DELETE /cashier/events`, evidence and media routes, SSE `GET /cashier/stream/{camera_id}` and `.../only`. Case logic **N1–N6** / **A1–A7** in [`services/cashier.py`](services/cashier.py) `_evaluate`.
+- **Configuration on disk** — `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); `CASHIER_EVIDENCE_DIR` (default `./evidence/cashier`).
+
+### Cashier + FrameBus model
+
+FrameBus uses **one** YOLO model per running camera process. **`CASHIER_DRAWER`** expects detections with cashier classes (e.g. person / drawer / cash). Point **`YOLO_MODEL`** at weights that expose those classes for channels where cashier runs. Tasks that assume COCO **`person`** (e.g. `CROSS_LINE`) need a compatible model if combined on the same channel—often you use **separate channels** or **separate deployments** for cashier vs. generic crossing.
 
 ---
 
@@ -113,20 +123,46 @@ curl -s "$BASE/cameras"
 curl -s -X DELETE "$BASE/cameras/cam1"
 ```
 
-### Detection — `setup`, `start`, `stop`, `status`, `stream`
+### Tasks — `POST` / `GET` / `PUT` / `DELETE /api/tasks/{task_id}`
+
+Register work per `channelId` (must match a camera `id` from `POST /cameras`). Example: cashier drawer monitor on channel `4`:
 
 ```bash
-curl -s -X POST "$BASE/detection/setup" \
+curl -s -X POST "$BASE/api/tasks" \
   -H "Content-Type: application/json" \
-  -d '{"pipeline":["detector","age_gender","mood","cashier"]}'
+  -d '{
+    "taskId": 101,
+    "taskName": "cashier_drawer_monitor",
+    "algorithmType": "CASHIER_DRAWER",
+    "channelId": 4,
+    "enable": true,
+    "threshold": 50,
+    "areaPosition": "[]",
+    "detailConfig": {},
+    "validWeekday": ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"],
+    "validStartTime": 0,
+    "validEndTime": 86400000
+  }'
 
-curl -s -X POST "$BASE/detection/start?camera_id=cam1"
+curl -s "$BASE/api/tasks"
+curl -s "$BASE/api/tasks/101"
+```
+
+`algorithmType` must be one of: `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_DRAWER` (see [`apis/tasks.py`](apis/tasks.py)).
+
+### Detection — `start`, `stop`, `status`, `stream`
+
+There is **no** `POST /detection/setup` in the v2 HTTP API.
+
+```bash
+curl -s -X POST "$BASE/detection/start?camera_id=4"
 curl -s -X POST "$BASE/detection/start"
-curl -s -X POST "$BASE/detection/stop?camera_id=cam1"
+curl -s -X POST "$BASE/detection/stop?camera_id=4"
 curl -s -X POST "$BASE/detection/stop"
 
 curl -s "$BASE/detection/status"
 
+# SSE: task events (e.g. crossings), not per-frame pipeline JSON
 curl -N "$BASE/detection/stream"
 ```
 
@@ -202,7 +238,7 @@ curl -s -o latest.gif "$BASE/cashier/media/cam1/latest/gif"
 curl -s -o event.jpg "$BASE/cashier/media/cam1/event/<event_id>/jpg"
 curl -s -o event.gif "$BASE/cashier/media/cam1/event/<event_id>/gif"
 
-# Logged "triggered" event count — NOT total frames with drawer open (see curl_cashier.md)
+# Logged "triggered" event count — NOT total frames with drawer open (see docs/CASHIER_BOX_OPEN.md Part III — Drawer metrics)
 curl -s "$BASE/cashier/media/cam1/drawer_count"
 ```
 
@@ -211,7 +247,7 @@ curl -s "$BASE/cashier/media/cam1/drawer_count"
 - **`customer_wait_max_seconds`** → **A5** (customer in customer zone, no cashier, wait exceeds limit).  
 - **`drawer_open_max_seconds`** → **A6** (drawer open duration exceeds limit).  
 
-Full **thresholds → logic → output** table: [`curl_cashier.md`](curl_cashier.md) (*A5 / A6: thresholds → logic → output*).
+Full **thresholds → logic → output** table: [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) Part III (*A5 / A6: thresholds → logic → output*).
 
 ```bash
 curl -s "$BASE/cashier/zones" | jq '.thresholds'
@@ -226,19 +262,24 @@ curl -s "$BASE/cashier/status"
 curl -s "$BASE/cashier/events?limit=20"
 ```
 
-### jq examples (detection SSE)
+### jq examples (streams)
+
+**`GET /detection/stream`** carries **task events** (e.g. `eventType`, `taskId`, `person`, `line`). Example: print `eventType` and `taskId`:
 
 ```bash
 curl -sN "$BASE/detection/stream" \
   | grep "^data:" | sed 's/^data: //' \
-  | jq '.data.use_case.cashier.summary | {case_id, severity, alerts}'
+  | jq '{eventType, taskId, channelId}'
+```
 
-curl -sN "$BASE/detection/stream" \
-  | grep "^data:" | sed 's/^data: //' \
-  | jq '.data.use_case.cashier.persons[] | {zone, transaction}'
+**Cashier** summary and zones: use **`/cashier/*`** (not `/detection/stream`):
 
+```bash
+curl -s "$BASE/cashier/status" | jq .
 curl -s "$BASE/cashier/zones" | jq '.thresholds'
 ```
+
+For batch / **`pipeline.py`** JSONL that still embeds `data.use_case.cashier`, keep using your offline `jq` filters against those files; the live v2 detection SSE shape differs.
 
 ### SSH — tail batch JSONL, evidence log, or app log
 
@@ -269,17 +310,19 @@ ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/evidence/cashier/logs/events.
 ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/logger/app.log"
 ```
 
-More detail: [`curl_cashier.md`](curl_cashier.md), SSE examples: [`sse_cashier.md`](sse_cashier.md).
+More detail: [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Part III — cashier cURL), SSE examples: [`sse_cashier.md`](sse_cashier.md).
 
 ---
 
 ##  API Endpoints Reference
 
-The application lifecycle works as follows:
-1. Register Cameras.
-2. Setup the Pipeline Services.
-3. Start the Pipeline processing.
-4. Consume the Detection Stream (SSE).
+Typical **v2** lifecycle:
+
+1. **`POST /cameras`** — register RTSP URLs (camera `id` strings must match task `channelId` values).
+2. **`POST /api/tasks`** — register enabled tasks per channel (`algorithmType` + config).
+3. *(Optional)* **`POST /cashier/zones`** — tune cashier ROIs/thresholds (`CASHIER_CONFIG`).
+4. **`POST /detection/start`** — spawn FrameBus + task workers for enabled tasks.
+5. **`GET /detection/stream`** — SSE for task events (e.g. crossings). **`GET /cashier/stream/{camera_id}`** — SSE for cashier frames/alerts.
 
 ---
 
@@ -292,7 +335,7 @@ Returns basic service information.
 ```json
 {
   "service": "Vision Pipeline API",
-  "version": "1.0.0"
+  "version": "2.0.0"
 }
 ```
 
@@ -315,13 +358,15 @@ Configure one or multiple cameras.
 }
 ```
 
-**Sample Response**
+**Sample Response** (envelope may include `"error": null`)
+
 ```json
 {
   "status": "configured",
   "cameras": {
     "cam1": "rtsp://username:password@10.0.0.5:554/stream1"
-  }
+  },
+  "error": null
 }
 ```
 
@@ -329,6 +374,7 @@ Configure one or multiple cameras.
 List all currently configured cameras.
 
 **Sample Response**
+
 ```json
 {
   "count": 1,
@@ -337,7 +383,8 @@ List all currently configured cameras.
       "id": "cam1",
       "url": "rtsp://username:password@10.0.0.5:554/stream1"
     }
-  ]
+  ],
+  "error": null
 }
 ```
 
@@ -355,67 +402,78 @@ Delete a configured camera.
 
 ---
 
-### **Detection Pipeline Routes**
+### **Task routes** (`/api/tasks`)
 
-#### `POST /detection/setup`
-Configure which models/services will run in the pipeline.
+Tasks are stored in memory and drive which algorithms run after `POST /detection/start`. Each task includes `taskId`, `taskName`, `algorithmType`, `channelId`, `enable`, `threshold`, `areaPosition` (JSON string; lines or polygons depending on algorithm), `detailConfig`, and schedule fields.
 
-**Sample Request**
-```json
-{
-  "pipeline": ["detector", "age_gender", "mood","ppe"]
-}
-```
+Supported `algorithmType` values: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_DRAWER`**.
 
-**Sample Response**
-```json
-{
-  "status": "configured",
-  "pipeline": ["detector", "age_gender", "mood","ppe"]
-}
-```
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/tasks` | Create or replace a task |
+| GET | `/api/tasks` | List all tasks |
+| GET | `/api/tasks/{task_id}` | Get one task |
+| PUT | `/api/tasks/{task_id}` | Update a task |
+| DELETE | `/api/tasks/{task_id}` | Remove a task |
+
+Implementation: [`apis/tasks.py`](apis/tasks.py). Worker dispatch: [`task_worker.py`](task_worker.py) + [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`.
+
+---
+
+### **Detection routes** (runtime + SSE)
 
 #### `POST /detection/start`
-Start processing cameras using the configured pipeline. You can optionally specify a `camera_id` as a query parameter string. If not specified, it starts all configured cameras.
+
+Starts **FrameBus** processes (one per channel with enabled tasks) and **task worker** processes. Optional query `camera_id` filters to tasks for that channel only.
 
 **Sample Request**
-`POST /detection/start?camera_id=cam1`
+
+`POST /detection/start?camera_id=4`
 
 **Sample Response**
+
 ```json
 {
   "status": "started",
-  "cameras": ["cam1"]
+  "cameras": ["4"],
+  "tasks": ["101"]
 }
 ```
 
 #### `POST /detection/stop`
-Stop camera streams. You can optionally specify a `camera_id` as a query parameter string. If not specified, it stops all running cameras.
+
+Stops running buses/workers. Without `camera_id`, stops all. With `camera_id`, stops that channel only.
 
 **Sample Request**
-`POST /detection/stop?camera_id=cam1`
+
+`POST /detection/stop?camera_id=4`
 
 **Sample Response**
+
 ```json
 {
   "status": "stopped",
-  "cameras": ["cam1"]
+  "cameras": ["4"]
 }
 ```
 
 #### `GET /detection/status`
-Returns the operational status, FPS, and detection counts for all cameras.
+
+Operational status per camera (FPS, frame counts, errors) from shared state updated by FrameBus.
 
 **Sample Response**
+
 ```json
 {
   "cameras": {
-    "cam1": {
-      "camera_id": "cam1",
+    "4": {
+      "camera_id": "4",
       "rtsp_url": "rtsp://10.0.0.5:554/stream1",
       "running": true,
       "frame_count": 420,
       "fps": 28.5,
+      "last_detections": 3,
+      "total_detections": 1200,
       "uptime_seconds": 14.7,
       "error": null
     }
@@ -424,11 +482,33 @@ Returns the operational status, FPS, and detection counts for all cameras.
 ```
 
 #### `GET /detection/stream`
-An SSE (Server-Sent Events) endpoint that yields one JSON payload per frame, combining inferences from all running cameras.
 
-**Sample Response stream**
+SSE endpoint: each `data:` line is one **task-produced event** (for example a `CROSS_LINE` crossing). Cashier-specific live output is on **`GET /cashier/stream/{camera_id}`**.
+
+**Example `data:` line (illustrative crossing event)**
+
 ```json
-data: {
+{
+  "eventId": "…",
+  "eventType": "CROSS_LINE",
+  "timestamp": 1774310401528,
+  "taskId": 13,
+  "taskName": "customer_walkin_main",
+  "channelId": 4,
+  "line": {"id": "1", "name": "Entrance", "direction": 1},
+  "person": {"trackingId": 1, "boundingBox": {}, "attributes": {}, "confidence": 0.9},
+  "evidence": {"captureImage": "…", "sceneImage": "…"}
+}
+```
+
+---
+
+### **Legacy pipeline JSON** (`pipeline.py` / batch)
+
+The following structure applies to **offline or script-driven** runs that use `CameraPipeline` and `services.REGISTRY` (not the v2 `/detection/stream` SSE):
+
+```json
+{
   "camera_id": "main_room",
   "frame_count": 5,
   "timestamp": "2026-03-17T12:50:23+00:00",
@@ -439,57 +519,16 @@ data: {
         "bbox": [120, 80, 340, 420],
         "class_id": 0,
         "class_name": "person",
-        "confidence": 0.91,
-        "center": [230, 250],
-        "width": 220,
-        "height": 340
+        "confidence": 0.91
       }]
     },
     "use_case": {
-      "age_gender": [{
-        "bbox": [120, 80, 340, 420],
-        "gender": "Female",
-        "age_group": "MiddleAged",
-        "confidence": 0.87
-      }],
-      "mood": [{
-        "bbox": [120, 80, 340, 420],
-        "mood": "Happy",
-        "confidence": 0.94
-      }],
-      "ppe": [
-      {
-        "person_bbox": [
-          677,
-          305,
-          850,
-          523
-        ],
-        "count": 2,
-        "items": [
-          {
-            "class_id": 2,
-            "class_name": "gloves",
-            "confidence": 0.9647,
-            "x1": 742,
-            "y1": 480,
-            "x2": 805,
-            "y2": 527
-          },
-          {
-            "class_id": 1,
-            "class_name": "hairnet",
-            "confidence": 0.8999,
-            "x1": 769,
-            "y1": 312,
-            "x2": 863,
-            "y2": 374
-          }
-        ]
-    }]
-      }
+      "age_gender": [],
+      "mood": [],
+      "ppe": []
     }
   }
+}
 ```
 
 ---
@@ -688,7 +727,7 @@ Chair (Right Side)
 
 ---
 
-HTTP examples for every route are in **[Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes)** above. This repository’s running app exposes **no** `/process`, `/stream` (POST), `/mood`, `/age-gender`, or `/health` routes — use RTSP cameras plus `/detection/*` and `/cashier/*` as documented.
+HTTP examples for every route are in **[Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes)** above. This repository’s running app exposes **no** `/process`, `/stream` (POST), `/mood`, `/age-gender`, `/health`, or **`POST /detection/setup`** — use **`/cameras`**, **`/api/tasks`**, **`/detection/*`**, and **`/cashier/*`** as documented.
 
 ---
 
@@ -773,18 +812,19 @@ Counts are **per-frame classifications** over the full run. Cases not observed a
 
 ---
 
-## Complete Cashier Pipeline Lifecycle
+## Complete Cashier Pipeline Lifecycle (v2)
 
 Recommended order:
 
-1. **`POST /cameras`** — register RTSP sources.  
-2. **`POST /detection/setup`** — e.g. `["detector","age_gender","mood","cashier"]`.  
-3. **`POST /cashier/zones`** (optional) — zones/thresholds; defaults come from `CASHIER_CONFIG`.  
+1. **`POST /cameras`** — register RTSP sources; use camera `id` values that match task `channelId` (e.g. `"4"` ↔ `channelId: 4`).  
+2. **`POST /api/tasks`** — add an enabled task with `"algorithmType": "CASHIER_DRAWER"` for that `channelId`.  
+3. **`POST /cashier/zones`** (optional) — zones/thresholds; defaults from `CASHIER_CONFIG`.  
 4. **`GET /cashier/zones`** (optional) — verify merged YAML on disk.  
-5. **`POST /detection/start`** — start workers (`?camera_id=…` or all cameras).  
-6. **`GET /detection/stream`** or **`GET /cashier/status`** — consume results.  
+5. Set **`YOLO_MODEL`** (and env) so FrameBus outputs cashier classes on that deployment.  
+6. **`POST /detection/start`** — start FrameBus + workers.  
+7. **`GET /cashier/status`**, **`GET /cashier/stream/{camera_id}`**, **`GET /cashier/events`** — cashier UI and logs. **`GET /detection/stream`** is for **task events** (e.g. crossings), not cashier frame payloads.
 
-Copy-paste **`curl`** for each step: [Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes). SSH tail examples are in that section.
+Copy-paste **`curl`**: [Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes). SSH tail examples are in that section.
 
 ---
 
@@ -1473,31 +1513,25 @@ For the one-off test on `frame_097440`, outputs are saved to:
 
 Use `export BASE=http://localhost:9000`. Strip the SSE `data: ` prefix before `jq` (see [Complete cURL reference](#complete-curl-reference-all-http-routes)).
 
+**v2 `GET /detection/stream`** — task events (example: crossing metadata):
+
 ```bash
-# First streamed frame: detection class + confidence
 curl -sN "$BASE/detection/stream" \
   | grep "^data:" | head -1 | sed 's/^data: //' \
-  | jq '.data.detection.items[]? | {class_name, confidence}'
+  | jq '{eventType, taskId, channelId, line}'
+```
 
-# Same frame: high-confidence detections only
-curl -sN "$BASE/detection/stream" \
-  | grep "^data:" | head -1 | sed 's/^data: //' \
-  | jq '.data.detection.items[]? | select(.confidence > 0.85)'
+**Cashier** — use `/cashier/stream` or `/cashier/status` (not `/detection/stream`):
 
-# Mood histogram for one frame (if mood is in the pipeline)
-curl -sN "$BASE/detection/stream" \
-  | grep "^data:" | head -1 | sed 's/^data: //' \
-  | jq '[.data.use_case.mood[]? | .mood] | group_by(.) | map({mood: .[0], count: length})'
+```bash
+curl -sN "$BASE/cashier/stream/cam1" | head -n 20
+curl -s "$BASE/cashier/status" | jq .
+```
 
-# Cashier summary (continuous; interrupt with Ctrl+C)
-curl -sN "$BASE/detection/stream" \
-  | grep "^data:" | sed 's/^data: //' \
-  | jq '.data.use_case.cashier.summary | {case_id, severity, alerts}'
+**Legacy / batch** — if you have JSONL from `CameraPipeline` with `data.use_case.cashier`, you can still `jq` that file:
 
-# Cashier persons with drawer/cash counts
-curl -sN "$BASE/detection/stream" \
-  | grep "^data:" | sed 's/^data: //' \
-  | jq '.data.use_case.cashier.persons[]? | {zone, transaction, drawers: (.items.drawers | length), cash: (.items.cash | length)}'
+```bash
+jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 ```
 
 ---
@@ -1544,12 +1578,16 @@ curl -sN "$BASE/detection/stream" \
 
 ```
 .
-├── app.py                      # FastAPI main application
-├── pipeline.py                 # Per-camera worker pipeline
+├── app.py                      # FastAPI main application (v2.0.0)
+├── frame_bus.py                # Per-camera capture + YOLO track; fans frames to task queues
+├── task_worker.py              # One process per task; dispatches TASK_REGISTRY
+├── pipeline.py                 # Optional per-camera CameraPipeline (REGISTRY; scripts/batch)
 ├── apis/                       # Route handlers
 │   ├── cameras.py
-│   ├── detection.py
+│   ├── tasks.py                # /api/tasks CRUD
+│   ├── detection.py            # start/stop/status + result queue for SSE
 │   └── cashier.py              # /cashier/* (zones, SSE, evidence, media)
+├── error_codes/                # Standardized success/error envelopes
 ├── config/                     # Default cashier zones YAML
 │   └── cashier_zones.yaml
 ├── requirements.txt            # Python dependencies
@@ -1561,14 +1599,16 @@ curl -sN "$BASE/detection/stream" \
 │   ├── best_aged_gender_6.onnx # Age/Gender ONNX (~85 MB)
 │   └── best_mood.onnx          # Mood/Emotion ONNX (~15 MB)
 ├── services/                   # Service modules
-│   ├── detector.py             # YOLO detection service
+│   ├── detector.py             # YOLO detection service (REGISTRY / pipeline)
 │   ├── age_gender.py           # Age/Gender classification
-|   ├── ppe.py                  # PPE detection
+│   ├── ppe.py                  # PPE detection
 │   ├── mood.py                 # Mood/Emotion detection
-│   └── cashier.py              # Cashier zone + case logic
+│   ├── cross_line.py           # CROSS_LINE task
+│   ├── mask_hairnet_chef_hat.py
+│   └── cashier.py              # CashierService + CashierDrawerTask (CASHIER_DRAWER)
 ├── scripts/                    # Testing and utility scripts
 │   └── test_image_pipeline.py  # Image inference testing script
-├── tests/                      # pytest suite (`pytest.ini`)
+├── tests/                      # pytest suite (`pytest.ini`, `tests/pipeline_test/`)
 ├── logger/                     # Logging configuration
 │   └── logger_config.py        # Logger setup
 └── outputs/                    # Test results directory
@@ -1627,15 +1667,19 @@ export PPE_MODEL="./models/best_PPE.onnx"
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/` | GET | Service info |
+| `/` | GET | Service info (`version`: **2.0.0**) |
 | `/cameras` | POST | Configure cameras |
 | `/cameras` | GET | List configured cameras |
 | `/cameras/{cam_id}` | DELETE | Remove camera |
-| `/detection/setup` | POST | Configure pipeline services |
-| `/detection/start` | POST | Start processing (optional `camera_id`) |
-| `/detection/stop` | POST | Stop processing (optional `camera_id`) |
+| `/api/tasks` | POST | Create/upsert task |
+| `/api/tasks` | GET | List tasks |
+| `/api/tasks/{task_id}` | GET | Get one task |
+| `/api/tasks/{task_id}` | PUT | Update task |
+| `/api/tasks/{task_id}` | DELETE | Delete task |
+| `/detection/start` | POST | Start FrameBus + task workers (optional `camera_id`) |
+| `/detection/stop` | POST | Stop processing (optional `camera_id`; omit = all) |
 | `/detection/status` | GET | Operational status per camera |
-| `/detection/stream` | GET | SSE: all cameras, one JSON per frame |
+| `/detection/stream` | GET | SSE: task events (e.g. crossings), not pipeline frames |
 | `/cashier/status` | GET | Latest cashier summary per camera |
 | `/cashier/events` | GET | Paginated alert/transaction log (`severity`, `case_id`, `camera_id`, `limit`, `offset`) |
 | `/cashier/events` | DELETE | Clear in-memory event log |
@@ -1663,7 +1707,7 @@ After starting the server (`uvicorn` on port **9000** by default):
 - Swagger UI: `http://localhost:9000/docs`
 - ReDoc: `http://localhost:9000/redoc`
 
-Supplementary handoff docs: [`curl_cashier.md`](curl_cashier.md), [`sse_cashier.md`](sse_cashier.md).
+Supplementary docs: [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest + cURL + SSH + cashier **`data`/cases/evidence — single combined README), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL Part III + mocks + JSON), [`sse_cashier.md`](sse_cashier.md).
 
 ## Models file
 https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link

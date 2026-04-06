@@ -163,6 +163,20 @@ class ZoneConfigRequest(BaseModel):
     ROI_CASHIER : Optional[ZoneModel]       = None
     ROI_CUSTOMER: Optional[ZoneModel]       = None
     thresholds  : Optional[Dict[str, Any]]  = None
+    detail_config: Optional[Dict[str, Any]] = Field(
+        None,
+        description="CASHIER_BOX_OPEN: drawerOpenLimit, serviceWaitLimit, enableStaffList, staffIds",
+    )
+    task: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Optional task_id, task_name, channel_id for integration envelope",
+    )
+    detection_threshold: Optional[int] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Min detection confidence 0–100 → thresholds.detection_threshold",
+    )
 
 
 # ─────────────────────────────────────────────
@@ -335,6 +349,7 @@ def update_zones(body: ZoneConfigRequest):
 
     cfg.setdefault("zones", {})
     cfg.setdefault("thresholds", {})
+    cfg.setdefault("detail_config", {})
 
     if body.ROI_CASHIER:
         cfg["zones"]["ROI_CASHIER"] = {
@@ -350,6 +365,12 @@ def update_zones(body: ZoneConfigRequest):
         }
     if body.thresholds:
         cfg["thresholds"].update(body.thresholds)
+    if body.detail_config is not None:
+        cfg["detail_config"] = {**cfg.get("detail_config", {}), **body.detail_config}
+    if body.task is not None:
+        cfg["task"] = {**cfg.get("task", {}), **body.task}
+    if body.detection_threshold is not None:
+        cfg["thresholds"]["detection_threshold"] = body.detection_threshold
 
     try:
         if config_path.suffix in (".yaml", ".yml"):

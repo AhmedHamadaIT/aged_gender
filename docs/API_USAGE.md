@@ -2,6 +2,8 @@
 
 Base URL for all examples: `http://localhost:9000`
 
+**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — combined pytest, cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence (replaces `SERVICE_TEST.md` + `cases-and-repo.md`). Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md). [SERVICE_TEST.md](./SERVICE_TEST.md) redirects there.
+
 ---
 
 ## Table of Contents
@@ -190,6 +192,27 @@ curl -X POST http://localhost:9000/api/tasks \
   }
 }
 ```
+
+### Register a cashier drawer task (`CASHIER_DRAWER`)
+
+Implementation: **`CashierDrawerTask`** and **`CashierService`** in [`services/cashier.py`](../services/cashier.py). Use `/cashier/*` HTTP routes for zones, status, and SSE. Point **`YOLO_MODEL`** at cashier weights on the server so FrameBus emits person/drawer/cash classes on that channel.
+
+```bash
+curl -X POST http://localhost:9000/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskId": 30,
+    "taskName": "cashier_drawer_monitor",
+    "algorithmType": "CASHIER_DRAWER",
+    "channelId": 1,
+    "enable": true,
+    "threshold": 50,
+    "areaPosition": "[]",
+    "detailConfig": {}
+  }'
+```
+
+**Response:** same shape as other tasks — `"status": "created"`, `"task": { … "algorithmType": "CASHIER_DRAWER", … }`.
 
 ---
 

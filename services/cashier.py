@@ -3,6 +3,11 @@ services/cashier.py  —  v1.2.0
 
 CashierService — ROI-based cashier drawer monitor.
 
+CashierDrawerTask — FrameBus task worker for ``algorithmType`` ``CASHIER_DRAWER``
+(``POST /api/tasks``). Adapts each FrameBus ``payload`` to the pipeline-style
+``context`` dict and invokes ``CashierService``. Same file keeps service + task
+adapter in one place.
+
 Model   : YOLO11m  (best_cashier.onnx)
 Classes : 0=Person  1=Drawer_Open  2=Cash
 Zones   : ROI_CASHIER (staff side)  •  ROI_CUSTOMER (customer side)
@@ -12,6 +17,8 @@ Reads   context["data"]["detection"]["items"]   — List[Detection]
 
 Writes  context["data"]["use_case"]["cashier"]  — dict (Hybrid schema)
         {
+          "data": { ... },                     # Eyego spec §4 top-level payload
+          "case_id" / "severity"               # flat copies for API filters
           "persons": [                          # person-level (like PPE)
             {
               "person_bbox" : List[int],
@@ -57,6 +64,37 @@ CASHIER_PROXIMITY_IOU    : nearby IoU threshold      default: 0.05
 CASHIER_RELOAD_INTERVAL  : config reload (seconds)  default: 60
 CASHIER_BUFFER_SIZE      : rolling frame buffer      default: 100
 SAVE_OUTPUT              : annotate + save frames   default: True
+
+Integration envelope (spec §4 ``data`` block), optional env:
+
+CASHIER_CLOUD_IMAGE_BASE : prefix for captureUrl/sceneUrl (both if capture/scene unset)
+CASHIER_CAPTURE_URL_BASE : override captureUrl base only
+CASHIER_SCENE_URL_BASE   : override sceneUrl base only
+CASHIER_DEVICE_SN        : deviceSN in ``data`` (else DEVICE_SN, else UNKNOWN)
+CASHIER_CHANNEL_NAME     : channelName if not in config task
+
+CASHIER_DISABLE_DRAWER_TOTAL_PERSIST : set 1 to skip JSON persistence (RAM-only total)
+CASHIER_DRAWER_DURATION_PERSIST_SEC  : wall-clock min interval to flush duration while
+                                       drawer stays open (default 10); always flush on open/close edge
+
+Optional staff bindings (integration; not set by pipeline today):
+
+    context["data"]["cashier_staff"] = mock_cashier_staff_context([
+        {"bbox": [x1,y1,x2,y2], "staff_id": 1001},
+    ])
+
+If detail_config.enable_staff_list is true and bindings are missing/empty, every
+cashier-zone person is treated as unauthorized (strict).
+
+Additive use_case.cashier keys: personStructural (JSON string), algorithmType.
+summary.* keys are unchanged.
+
+personStructural includes:
+  total_open_count — rising-edge opens (closed → open) in cashier ROI, per camera.
+  total_open_duration_ms — cumulative ms the drawer was open (inter-frame dt while
+    previous sample was open); persisted with totals file.
+  current_open_duration_ms — ms since current open streak started (0 if closed);
+    sent every frame. Legacy drawer_open_duration_ms kept for A1/A3/A4/A6 when >0.
 """
 
 from __future__ import annotations
@@ -66,6 +104,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -87,6 +126,13 @@ except ImportError:
 
 load_dotenv()
 log = Logger.get_logger(__name__)
+
+STAFF_CONTEXT_KEY = "cashier_staff"
+ALGORITHM_TYPE = "CASHIER_BOX_OPEN"
+_CRITICAL_UNBOUND_WARN_SEC = 600.0
+_STAFF_MATCH_IOU = 0.25
+# Persistent cumulative drawer-open edges (closed → open), per camera_id
+CASHIER_DRAWER_TOTALS_FILENAME = "cashier_drawer_open_totals.json"
 
 # ─────────────────────────────────────────────
 # Zone identifiers
@@ -137,11 +183,12 @@ _DEBOUNCE_DEFAULT = 3
 # ─────────────────────────────────────────────
 # GIF budgets per case
 # ─────────────────────────────────────────────
+# max_post None = uncapped until case resolves (A3/A4); see _accumulate_post
 _GIF_BUDGET: Dict[str, Dict] = {
     "A1": {"pre": 30,  "max_post": 600,  "fps": 10, "keyframe_interval": None},
-    "A2": {"pre": 50,  "max_post": 300,  "fps": 10, "keyframe_interval": None},
-    "A3": {"pre": 60,  "max_post": 5000, "fps": 10, "keyframe_interval": None},
-    "A4": {"pre": 60,  "max_post": 5000, "fps": 10, "keyframe_interval": None},
+    "A2": {"pre": 50,  "max_post": 30,   "fps": 10, "keyframe_interval": None},
+    "A3": {"pre": 60,  "max_post": None, "fps": 10, "keyframe_interval": None},
+    "A4": {"pre": 60,  "max_post": None, "fps": 10, "keyframe_interval": None},
     "A5": {"pre": 0,   "max_post": 60,   "fps": 1,  "keyframe_interval": 30.0},
     "A6": {"pre": 0,   "max_post": 60,   "fps": 1,  "keyframe_interval": 10.0},
     "A7": {"pre": 20,  "max_post": 200,  "fps": 5,  "keyframe_interval": None},
@@ -184,7 +231,19 @@ def _default_config() -> Dict:
         "gif"     : {"fps": 10, "quality": 85},
         "debounce": {"default": 3, "A3": 1, "A4": 1},
         "evidence": {"save_gif": True, "save_thumbnail": True, "log_rotate_mb": 100},
+        "detail_config": {
+            "enable_staff_list": False,
+            "staff_ids": [],
+        },
     }
+
+
+def mock_cashier_staff_context(bindings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Build context[\"data\"][\"cashier_staff\"] for tests or pre-integration.
+    Each binding: {\"bbox\": [x1,y1,x2,y2], \"staff_id\": int}
+    """
+    return {"bindings": list(bindings)}
 
 
 # ─────────────────────────────────────────────
@@ -290,6 +349,14 @@ class CashierResult:
     timestamp     : str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    person_structural     : Optional[str] = None
+    unauthorized_present  : bool = False
+    drawer_open_duration_ms: Optional[int] = None
+    wait_duration_ms      : Optional[int] = None
+    task_meta             : Optional[Dict[str, Any]] = None
+    total_open_count         : int = 0  # cumulative drawer open edges (CASHIER zone)
+    total_open_duration_ms   : int = 0  # cumulative ms drawer was open (sampled inter-frame)
+    current_open_duration_ms : int = 0  # ms in current open streak; 0 if closed
 
     def to_dict(self) -> Dict:
         # Legacy cashier_persons list (kept for backward-compat)
@@ -304,11 +371,8 @@ class CashierResult:
                 self.cashier_zone.person_confidences,
             )
         ]
-        return {
-            # ── Person-level (new — like PPE) ──────────────────────────
+        out: Dict[str, Any] = {
             "persons": [p.to_dict() for p in self.persons],
-
-            # ── Frame-level summary (legacy) ───────────────────────────
             "summary": {
                 "cashier_zone"   : self.cashier_zone.to_dict(),
                 "customer_zone"  : self.customer_zone.to_dict(),
@@ -321,8 +385,119 @@ class CashierResult:
                 "frame_id"       : self.frame_id,
                 "timestamp"      : self.timestamp,
                 "cashier_persons": cashier_persons,
+                "total_open_count": self.total_open_count,
+                "total_open_duration_ms": self.total_open_duration_ms,
+                "current_open_duration_ms": self.current_open_duration_ms,
             },
+            "algorithmType": ALGORITHM_TYPE,
         }
+        if self.person_structural is not None:
+            out["personStructural"] = self.person_structural
+        if self.task_meta:
+            out["task"] = dict(self.task_meta)
+        # Flat fields for API filters / SSE consumers
+        out["case_id"] = self.case_id
+        out["severity"] = self.severity
+        # Eyego-style integration payload (same keys as spec §4 ``data``)
+        out["data"] = build_cashier_spec_data(self)
+        return out
+
+
+def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
+    """
+    Build the backend ``data`` object (algorithmType, captureId, personStructural, …).
+    URLs are optional; set CASHIER_CLOUD_IMAGE_BASE or per-field *_URL_BASE env vars.
+    GIF / frame-save logic is unchanged — this only shapes JSON for consumers.
+    """
+    meta = result.task_meta if isinstance(result.task_meta, dict) else {}
+
+    def _pick_int(*keys: str, default: int = 0) -> int:
+        for k in keys:
+            if k in meta and meta[k] is not None:
+                try:
+                    return int(meta[k])
+                except (TypeError, ValueError):
+                    return default
+        return default
+
+    def _pick_str(*keys: str, default: str = "") -> str:
+        for k in keys:
+            v = meta.get(k)
+            if v is not None and str(v).strip() != "":
+                return str(v)
+        return default
+
+    channel_id = _pick_int("channelId", "channel_id")
+    task_id = meta.get("taskId", meta.get("task_id"))
+    task_id_out: Any
+    if task_id is None or task_id == "":
+        task_id_out = None
+    else:
+        try:
+            task_id_out = int(task_id)
+        except (TypeError, ValueError):
+            task_id_out = None
+
+    channel_name = _pick_str("channelName", "channel_name")
+    if not channel_name:
+        if channel_id:
+            channel_name = os.getenv(
+                "CASHIER_CHANNEL_NAME",
+                f"CAM-{channel_id:02d}-MAIN",
+            )
+        else:
+            channel_name = os.getenv("CASHIER_CHANNEL_NAME", "CAM-UNKNOWN")
+
+    device_sn = _pick_str("deviceSN", "device_sn")
+    if not device_sn:
+        device_sn = (
+            os.getenv("CASHIER_DEVICE_SN")
+            or os.getenv("DEVICE_SN")
+            or "UNKNOWN"
+        )
+
+    algo = _pick_str("algorithmType", "algorithm_type") or ALGORITHM_TYPE
+    capture_id = f"CASHIER_BOX_OPEN_{uuid.uuid4()}.jpg"
+    scene_id = f"CASHIER_BOX_OPEN_{uuid.uuid4()}.jpg"
+
+    now = datetime.now(timezone.utc)
+    record_ms = int(now.timestamp() * 1000)
+    date_utc = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    cap_base = (
+        os.getenv("CASHIER_CAPTURE_URL_BASE")
+        or os.getenv("CASHIER_CLOUD_IMAGE_BASE")
+        or ""
+    ).rstrip("/")
+    scene_base = (
+        os.getenv("CASHIER_SCENE_URL_BASE")
+        or os.getenv("CASHIER_CLOUD_IMAGE_BASE")
+        or ""
+    ).rstrip("/")
+    capture_url = f"{cap_base}/{capture_id}" if cap_base else ""
+    scene_url = f"{scene_base}/{scene_id}" if scene_base else ""
+
+    ps = result.person_structural if result.person_structural is not None else "{}"
+
+    return {
+        "algorithmType": algo,
+        "captureId": capture_id,
+        "sceneId": scene_id,
+        "channelId": channel_id,
+        "channelName": channel_name,
+        "deviceSN": device_sn,
+        "id": uuid.uuid4().hex,
+        "taskId": task_id_out,
+        "taskName": _pick_str("taskName", "task_name"),
+        "recordTime": record_ms,
+        "dateUTC": date_utc,
+        "total_open_count": int(result.total_open_count),
+        "total_open_duration_ms": int(result.total_open_duration_ms),
+        "current_open_duration_ms": int(result.current_open_duration_ms),
+        "personStructural": ps,
+        "captureUrl": capture_url,
+        "sceneUrl": scene_url,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -495,6 +670,23 @@ class CashierService:
 
         self._evidence = _EvidenceWriter(evidence_dir, self._log_rotate_mb)
 
+        self._drawer_totals_lock = threading.Lock()
+        self._drawer_was_open: Dict[str, bool] = {}
+        self._total_drawer_open_count: Dict[str, int] = {}
+        self._total_drawer_open_duration_ms: Dict[str, int] = {}
+        self._last_frame_monotonic: Dict[str, float] = {}
+        self._drawer_totals_last_wall_save: float = 0.0
+        try:
+            self._drawer_duration_persist_interval = float(
+                os.getenv("CASHIER_DRAWER_DURATION_PERSIST_SEC", "10")
+            )
+        except ValueError:
+            self._drawer_duration_persist_interval = 10.0
+        self._persist_drawer_totals = os.getenv(
+            "CASHIER_DISABLE_DRAWER_TOTAL_PERSIST", ""
+        ).lower() not in ("1", "true", "yes", "on")
+        self._load_drawer_open_totals()
+
         log.info(
             "[CASHIER] Ready — model %s | img_size %s | classes %s | GIF %s",
             model_path, self._img_size, list(self._CLASS_NAMES.values()),
@@ -534,6 +726,57 @@ class CashierService:
         self._save_thumbnail = bool(ev.get("save_thumbnail", True))
         self._log_rotate_mb  = float(ev.get("log_rotate_mb", 100.0))
 
+        dt = thr.get("detection_threshold")
+        if dt is None:
+            dt = thr.get("detection_threshold_percent")
+        if dt is not None:
+            try:
+                p = float(dt)
+                self._global_conf_floor = max(0.0, min(1.0, p / 100.0))
+            except (TypeError, ValueError):
+                self._global_conf_floor = None
+        else:
+            self._global_conf_floor = None
+
+        self._parse_detail_config(self._cfg.get("detail_config"))
+        self._task_meta = self._cfg.get("task") if isinstance(self._cfg.get("task"), dict) else {}
+
+    def _parse_detail_config(self, raw: Any) -> None:
+        """Load CASHIER_BOX_OPEN detail_config (snake_case or camelCase)."""
+        if not isinstance(raw, dict):
+            raw = {}
+        esl = raw.get("enable_staff_list", raw.get("enableStaffList", False))
+        if isinstance(esl, str):
+            esl = esl.lower() in ("true", "1", "yes", "on")
+        self._enable_staff_list = bool(esl)
+        ids = raw.get("staff_ids", raw.get("staffIds", []))
+        if not isinstance(ids, (list, tuple)):
+            ids = []
+        self._staff_ids = set()
+        for x in ids:
+            try:
+                self._staff_ids.add(int(x))
+            except (TypeError, ValueError):
+                continue
+        dol = raw.get("drawer_open_limit", raw.get("drawerOpenLimit"))
+        if dol is not None:
+            try:
+                self._drawer_max = float(dol)
+            except (TypeError, ValueError):
+                pass
+        swl = raw.get("service_wait_limit", raw.get("serviceWaitLimit"))
+        if swl is not None:
+            try:
+                self._wait_max = float(swl)
+            except (TypeError, ValueError):
+                pass
+
+    def _min_conf(self, class_id: int) -> float:
+        base = float(self._CONF.get(class_id, 0.5))
+        if self._global_conf_floor is not None:
+            return max(base, self._global_conf_floor)
+        return base
+
     def _load_polys(self) -> Tuple[List[List[float]], List[List[float]]]:
         zones = self._cfg.get("zones", {})
         return (
@@ -567,13 +810,60 @@ class CashierService:
             return ZONE_CUSTOMER
         return ZONE_OUTSIDE
 
+    def _match_binding_staff_id(
+        self, person_bbox: List[float], bindings: List[Any]
+    ) -> Optional[int]:
+        best_iou = 0.0
+        best_sid: Optional[int] = None
+        for b in bindings:
+            if not isinstance(b, dict):
+                continue
+            bb = b.get("bbox")
+            if not bb or len(bb) < 4:
+                continue
+            bb_f = [float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3])]
+            iou_v = _iou(person_bbox, bb_f)
+            if iou_v > best_iou and iou_v >= _STAFF_MATCH_IOU:
+                best_iou = iou_v
+                try:
+                    best_sid = int(b["staff_id"])
+                except (KeyError, TypeError, ValueError):
+                    best_sid = None
+        return best_sid
+
+    def _resolve_cz_staff_state(
+        self, cz: ZoneCount, context: Dict[str, Any]
+    ) -> Tuple[bool, int]:
+        """
+        Returns (unauthorized_present, authorized_person_count_in_cz).
+        Strict: enable_staff_list + empty bindings => all CZ persons unauthorized.
+        """
+        if not self._enable_staff_list:
+            return False, cz.persons
+        data = context.get("data") if isinstance(context.get("data"), dict) else {}
+        staff_block = data.get(STAFF_CONTEXT_KEY) if isinstance(data, dict) else None
+        if not isinstance(staff_block, dict):
+            staff_block = {}
+        bindings = staff_block.get("bindings")
+        if not isinstance(bindings, list) or len(bindings) == 0:
+            return (cz.persons > 0), 0
+        auth = 0
+        for pb in cz.person_bboxes:
+            sid = self._match_binding_staff_id(pb, bindings)
+            if sid is not None and sid in self._staff_ids:
+                auth += 1
+        return (cz.persons - auth) > 0, auth
+
     def _count_zones(self, detections, frame_w: int, frame_h: int) -> Tuple[ZoneCount, ZoneCount]:
         cz, kz = ZoneCount(), ZoneCount()
         for det in detections:
-            if det.confidence < self._CONF.get(det.class_id, 0.5):
+            cid = int(getattr(det, "class_id", -1))
+            if float(getattr(det, "confidence", 0)) < self._min_conf(cid):
                 continue
             zone = self._assign_zone(det, frame_w, frame_h)
-            bbox = list(det.bbox)
+            bbox = list(getattr(det, "bbox", []))
+            if len(bbox) < 4:
+                bbox = [float(det.x1), float(det.y1), float(det.x2), float(det.y2)]
             if zone == ZONE_CASHIER:
                 if det.class_id == 0:
                     cz.persons += 1
@@ -702,11 +992,21 @@ class CashierService:
         return filtered
 
     def _evaluate(
-        self, cz: ZoneCount, kz: ZoneCount, now: float
-    ) -> Tuple[str, str, List[str], bool]:
+        self,
+        cz: ZoneCount,
+        kz: ZoneCount,
+        now: float,
+        unauthorized_in_cz: bool,
+    ) -> Tuple[str, str, List[str], bool, int, int]:
+        """
+        CASHIER_BOX_OPEN 14-rule first match (Section 8).
+        Returns (case_id, severity, alerts, transaction, drawer_ms, wait_ms).
+        """
         alerts: List[str] = []
+        cash_any = (cz.cash + kz.cash) >= 1
+        cash_zero = not cash_any
+        drawer_open = cz.drawers >= 1
 
-        # ── Timers ──
         if cz.drawers >= 1:
             if self._drawer_open_since is None:
                 self._drawer_open_since = now
@@ -723,82 +1023,350 @@ class CashierService:
             self._customer_wait_since = None
             wait_elapsed = 0.0
 
-        # ── CRITICAL ──
+        drawer_ms = int(drawer_elapsed * 1000) if drawer_open else 0
+        wait_ms = int(wait_elapsed * 1000) if (kz.persons >= 1 and cz.persons == 0) else 0
 
-        if cz.drawers >= 1 and (cz.cash >= 1 or kz.cash >= 1) and cz.persons == 0:
+        def ret(
+            cid: str, sev: str, al: List[str], txn: bool
+        ) -> Tuple[str, str, List[str], bool, int, int]:
+            return cid, sev, al, txn, drawer_ms, wait_ms
+
+        # Row 1 — A3
+        if drawer_open and cash_any and cz.persons == 0:
             msg = "A3 CRITICAL: Cash + open drawer — register unguarded"
             alerts.append(msg)
-            log.critical("[CASHIER] %s | drawers=%d cash_cz=%d cash_kz=%d", msg, cz.drawers, cz.cash, kz.cash)
-            return "A3", SEVERITY_CRITICAL, alerts, False
+            log.critical(
+                "[CASHIER] %s | drawers=%d cash_cz=%d cash_kz=%d",
+                msg, cz.drawers, cz.cash, kz.cash,
+            )
+            return ret("A3", SEVERITY_CRITICAL, alerts, False)
 
-        if cz.persons >= 1 and cz.drawers >= 1 and (cz.cash >= 1 or kz.cash >= 1):
-            if not self._nearby(cz.person_bboxes, cz.drawer_bboxes):
-                msg = "A4 CRITICAL: Unauthorised person at open register with cash"
-                alerts.append(msg)
-                log.critical("[CASHIER] %s | persons_cz=%d drawers=%d", msg, cz.persons, cz.drawers)
-                return "A4", SEVERITY_CRITICAL, alerts, False
+        # Row 2 — A4 (spec: non-staff + open drawer + cash), or legacy IoU when staff list off
+        if drawer_open and cash_any:
+            if self._enable_staff_list:
+                if unauthorized_in_cz:
+                    msg = "A4 CRITICAL: Unauthorised person at open register with cash"
+                    alerts.append(msg)
+                    log.critical(
+                        "[CASHIER] %s | persons_cz=%d drawers=%d",
+                        msg, cz.persons, cz.drawers,
+                    )
+                    return ret("A4", SEVERITY_CRITICAL, alerts, False)
+            else:
+                # Legacy: cash present but no person↔drawer proximity (staff may lack overlap)
+                if (
+                    cz.persons >= 1
+                    and not self._nearby(cz.person_bboxes, cz.drawer_bboxes)
+                ):
+                    msg = "A4 CRITICAL: Unauthorised person at open register with cash"
+                    alerts.append(msg)
+                    log.critical(
+                        "[CASHIER] %s | persons_cz=%d drawers=%d (IoU fallback)",
+                        msg, cz.persons, cz.drawers,
+                    )
+                    return ret("A4", SEVERITY_CRITICAL, alerts, False)
 
-        # ── ALERT ──
-
-        if cz.drawers >= 1 and cz.persons == 0:
-            extra    = " — customer present" if kz.persons >= 1 else ""
-            severity = SEVERITY_CRITICAL if kz.persons >= 1 else SEVERITY_ALERT
-            level    = "CRITICAL" if severity == SEVERITY_CRITICAL else "ALERT"
-            msg = f"A1 {level}: Unattended open drawer{extra}"
+        # Row 3 — A1 elevated (CRITICAL)
+        if cz.persons == 0 and kz.persons >= 1 and drawer_open and cash_zero:
+            msg = "A1 CRITICAL: Unattended open drawer — customer present"
             alerts.append(msg)
-            log.warning("[CASHIER] %s | drawers=%d customer_persons=%d", msg, cz.drawers, kz.persons)
-            return "A1", severity, alerts, False
+            log.warning("[CASHIER] %s | drawers=%d", msg, cz.drawers)
+            return ret("A1", SEVERITY_CRITICAL, alerts, False)
 
-        if wait_elapsed >= self._wait_max:
-            msg = f"A5 ALERT: Customer waiting {wait_elapsed:.0f}s — no cashier present"
+        # Row 4 — A1 ALERT
+        if cz.persons == 0 and drawer_open and cash_zero:
+            msg = "A1 ALERT: Unattended open drawer"
             alerts.append(msg)
-            log.warning("[CASHIER] %s", msg)
-            return "A5", SEVERITY_ALERT, alerts, False
+            log.warning("[CASHIER] %s | drawers=%d", msg, cz.drawers)
+            return ret("A1", SEVERITY_ALERT, alerts, False)
 
-        if drawer_elapsed >= self._drawer_max:
-            msg = f"A6 ALERT: Drawer open {drawer_elapsed:.0f}s (limit {self._drawer_max:.0f}s)"
-            alerts.append(msg)
-            log.warning("[CASHIER] %s", msg)
-            return "A6", SEVERITY_ALERT, alerts, False
-
-        if kz.cash >= 1 and cz.persons == 0 and cz.drawers == 0:
-            msg = "A7 ALERT: Cash in customer zone — no cashier present"
-            alerts.append(msg)
-            log.warning("[CASHIER] %s | cash_kz=%d", msg, kz.cash)
-            return "A7", SEVERITY_ALERT, alerts, False
-
-        # ── NORMAL ──
-
-        if (cz.persons >= 1 and cz.drawers >= 1 and kz.persons >= 1
-                and (cz.cash >= 1 or kz.cash >= 1)
-                and self._nearby(cz.person_bboxes, cz.drawer_bboxes)):
-            alerts.append("N3 EVENT: Transaction in progress")
-            log.info("[CASHIER] N3 | cashier=%d drawer=%d customer=%d", cz.persons, cz.drawers, kz.persons)
-            return "N3", SEVERITY_NORMAL, alerts, True
-
-        if (cz.persons >= 2 and cz.drawers >= 1
-                and self._all_nearby(cz.person_bboxes, cz.drawer_bboxes)):
-            alerts.append("N4 EVENT: Staff handover / supervisor at register")
-            log.info("[CASHIER] N4 | cashier_persons=%d", cz.persons)
-            return "N4", SEVERITY_NORMAL, alerts, False
-
-        if cz.persons >= 1 and cz.drawers >= 1 and cz.cash == 0 and kz.cash == 0:
-            alerts.append("N6 EVENT: Drawer open, no cash (card / float check)")
-            return "N6", SEVERITY_NORMAL, alerts, False
-
-        if kz.persons >= 1 and cz.drawers == 0:
-            return "N5", SEVERITY_NORMAL, [], False
-
-        if cz.persons >= 1 and cz.drawers == 0 and kz.persons == 0:
-            return "N2", SEVERITY_NORMAL, [], False
-
-        if cz.persons >= 1:
+        # Row 5 — A2
+        if unauthorized_in_cz:
             msg = "A2 ALERT: Unexpected person in cashier zone"
             alerts.append(msg)
             log.warning("[CASHIER] %s | persons_cz=%d", msg, cz.persons)
-            return "A2", SEVERITY_ALERT, alerts, False
+            return ret("A2", SEVERITY_ALERT, alerts, False)
 
-        return "N1", SEVERITY_NORMAL, [], False
+        # Row 6 — A7
+        if cz.persons == 0 and not drawer_open and kz.cash >= 1:
+            msg = "A7 ALERT: Cash in customer zone — no cashier present"
+            alerts.append(msg)
+            log.warning("[CASHIER] %s | cash_kz=%d", msg, kz.cash)
+            return ret("A7", SEVERITY_ALERT, alerts, False)
+
+        # Row 7 — A5
+        if (
+            cz.persons == 0
+            and kz.persons >= 1
+            and not drawer_open
+            and cash_zero
+            and wait_elapsed >= self._wait_max
+        ):
+            msg = f"A5 ALERT: Customer waiting {wait_elapsed:.0f}s — no cashier present"
+            alerts.append(msg)
+            log.warning("[CASHIER] %s", msg)
+            return ret("A5", SEVERITY_ALERT, alerts, False)
+
+        # Row 8 — A6 (authorized CZ staff only; unauthorized handled by A2)
+        if (
+            cz.persons >= 1
+            and drawer_open
+            and drawer_elapsed >= self._drawer_max
+        ):
+            msg = f"A6 ALERT: Drawer open {drawer_elapsed:.0f}s (limit {self._drawer_max:.0f}s)"
+            alerts.append(msg)
+            log.warning("[CASHIER] %s", msg)
+            return ret("A6", SEVERITY_ALERT, alerts, False)
+
+        # Row 9 — N4
+        if (
+            cz.persons >= 2
+            and drawer_open
+            and self._all_nearby(cz.person_bboxes, cz.drawer_bboxes)
+        ):
+            alerts.append("N4 EVENT: Staff handover / supervisor at register")
+            log.info("[CASHIER] N4 | cashier_persons=%d", cz.persons)
+            return ret("N4", SEVERITY_NORMAL, alerts, False)
+
+        # Row 10 — N3
+        if (
+            cz.persons == 1
+            and kz.persons >= 1
+            and drawer_open
+            and cash_any
+            and self._nearby(cz.person_bboxes, cz.drawer_bboxes)
+        ):
+            alerts.append("N3 EVENT: Transaction in progress")
+            log.info(
+                "[CASHIER] N3 | cashier=%d drawer=%d customer=%d",
+                cz.persons, cz.drawers, kz.persons,
+            )
+            return ret("N3", SEVERITY_NORMAL, alerts, True)
+
+        # Row 11 — N6
+        if (
+            cz.persons == 1
+            and drawer_open
+            and cz.cash == 0
+            and kz.cash == 0
+        ):
+            alerts.append("N6 EVENT: Drawer open, no cash (card / float check)")
+            return ret("N6", SEVERITY_NORMAL, alerts, False)
+
+        # Row 12 — N2
+        if cz.persons >= 1 and not drawer_open:
+            return ret("N2", SEVERITY_NORMAL, [], False)
+
+        # Row 13 — N5
+        if (
+            cz.persons == 0
+            and kz.persons >= 1
+            and not drawer_open
+            and cash_zero
+            and wait_elapsed < self._wait_max
+        ):
+            return ret("N5", SEVERITY_NORMAL, [], False)
+
+        # Row 14 — N1
+        if cz.persons == 0 and kz.persons == 0 and not drawer_open and cash_zero:
+            return ret("N1", SEVERITY_NORMAL, [], False)
+
+        # Authorized CZ but no table row (e.g. 2+ staff, drawer open, not all IoU with drawer)
+        if cz.persons >= 1 and not unauthorized_in_cz:
+            msg = "A2 ALERT: Unexpected person in cashier zone"
+            alerts.append(msg)
+            log.warning("[CASHIER] %s | persons_cz=%d (fallback)", msg, cz.persons)
+            return ret("A2", SEVERITY_ALERT, alerts, False)
+
+        return ret("N1", SEVERITY_NORMAL, [], False)
+
+    def _detections_for_person_structural(
+        self, detections: List[Any], w: int, h: int, context: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        data = context.get("data") if isinstance(context.get("data"), dict) else {}
+        staff_block = data.get(STAFF_CONTEXT_KEY) if isinstance(data, dict) else None
+        if not isinstance(staff_block, dict):
+            staff_block = {}
+        bindings = staff_block.get("bindings")
+        if not isinstance(bindings, list):
+            bindings = []
+        out: List[Dict[str, Any]] = []
+        for det in detections:
+            cid = getattr(det, "class_id", None)
+            if cid not in (0, 1, 2):
+                continue
+            conf = float(getattr(det, "confidence", 0))
+            if conf < self._min_conf(int(cid)):
+                continue
+            zone = self._assign_zone(det, w, h)
+            if zone == ZONE_OUTSIDE:
+                continue
+            zid = 1 if zone == ZONE_CASHIER else 2
+            name = self._CLASS_NAMES.get(int(cid), str(cid))
+            row: Dict[str, Any] = {
+                "class": name,
+                "confidence": round(conf, 4),
+                "zone_id": zid,
+            }
+            if int(cid) == 0 and zone == ZONE_CASHIER and self._enable_staff_list:
+                bbox = list(getattr(det, "bbox", []))
+                if len(bbox) < 4:
+                    bbox = [
+                        float(det.x1), float(det.y1),
+                        float(det.x2), float(det.y2),
+                    ]
+                sid = self._match_binding_staff_id(bbox, bindings)
+                row["is_authorized"] = bool(sid is not None and sid in self._staff_ids)
+            out.append(row)
+        return out
+
+    def _drawer_totals_path(self) -> Path:
+        return self._evidence.base / "logs" / CASHIER_DRAWER_TOTALS_FILENAME
+
+    def _load_drawer_open_totals(self) -> None:
+        path = self._drawer_totals_path()
+        if not path.is_file():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            m = raw.get("by_camera")
+            if isinstance(m, dict):
+                out_c: Dict[str, int] = {}
+                for k, v in m.items():
+                    try:
+                        iv = int(v)
+                        if iv >= 0:
+                            out_c[str(k)] = iv
+                    except (TypeError, ValueError):
+                        continue
+                self._total_drawer_open_count = out_c
+            dm = raw.get("total_open_duration_ms_by_camera")
+            if isinstance(dm, dict):
+                out_d: Dict[str, int] = {}
+                for k, v in dm.items():
+                    try:
+                        iv = int(v)
+                        if iv >= 0:
+                            out_d[str(k)] = iv
+                    except (TypeError, ValueError):
+                        continue
+                self._total_drawer_open_duration_ms = out_d
+            log.info(
+                "[CASHIER] Loaded drawer totals: %d camera(s) count, %d duration map",
+                len(self._total_drawer_open_count),
+                len(self._total_drawer_open_duration_ms),
+            )
+        except Exception as exc:
+            log.warning("[CASHIER] Drawer totals load failed (%s) — starting empty", exc)
+            self._total_drawer_open_count = {}
+            self._total_drawer_open_duration_ms = {}
+
+    def _save_drawer_open_totals_nolock(self) -> None:
+        if not self._persist_drawer_totals:
+            return
+        path = self._drawer_totals_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "by_camera": dict(self._total_drawer_open_count),
+                "total_open_duration_ms_by_camera": dict(self._total_drawer_open_duration_ms),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            self._drawer_totals_last_wall_save = time.time()
+        except Exception as exc:
+            log.warning("[CASHIER] Drawer totals save failed: %s", exc)
+
+    def _update_drawer_open_metrics(
+        self, camera_id: str, drawer_open: bool, now_mono: float
+    ) -> Tuple[int, int]:
+        """
+        Cumulative open count (rising edge) + cumulative open duration (ms).
+        Duration: between consecutive frames, time is added if the *previous* frame
+        had the cashier drawer open (matches discrete sampling of open intervals).
+        Persists on open edge, close edge, and periodically while open.
+        """
+        with self._drawer_totals_lock:
+            prev = self._drawer_was_open.get(camera_id, False)
+            last_t = self._last_frame_monotonic.get(camera_id)
+            if last_t is not None:
+                dt = max(0.0, now_mono - last_t)
+                if prev:
+                    self._total_drawer_open_duration_ms[camera_id] = int(
+                        self._total_drawer_open_duration_ms.get(camera_id, 0)
+                    ) + int(dt * 1000)
+            self._last_frame_monotonic[camera_id] = now_mono
+
+            cur_c = int(self._total_drawer_open_count.get(camera_id, 0))
+            if drawer_open and not prev:
+                cur_c += 1
+                self._total_drawer_open_count[camera_id] = cur_c
+
+            self._drawer_was_open[camera_id] = drawer_open
+
+            cur_d = int(self._total_drawer_open_duration_ms.get(camera_id, 0))
+
+            edge_dirty = (drawer_open and not prev) or (prev and not drawer_open)
+            throttle_dirty = False
+            if (
+                not edge_dirty
+                and prev
+                and drawer_open
+                and self._drawer_duration_persist_interval > 0
+            ):
+                wall = time.time()
+                if wall - self._drawer_totals_last_wall_save >= self._drawer_duration_persist_interval:
+                    throttle_dirty = True
+
+            if edge_dirty or throttle_dirty:
+                self._save_drawer_open_totals_nolock()
+
+            return cur_c, cur_d
+
+    def _build_person_structural(
+        self,
+        case_id: str,
+        severity: str,
+        cz: ZoneCount,
+        kz: ZoneCount,
+        unauthorized: bool,
+        detections_ps: List[Dict[str, Any]],
+        drawer_ms: int,
+        wait_ms: int,
+        total_open_count: int,
+        total_open_duration_ms: int,
+    ) -> str:
+        alert = severity in (SEVERITY_ALERT, SEVERITY_CRITICAL)
+        crit = severity == SEVERITY_CRITICAL
+        body: Dict[str, Any] = {
+            "case_matched": case_id,
+            "case_level": severity,
+            "alert_triggered": alert,
+            "critical_triggered": crit,
+            "total_open_count": int(total_open_count),
+            "total_open_duration_ms": int(total_open_duration_ms),
+            "current_open_duration_ms": int(drawer_ms),
+            "zones": {
+                "cashier": {
+                    "persons_count": cz.persons,
+                    "drawers_count": cz.drawers,
+                    "cash_count": cz.cash,
+                    "unauthorized_present": unauthorized,
+                },
+                "customer": {
+                    "persons_count": kz.persons,
+                    "cash_count": kz.cash,
+                },
+            },
+            "detections": detections_ps,
+        }
+        if case_id in ("A1", "A3", "A4", "A6") and drawer_ms > 0:
+            body["drawer_open_duration_ms"] = drawer_ms
+        if case_id == "A5" and wait_ms > 0:
+            body["wait_duration_ms"] = wait_ms
+        return json.dumps(body, separators=(",", ":"))
 
     # ─────────────────────────────────────────────
     # Frame buffer helpers
@@ -878,12 +1446,13 @@ class CashierService:
         post_frames = [enc.tobytes()]
 
         self._active_events[camera_id] = {
-            "case_id"        : case_id,
-            "start_time"     : now,
-            "pre_frames"     : pre_frames,
-            "post_frames"    : post_frames,
-            "last_keyframe_t": now,
-            "meta"           : meta,
+            "case_id"         : case_id,
+            "start_time"      : now,
+            "pre_frames"      : pre_frames,
+            "post_frames"     : post_frames,
+            "last_keyframe_t" : now,
+            "meta"            : meta,
+            "_long_warned"    : False,
         }
         self._evidence.append_log({**meta, "status": "triggered"})
         log.debug("[CASHIER] Event started: %s cam=%s", case_id, camera_id)
@@ -899,7 +1468,16 @@ class CashierService:
         max_post = budget.get("max_post", 600)
         kf_int   = budget.get("keyframe_interval")
 
-        if len(ev["post_frames"]) >= max_post:
+        elapsed = now - float(ev["start_time"])
+        if max_post is None and elapsed >= _CRITICAL_UNBOUND_WARN_SEC and not ev.get("_long_warned"):
+            log.warning(
+                "[CASHIER] Case %s event > %.0fs — unbounded post buffer (memory risk on edge)",
+                case_id,
+                _CRITICAL_UNBOUND_WARN_SEC,
+            )
+            ev["_long_warned"] = True
+
+        if max_post is not None and len(ev["post_frames"]) >= max_post:
             return
 
         if kf_int is not None:
@@ -1053,8 +1631,22 @@ class CashierService:
         detections = self._enforce_single_open_drawer(detections)
         cz, kz = self._count_zones(detections, w, h)
 
-        # 3. Business logic evaluation
-        case_id, severity, alerts, transaction = self._evaluate(cz, kz, now)
+        unauthorized_in_cz, _auth_cz = self._resolve_cz_staff_state(cz, context)
+
+        drawer_open_now = cz.drawers >= 1
+        total_open_count, total_open_duration_ms = self._update_drawer_open_metrics(
+            camera_id, drawer_open_now, now
+        )
+
+        # 3. Business logic evaluation (14-rule table)
+        (
+            case_id,
+            severity,
+            alerts,
+            transaction,
+            drawer_ms,
+            wait_ms,
+        ) = self._evaluate(cz, kz, now, unauthorized_in_cz)
 
         if os.getenv("CASHIER_DEBUG_ZONES", "").lower() in ("1", "true", "yes", "on"):
             log.info(
@@ -1082,18 +1674,43 @@ class CashierService:
         #    Must run after _count_zones and _evaluate (needs transaction flag)
         persons = self._build_persons(cz, kz, transaction)
 
+        dets_ps = self._detections_for_person_structural(detections, w, h, context)
+        ps_str = self._build_person_structural(
+            case_id,
+            severity,
+            cz,
+            kz,
+            unauthorized_in_cz,
+            dets_ps,
+            drawer_ms,
+            wait_ms,
+            total_open_count,
+            total_open_duration_ms,
+        )
+
+        d_drawer = drawer_ms if case_id in ("A1", "A3", "A4", "A6") else None
+        d_wait = wait_ms if case_id == "A5" else None
+
         # 7. Build result
         result = CashierResult(
-            cashier_zone  = cz,
-            customer_zone = kz,
-            case_id       = case_id,
-            severity      = severity,
-            alerts        = alerts,
-            transaction   = transaction,
-            frame_saved   = False,
-            evidence_path = None,
-            persons       = persons,
-            frame_id      = frame_id,
+            cashier_zone           = cz,
+            customer_zone          = kz,
+            case_id                = case_id,
+            severity               = severity,
+            alerts                 = alerts,
+            transaction            = transaction,
+            frame_saved            = False,
+            evidence_path          = None,
+            persons                = persons,
+            frame_id               = frame_id,
+            person_structural      = ps_str,
+            unauthorized_present   = unauthorized_in_cz,
+            drawer_open_duration_ms= d_drawer,
+            wait_duration_ms       = d_wait,
+            task_meta                = dict(self._task_meta) if self._task_meta else None,
+            total_open_count         = total_open_count,
+            total_open_duration_ms   = total_open_duration_ms,
+            current_open_duration_ms = drawer_ms,
         )
 
         # 8. Annotate live frame
@@ -1148,3 +1765,39 @@ class CashierService:
         )
 
         return context
+
+
+# ─────────────────────────────────────────────
+# FrameBus task — CASHIER_DRAWER
+# ─────────────────────────────────────────────
+#
+# FrameBus fans the same YOLO track output to every task on a channel. For
+# drawer/cash classes in payload["detection"]["items"], set YOLO_MODEL (etc.)
+# to cashier weights — avoid mixing COCO-only tasks on the same channel unless
+# class indices align (0=person, 1=drawer, 2=cash).
+
+class CashierDrawerTask:
+    """Register via POST /api/tasks with algorithmType CASHIER_DRAWER."""
+
+    def __init__(self, task_config: dict):
+        self._task_config = task_config
+        self._svc = CashierService()
+
+    def __call__(self, payload: Dict[str, Any]) -> List[Any]:
+        if not self._task_config.get("enable", True):
+            return []
+
+        camera_id = str(payload.get("camera_id", ""))
+        detection = payload.get("detection") or {}
+        items = detection.get("items", [])
+
+        context: Dict[str, Any] = {
+            "camera_id": camera_id,
+            "data": {
+                "frame": payload["frame"],
+                "detection": {"items": list(items), "count": len(items)},
+                "use_case": {},
+            },
+        }
+        self._svc(context)
+        return []

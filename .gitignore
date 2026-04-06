@@ -63,7 +63,6 @@ yolov8n.onnx
 yolov8n.yaml
 
 # Tests (repo-wide patterns; allow tracked suite under tests/pipeline_test/)
-TESTING_AND_SSH_STREAMS.md
 test_*.py
 !tests/pipeline_test/test_*.py
 *_test.py

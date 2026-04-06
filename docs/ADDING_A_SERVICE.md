@@ -2,6 +2,8 @@
 
 This guide walks through every file you need to touch to add a brand new task (e.g. `CROWD_DENSITY`, `LOITERING`, `UNIFORM_CHECK`) to the ML server.
 
+**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — tests, cURL/SSH, and cashier **`data`** / cases. [SERVICE_TEST.md](./SERVICE_TEST.md) redirects there.
+
 ---
 
 ## Concepts to understand first
@@ -63,6 +65,8 @@ class Detection:
 ## Step-by-step: adding a new task
 
 ### Step 1 — Create `services/your_task.py`
+
+You can place the task class in a **dedicated module** or **next to a related service** in the same file (this repo keeps **`CashierDrawerTask`** and **`CashierService`** together in [`services/cashier.py`](../services/cashier.py)).
 
 Your task is a class with:
 - `__init__(self, task_config: dict)` — receives the full task config from the backend

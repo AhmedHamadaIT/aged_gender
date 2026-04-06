@@ -26,7 +26,7 @@ Server-Sent Events from the vision pipeline (all cameras multiplexed on one conn
 | A6 | ALERT | Drawer open beyond threshold |
 | A7 | ALERT | Cash in customer zone, no cashier |
 
-**Timers (A5 / A6):** `customer_wait_max_seconds` → **A5** (customer wait in customer zone); `drawer_open_max_seconds` → **A6** (drawer open too long). Full **thresholds → logic → output** table: [`curl_cashier.md`](curl_cashier.md) section **A5 / A6: thresholds → logic → output**. **Per-frame** open-drawer tally: `summary.cashier_zone.drawers`. **`drawer_count` API:** `≠` frames with drawer open; `=` count of logged **`triggered`** events — see *Drawer metrics* in [`curl_cashier.md`](curl_cashier.md).
+**Timers (A5 / A6):** `customer_wait_max_seconds` → **A5** (customer wait in customer zone); `drawer_open_max_seconds` → **A6** (drawer open too long). Full **thresholds → logic → output** table: [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) Part III, section **A5 / A6: thresholds → logic → output**. **Per-frame** open-drawer tally: `summary.cashier_zone.drawers`. **`drawer_count` API:** `≠` frames with drawer open; `=` count of logged **`triggered`** events — see *Drawer metrics* there (Part III).
 
 ---
 
@@ -136,7 +136,7 @@ curl -N "http://<jetson-ip>:9000/cashier/stream/cashier_cam_01"
 curl -N "http://<jetson-ip>:9000/cashier/stream/cashier_cam_01/only"
 ```
 
-More HTTP routes (`/cashier/events`, `/cashier/evidence`, zone setup) are in [`curl_cashier.md`](curl_cashier.md).
+More HTTP routes (`/cashier/events`, `/cashier/evidence`, zone setup) are in [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) Part III.
 
 ---
 
@@ -1270,4 +1270,4 @@ ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/logger/app.log"
 
 ## Related HTTP API
 
-Zone geometry, thresholds, and extra cashier REST routes (`/cashier/status`, `/cashier/events`, per-camera SSE) are described in OpenAPI at `/docs` and in [`curl_cashier.md`](curl_cashier.md) (including **Cashier ROI shapes, thresholds, and end of pipeline**). **JPEG vs GIF** and media `curl` examples: [Event-level media (GIF vs JPEG)](#event-level-media-gif-vs-jpeg) above.
+Zone geometry, thresholds, and extra cashier REST routes (`/cashier/status`, `/cashier/events`, per-camera SSE) are described in OpenAPI at `/docs` and in [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) Part III (including **Cashier ROI shapes, thresholds, and end of pipeline**). **JPEG vs GIF** and media `curl` examples: [Event-level media (GIF vs JPEG)](#event-level-media-gif-vs-jpeg) above.
