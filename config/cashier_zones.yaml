@@ -1,0 +1,46 @@
+buffer:
+  jpeg_quality: 75
+  size: 100
+debounce:
+  A3: 1
+  A4: 1
+  default: 3
+evidence:
+  log_rotate_mb: 100
+  save_gif: true
+  save_thumbnail: true
+gif:
+  fps: 10
+  quality: 85
+meta:
+  version: 1.2.0
+thresholds:
+  config_reload_interval: 60
+  customer_wait_max_seconds: 30
+  drawer_open_max_seconds: 30
+  proximity_iou: 0.05
+zones:
+  ROI_CASHIER:
+    active: true
+    points:
+    - - 0.32969
+      - 0.54861
+    - - 0.65000
+      - 0.52778
+    - - 0.69297
+      - 0.99444
+    - - 0.33516
+      - 0.98750
+    shape: polygon
+  ROI_CUSTOMER:
+    active: true
+    points:
+    - - 0.32031
+      - 0.28472
+    - - 0.64297
+      - 0.25556
+    - - 0.63516
+      - 0.00000
+    - - 0.31172
+      - 0.00000
+    shape: polygon

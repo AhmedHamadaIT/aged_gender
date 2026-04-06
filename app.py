@@ -11,6 +11,10 @@ Workflow:
     5. GET  /detection/status         → monitor camera status
     6. POST /detection/stop           → stop processing
 
+Cashier monitor (algorithmType CASHIER_DRAWER on /api/tasks): HTTP routes under
+``/cashier/*`` (status, events, zones, SSE streams). Real-time cashier UI uses
+those endpoints; crossing events still use GET /detection/stream.
+
 SSE stream events (one per crossing, per task):
 {
     "eventId"     : "...",
@@ -36,11 +40,13 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
 from apis.cameras   import camera_registry, CameraSetupRequest
+from apis.cashier   import router as cashier_router
 from apis.detection import detection
 from apis.tasks     import task_registry, TaskConfig
 from schemas        import DetectionRequest, DetectionStatus
 
 app = FastAPI(title="Vision Pipeline API", version="2.0.0")
+app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
 
 
 # ─────────────────────────────────────────────

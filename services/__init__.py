@@ -3,7 +3,7 @@ services/__init__.py
 --------------------
 Service and task registries.
 
-REGISTRY     — simple per-frame services used internally by FrameBus and tests.
+REGISTRY     — simple per-frame services used internally by CameraPipeline and tests.
 TASK_REGISTRY — full task classes, each instantiated with a task config dict.
                 Used by task_worker.py to spawn the right algorithm per task.
 
@@ -20,17 +20,21 @@ from .ppe        import PPEService
 from .mood       import MoodService
 from .cross_line            import CrossLineTask
 from .mask_hairnet_chef_hat import MaskHairnetChefHatTask
+from .cashier    import CashierService
+from .cashier_task import CashierDrawerTask
 
-# Simple per-frame services (used by FrameBus internals and legacy code)
+# Simple per-frame services (used by CameraPipeline internals and legacy code)
 REGISTRY = {
     "detector"  : DetectorService,
     "age_gender": AgeGenderService,
     "ppe"       : PPEService,
     "mood"      : MoodService,
+    "cashier"   : CashierService,
 }
 
 # Full task classes — keyed by algorithmType string from task config
 TASK_REGISTRY = {
-    "CROSS_LINE"          : CrossLineTask,
+    "CROSS_LINE"           : CrossLineTask,
     "MASK_HAIRNET_CHEF_HAT": MaskHairnetChefHatTask,
+    "CASHIER_DRAWER"       : CashierDrawerTask,
 }

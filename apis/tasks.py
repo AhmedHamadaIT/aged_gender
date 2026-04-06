@@ -52,7 +52,7 @@ class TaskConfig(BaseModel):
 # Registry
 # ─────────────────────────────────────────────
 class TaskRegistry:
-    SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT"}
+    SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_DRAWER"}
 
     def __init__(self):
         self._tasks: dict = {}   # {task_id (int): task_config (dict)}
