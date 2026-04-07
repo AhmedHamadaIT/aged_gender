@@ -17,6 +17,7 @@ Base URL for all examples: `http://localhost:9000`
 7. [Task Management (CRUD)](#7-task-management-crud)
 8. [Common Errors](#8-common-errors)
 9. [Full Walkthrough Example](#9-full-walkthrough-example)
+10. [Cashier monitor API (`/cashier/*`)](#10-cashier-monitor-api-cashier)
 
 ---
 
@@ -651,8 +652,138 @@ curl -N http://localhost:9000/detection/stream
 # 5. Check status in another terminal
 curl http://localhost:9000/detection/status
 
-# 6. Stop when done
+# 6. Cashier monitor (optional — uses task 30 on channel 1)
+curl -s http://localhost:9000/cashier/zones
+curl -s http://localhost:9000/cashier/status
+# curl -N http://localhost:9000/cashier/stream/1
+
+# 7. Stop when done
 curl -X POST http://localhost:9000/detection/stop
+```
+
+---
+
+## 10. Cashier monitor API (`/cashier/*`)
+
+These routes serve the **cashier** monitor (live state, zones on disk, evidence, per-camera SSE). They are separate from `GET /detection/stream`, which merges **task** events for all algorithms.
+
+**Prerequisites:** Register a task with `algorithmType: "CASHIER_BOX_OPEN"` and start detection so `GET /cashier/status` and event logs fill from the runtime. **Zone read/write** works whenever the server can access the config file.
+
+**Config file:** `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`). `POST` bodies use **normalized** coordinates in `[0, 1]` as `{"x", "y"}` objects; the file stores `points` as nested lists `[[x, y], …]`. Omitted keys in `POST /cashier/zones` are left unchanged (partial update).
+
+### Get current zone configuration
+
+```bash
+curl -s http://localhost:9000/cashier/zones
+```
+
+Returns the merged YAML/JSON document: `zones` (`ROI_CASHIER`, `ROI_CUSTOMER`), `thresholds`, and optional keys such as `buffer`, `debounce`, `evidence`, `detail_config`.
+
+### Update zones (partial)
+
+**Rectangle split (cashier left, customer right):**
+
+```bash
+curl -X POST http://localhost:9000/cashier/zones \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ROI_CASHIER": {
+      "shape": "rectangle",
+      "points": [{"x": 0.0, "y": 0.0}, {"x": 0.45, "y": 1.0}],
+      "active": true
+    },
+    "ROI_CUSTOMER": {
+      "shape": "rectangle",
+      "points": [{"x": 0.45, "y": 0.0}, {"x": 1.0, "y": 1.0}],
+      "active": true
+    },
+    "thresholds": {
+      "drawer_open_max_seconds": 20,
+      "customer_wait_max_seconds": 30
+    }
+  }'
+```
+
+**Polygon zones** — use `"shape": "polygon"` and at least three `points`:
+
+```bash
+curl -X POST http://localhost:9000/cashier/zones \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ROI_CASHIER": {
+      "shape": "polygon",
+      "points": [
+        {"x": 0.33, "y": 0.55},
+        {"x": 0.65, "y": 0.53},
+        {"x": 0.69, "y": 0.99},
+        {"x": 0.34, "y": 0.99}
+      ],
+      "active": true
+    }
+  }'
+```
+
+**Optional fields** on the same `POST`: `detail_config` (e.g. `drawerOpenLimit`, `serviceWaitLimit`, `enableStaffList`, `staffIds`), `task` (integration metadata), `detection_threshold` (0–100, stored under `thresholds.detection_threshold`).
+
+**Typical success response:**
+
+```json
+{
+  "status": "updated",
+  "config": { "zones": { "ROI_CASHIER": { "shape": "rectangle", "points": [[0.0, 0.0], [0.45, 1.0]], "active": true } }, "thresholds": {} }
+}
+```
+
+> Cashier workers reload config on their periodic reload (default `config_reload_interval` in `thresholds`, often 60s).
+
+### Reset zones to built-in defaults
+
+```bash
+curl -X POST http://localhost:9000/cashier/zones/reset
+```
+
+### Live status (all cameras)
+
+```bash
+curl -s http://localhost:9000/cashier/status
+```
+
+### Event log (paginated)
+
+```bash
+curl -s "http://localhost:9000/cashier/events?limit=50&offset=0"
+curl -s "http://localhost:9000/cashier/events?camera_id=1&severity=CRITICAL&case_id=A3"
+```
+
+### Clear in-memory event log
+
+```bash
+curl -X DELETE http://localhost:9000/cashier/events
+```
+
+### Evidence list and download
+
+```bash
+curl -s "http://localhost:9000/cashier/evidence?limit=20"
+curl -s -o evidence.jpg "http://localhost:9000/cashier/evidence/ALERT/A3/cam_1_2026-04-05_12-00-00.jpg"
+```
+
+Use the `path` returned by `GET /cashier/evidence` as the suffix after `/cashier/evidence/`.
+
+### Per-camera SSE (cashier stream)
+
+```bash
+curl -N http://localhost:9000/cashier/stream/1
+curl -N http://localhost:9000/cashier/stream/1/only
+```
+
+`{camera_id}` is the string camera id (same as your registered camera `id`). The `/only` route suppresses routine `frame` events and keeps alerts / `gif_ready`.
+
+### Latest media (optional)
+
+```bash
+curl -s -o latest.jpg "http://localhost:9000/cashier/media/1/latest/jpg"
+curl -s -o latest.gif "http://localhost:9000/cashier/media/1/latest/gif"
 ```
 
 ---

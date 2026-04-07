@@ -26,6 +26,7 @@ task:
   algorithmType: CASHIER_BOX_OPEN
   channelId: 2
   channelName: CAM-02-MAIN
+  deviceSN: HQDZW1SBCABAH0205
   taskId: 101
   taskName: cashier_drawer_monitor
 thresholds:
