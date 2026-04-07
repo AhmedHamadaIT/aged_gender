@@ -1,29 +1,29 @@
 """
-apis/reid.py
+apis/person_search.py
 -----------------
-ReID resource — manages image-based identity search via Qdrant.
+person_search resource — manages image-based identity search via Qdrant.
 
 Routes registered in app.py:
-    POST /reid/search   → upload an image to find top similar identities
+    POST /person_search/search   → upload an image to find top similar identities
 """
 
 from fastapi import HTTPException, UploadFile, File, Form
 from typing import Dict, Any
 
 from apis.base import BaseResource
-from services.reid import ReIDService
+from services.person_search import ReIDService
 from logger.logger_config import Logger
 
 log = Logger.get_logger(__name__)
 
 # ─────────────────────────────────────────────
-# ReID resource
+# person_search resource
 # ─────────────────────────────────────────────
-class ReidResource(BaseResource):
+class PersonSearchResource(BaseResource):
     def __init__(self):
         super().__init__()
         # Initialize service once so the model stays in memory
-        log.info("[REID API] Initializing ReID Service...")
+        log.info("[PERSON_SEARCH API] Initializing ReID Service...")
         self.reid_service = ReIDService()
 
     async def search(self, file: UploadFile = File(...), top_k: int = Form(10)) -> Dict[str, Any]:
@@ -50,4 +50,4 @@ class ReidResource(BaseResource):
             raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 # ── Singleton ─────────────────────────────────
-reid_api = ReidResource()
+person_search_api = PersonSearchResource()

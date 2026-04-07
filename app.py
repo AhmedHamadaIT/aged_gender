@@ -39,7 +39,7 @@ from apis.cameras   import camera_registry, CameraSetupRequest
 from apis.detection import detection
 from apis.tasks     import task_registry, TaskConfig
 from schemas        import DetectionRequest, DetectionStatus
-from apis.reid import reid_api
+from apis.person_search import person_search_api
 
 app = FastAPI(title="Vision Pipeline API", version="2.0.0")
 
@@ -146,6 +146,6 @@ async def detection_stream():
 # ─────────────────────────────────────────────
 # ReID routes
 # ─────────────────────────────────────────────
-@app.post("/reid/search")
-async def reid_search(file: UploadFile = File(...), top_k: int = Form(10)):
-    return await reid_api.search(file, top_k)
+@app.post("/person_search/search")
+async def person_search(file: UploadFile = File(...), top_k: int = Form(10)):
+    return await person_search_api.search(file, top_k)
