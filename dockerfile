@@ -1,11 +1,12 @@
 # ============================================
-# YOLO Object Detection — Dockerfile
+# Vision Pipeline API — Dockerfile
 # ============================================
 # Base: dustynv PyTorch for Jetson R36.4 / JetPack 6
 # CUDA 12.8, Ubuntu 24.04, Python 3.12, ARM64
 #
 # This image ships with a fully working CUDA torch.
-# We only add ultralytics and other non-torch deps on top.
+# We add ultralytics, InsightFace, FAISS, and other
+# non-torch deps on top.
 # ============================================
 
 FROM dustynv/l4t-pytorch:r36.4.0
@@ -50,12 +51,14 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         seaborn \
         matplotlib \
         py-cpuinfo \
-        fastapi \   
-        onnxruntime \     
+        fastapi \
+        onnxruntime \
+        "insightface>=0.7.3" \
+        "faiss-cpu>=1.7.4" \
         "uvicorn[standard]"
 
 # ── Create directories ───────────────────────
-RUN mkdir -p /app/models /app/videos /app/outputs
+RUN mkdir -p /app/models /app/videos /app/outputs /app/data/face
 
 # ── Default command ──────────────────────────
 CMD ["sleep", "infinity"]

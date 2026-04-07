@@ -1,6 +1,6 @@
 # Vision Pipeline API
 
-The Vision Pipeline API is a FastAPI-based server for multi-camera computer vision. It registers RTSP sources, composes pipelines from **detector**, **age/gender**, **mood**, **PPE**, and **cashier** services, and exposes results over **Server-Sent Events** (`/detection/stream`) plus dedicated **cashier** REST and SSE routes under `/cashier`.
+The Vision Pipeline API is a FastAPI-based server for multi-camera computer vision. It registers RTSP sources, composes pipelines from **detector**, **age/gender**, **mood**, **PPE**, **cashier**, and **face** recognition services, and exposes results over **Server-Sent Events** (`/detection/stream`) plus dedicated **cashier** REST/SSE routes under `/cashier` and **face recognition** REST routes under `/face`.
 
 ---
 
@@ -29,11 +29,12 @@ The Vision Pipeline API is a FastAPI-based server for multi-camera computer visi
 ## Features
 
 - **Multi-camera RTSP** — Register streams with `POST /cameras`; list with `GET /cameras`; remove with `DELETE /cameras/{cam_id}`.
-- **Composable pipeline** — `POST /detection/setup` chooses services from: `detector`, `age_gender`, `mood`, `ppe`, `cashier` (see `services/__init__.py`).
+- **Composable pipeline** — `POST /detection/setup` chooses services from: `detector`, `age_gender`, `mood`, `ppe`, `cashier`, `face` (see `services/__init__.py`).
 - **Runtime control** — `POST /detection/start` and `POST /detection/stop` (optional `camera_id` query); `GET /detection/status` for FPS, frame counts, and errors.
 - **Global SSE** — `GET /detection/stream` streams one JSON payload per processed frame from all cameras; each event may include a base64 JPEG in `frame`.
 - **Cashier monitor** — Zone geometry and timers via `GET` / `POST /cashier/zones` and `POST /cashier/zones/reset`; scenarios **N1–N6** (normal) and **A1–A7** (alert/critical). `GET /cashier/status` for latest per-camera summary; `GET` / `DELETE /cashier/events` for the in-memory alert/transaction log; `GET /cashier/evidence` and `GET /cashier/evidence/{path}` for saved JPEGs. Per-camera SSE: `GET /cashier/stream/{camera_id}` and `GET /cashier/stream/{camera_id}/only` (alerts-focused). Media helpers under `/cashier/media/...` (latest JPG/GIF, per-event assets, `drawer_count`). Case evaluation order in code: critical **A3/A4** → unattended drawer **A1** → timed **A5** (customer wait) / **A6** (drawer duration) → **A7** → normal **N3/N4/N6** → **N5/N2** → fallback **A2** ([`services/cashier.py`](services/cashier.py) `_evaluate`).
 - **Configuration on disk** — Cashier YAML/JSON path from env `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); evidence directory from `CASHIER_EVIDENCE_DIR` (default `./evidence/cashier`).
+- **Face recognition** — InsightFace-based face detection and ArcFace embedding with FAISS vector search. Two operation modes: **attendance** (match against registered employee libraries, track check-ins) and **surveillance** (detect/store unknown persons, search by face). Task configuration with quality/pose filtering, optional age/gender/emotion extraction, and JSONL event logging with evidence images. Full REST API under `/face` for library CRUD, person registration (multipart image upload), single-image recognition, attendance queries, and stranger management. Storage at `FACE_STORAGE_DIR` (default `./data/face`).
 
 ---
 
@@ -218,12 +219,143 @@ curl -s "$BASE/cashier/zones" | jq '.thresholds'
 curl -s "$BASE/cashier/zones" | jq '.zones'
 ```
 
+### Face Recognition — tasks
+
+```bash
+# Create a face recognition task (attendance mode)
+curl -s -X POST "$BASE/face/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskId": 1,
+    "taskName": "attendance",
+    "threshold": 70,
+    "libIds": "-1",
+    "enableStranger": true,
+    "detailConfig": {
+      "facePixelSize": 60,
+      "yawThreshold": 35,
+      "pitchThreshold": 25,
+      "failCount": 2
+    },
+    "validWeekday": ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY"],
+    "validStartTime": 0,
+    "validEndTime": 86399000
+  }'
+
+# List all tasks
+curl -s "$BASE/face/tasks"
+
+# Delete a task
+curl -s -X DELETE "$BASE/face/tasks/1"
+```
+
+### Face Recognition — libraries
+
+```bash
+# Create a face library
+curl -s -X POST "$BASE/face/lib" \
+  -H "Content-Type: application/json" \
+  -d '{"libId": 1, "name": "Office Employees"}'
+
+# List all libraries
+curl -s "$BASE/face/lib"
+
+# Get library details (with person list)
+curl -s "$BASE/face/lib/1"
+
+# Delete a library
+curl -s -X DELETE "$BASE/face/lib/1"
+```
+
+### Face Recognition — persons (multipart upload)
+
+```bash
+# Add a person with one or more face images
+curl -s -X POST "$BASE/face/lib/1/persons" \
+  -F "person_id=101" \
+  -F "name=John Doe" \
+  -F "images=@/path/to/john_front.jpg" \
+  -F "images=@/path/to/john_side.jpg"
+
+# List all persons in a library
+curl -s "$BASE/face/lib/1/persons"
+
+# Update a person (name and/or images)
+curl -s -X PUT "$BASE/face/lib/1/persons/101" \
+  -F "name=John D. Smith" \
+  -F "images=@/path/to/john_new.jpg"
+
+# Delete a person
+curl -s -X DELETE "$BASE/face/lib/1/persons/101"
+```
+
+### Face Recognition — single-image recognition
+
+```bash
+# Recognize all faces in an uploaded image
+curl -s -X POST "$BASE/face/recognize" \
+  -F "image=@/path/to/photo.jpg" \
+  -F "lib_ids=-1" \
+  -F "threshold=70" \
+  -F "top_k=5"
+```
+
+### Face Recognition — attendance
+
+```bash
+# Query attendance records
+curl -s -X POST "$BASE/face/attendance/query" \
+  -H "Content-Type: application/json" \
+  -d '{"personId": 101, "dateFrom": "2026-04-01", "dateTo": "2026-04-05", "limit": 50}'
+```
+
+### Face Recognition — strangers (surveillance)
+
+```bash
+# List stored strangers
+curl -s "$BASE/face/strangers?limit=50&offset=0"
+
+# Search strangers by face image
+curl -s -X POST "$BASE/face/strangers/search" \
+  -F "image=@/path/to/unknown_face.jpg" \
+  -F "top_k=5" \
+  -F "threshold=30"
+
+# Clear all stranger records
+curl -s -X DELETE "$BASE/face/strangers"
+```
+
+### Face Recognition — events & evidence
+
+```bash
+# Query face events (filtered)
+curl -s "$BASE/face/events?task_id=1&is_stranger=false&limit=50"
+
+# Download evidence image
+curl -s -o capture.jpg "$BASE/face/evidence/captures/<eventId>.jpg"
+curl -s -o face.jpg    "$BASE/face/evidence/faces/<eventId>.jpg"
+curl -s -o scene.jpg   "$BASE/face/evidence/scenes/<eventId>.jpg"
+```
+
+### Face Recognition — pipeline setup (with face service)
+
+Include `face` in your pipeline to enable real-time recognition on camera streams:
+
+```bash
+curl -s -X POST "$BASE/detection/setup" \
+  -H "Content-Type: application/json" \
+  -d '{"pipeline":["detector","face"]}'
+```
+
+The `face` service reads person detections from the upstream `detector` and runs InsightFace face detection within each person bounding box.
+
 ### After `POST /detection/start` (runtime checks)
 
 ```bash
 curl -s "$BASE/detection/status"
 curl -s "$BASE/cashier/status"
 curl -s "$BASE/cashier/events?limit=20"
+curl -s "$BASE/face/events?limit=20"
 ```
 
 ### jq examples (detection SSE)
@@ -494,7 +626,221 @@ data: {
 
 ---
 
+### **Face Recognition Routes** (`/face/...`)
+
+The face recognition service provides attendance tracking and surveillance via InsightFace (detection + ArcFace embeddings) and FAISS (vector search). The pipeline service reads person bounding boxes from the upstream detector and finds face bounding boxes within each person crop.
+
+#### `POST /face/tasks`
+Create or update a face recognition task configuration.
+
+**Sample Request**
+```json
+{
+  "taskId": 9,
+  "taskName": "attendance",
+  "algorithmType": "FACE",
+  "channelId": 9,
+  "enable": true,
+  "threshold": 70,
+  "libIds": "-1",
+  "enableStranger": true,
+  "detailConfig": {
+    "facePixelSize": 60,
+    "model": "Fast",
+    "yawThreshold": 35,
+    "pitchThreshold": 25,
+    "failCount": 2,
+    "enableAgeGenderDetect": false,
+    "enableEmotionDetect": false
+  },
+  "validWeekday": ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY"],
+  "validStartTime": 0,
+  "validEndTime": 86399000
+}
+```
+
+**Sample Response**
+```json
+{
+  "status": "configured",
+  "task": { "taskId": 9, "taskName": "attendance", "threshold": 70, "..." : "..." },
+  "error": null
+}
+```
+
+#### `POST /face/lib`
+Create a new face library.
+
+**Sample Request / Response**
+```json
+// Request
+{"libId": 1, "name": "Office Employees"}
+
+// Response
+{"lib_id": 1, "name": "Office Employees", "person_count": 0, "error": null}
+```
+
+#### `POST /face/lib/{libId}/persons`
+Add a person to a library with face images (multipart form-data).
+
+**Sample Request** (multipart)
+```
+POST /face/lib/1/persons
+Content-Type: multipart/form-data
+
+person_id: 101
+name: John Doe
+images: <john_front.jpg>
+images: <john_side.jpg>
+```
+
+**Sample Response**
+```json
+{
+  "person_id": 101,
+  "name": "John Doe",
+  "lib_id": 1,
+  "embeddings": 2,
+  "face_images": ["person_101_0.jpg", "person_101_1.jpg"],
+  "error": null
+}
+```
+
+#### `POST /face/recognize`
+Upload an image to detect and recognise all faces against registered libraries.
+
+**Sample Response**
+```json
+{
+  "face_count": 1,
+  "faces": [
+    {
+      "face": {
+        "faceId": 12,
+        "bbox": [120, 80, 220, 200],
+        "quality": 72.5,
+        "yaw": 3.2,
+        "pitch": -1.8,
+        "score": 95.0,
+        "center": [170, 140],
+        "width": 100,
+        "height": 120
+      },
+      "matches": [
+        {
+          "person_id": 101,
+          "person_name": "John Doe",
+          "lib_id": 1,
+          "score": 89.3,
+          "face_image": "person_101_0.jpg"
+        }
+      ]
+    }
+  ],
+  "error": null
+}
+```
+
+#### Face Recognition — Event Output Format
+
+When processed in the pipeline, the face service produces structured events matching the backend spec:
+
+**Known person recognised:**
+```json
+{
+  "eventId": "bd4d4169c9198605a1f2...",
+  "eventType": "FACE",
+  "timestamp": 1774311678581,
+  "timestampUTC": "2026-03-24T00:21:18.581Z",
+  "taskId": 9,
+  "taskName": "attendance",
+  "deviceSN": "EDGE_DEVICE_001",
+  "channelId": 1,
+  "channelName": "1",
+  "person": {
+    "id": 8,
+    "name": "John Doe",
+    "libId": 1,
+    "isStranger": false
+  },
+  "face": {
+    "faceId": 844,
+    "faceImage": "bd4d4169c9198605a1f2.jpg",
+    "quality": 46.0,
+    "yaw": 0.169,
+    "pitch": 5.676,
+    "score": 76.0,
+    "failCount": 0
+  }
+}
+```
+
+**Stranger detected:**
+```json
+{
+  "eventId": "...",
+  "eventType": "FACE",
+  "person": { "id": -1, "name": "stranger_5", "libId": -1, "isStranger": true },
+  "face": { "faceId": 845, "quality": 52.0, "yaw": 1.2, "pitch": 3.4, "score": 0.0, "failCount": 2 }
+}
+```
+
+**Rejected face (quality/pose):**
+```json
+{
+  "status": "rejected",
+  "reason": "face_quality_too_low",
+  "face": {
+    "quality": 25.0,
+    "yaw": 42.0,
+    "pitch": 30.0,
+    "requiredQuality": 60,
+    "requiredYaw": 35,
+    "requiredPitch": 25
+  }
+}
+```
+
+#### Face Recognition — Storage Layout
+
+```
+data/face/
+├── libraries/
+│   └── lib_1/
+│       ├── index.faiss          # FAISS similarity index
+│       ├── metadata.json        # Library + person metadata
+│       └── faces/               # Registered face images
+│           ├── person_101_0.jpg
+│           └── person_101_1.jpg
+├── surveillance/
+│   ├── strangers.faiss          # Stranger embedding index
+│   ├── strangers_meta.json      # Stranger metadata
+│   └── faces/                   # Stranger face crops
+│       └── stranger_1.jpg
+├── events/
+│   ├── logs/events.jsonl        # Structured event log
+│   ├── captures/                # Full frame with bbox overlay
+│   ├── faces/                   # Cropped face images
+│   └── scenes/                  # Wider scene context
+└── tasks.json                   # Active task configurations
+```
+
+#### Complete Face Recognition Lifecycle
+
+1. **`POST /face/lib`** — Create a face library (e.g. "Office Employees")
+2. **`POST /face/lib/1/persons`** — Register persons with face images (multipart upload)
+3. **`POST /face/tasks`** — Configure recognition task (threshold, schedule, stranger alerts)
+4. **`POST /cameras`** — Register RTSP camera
+5. **`POST /detection/setup`** — `{"pipeline": ["detector", "face"]}`
+6. **`POST /detection/start`** — Start pipeline
+7. **`GET /face/events`** — Query recognition events
+8. **`POST /face/attendance/query`** — Query attendance records
+9. **`GET /face/strangers`** / **`POST /face/strangers/search`** — Surveillance queries
+
+---
+
 ## ✅ Testing & Real Result Examples
+
 
 ### Test Results Overview
 
@@ -785,6 +1131,22 @@ Recommended order:
 6. **`GET /detection/stream`** or **`GET /cashier/status`** — consume results.  
 
 Copy-paste **`curl`** for each step: [Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes). SSH tail examples are in that section.
+
+## Complete Face Recognition Pipeline Lifecycle
+
+Recommended order for face recognition (attendance or surveillance):
+
+1. **`POST /face/lib`** — create one or more face libraries.  
+2. **`POST /face/lib/{libId}/persons`** — register persons with face images (multipart upload).  
+3. **`POST /face/tasks`** — configure recognition task (threshold, schedule, stranger detection).  
+4. **`POST /cameras`** — register RTSP camera sources.  
+5. **`POST /detection/setup`** — `{"pipeline": ["detector", "face"]}` (face requires upstream detector).  
+6. **`POST /detection/start`** — start pipeline workers.  
+7. **`GET /face/events`** — query recognition and stranger events.  
+8. **`POST /face/attendance/query`** — query attendance check-in records.  
+9. **`GET /face/strangers`** or **`POST /face/strangers/search`** — surveillance mode queries.  
+
+For **single-image recognition** (no pipeline needed): **`POST /face/recognize`** with an image upload.
 
 ---
 
@@ -1600,6 +1962,7 @@ Models are excluded from git tracking to reduce repository size:
 - `best_mood.onnx` (~15 MB)
 - `best_ppe.onnx` (~38 MB)
 - `yolov8n.pt` (~25 MB)
+- InsightFace `buffalo_l` (~300 MB, auto-downloaded on first run)
 
 Download separately or configure via environment variables.
 
@@ -1616,9 +1979,24 @@ export MOOD_MODEL="./models/best_mood.onnx"
 export PPE_MODEL="./models/best_PPE.onnx"
 ```
 
+### Face Recognition Configuration
+```bash
+# Environment variables
+export FACE_MODEL=buffalo_l              # InsightFace model pack (buffalo_l | buffalo_sc)
+export FACE_DET_SIZE=640                 # Detection input size
+export FACE_STORAGE_DIR=./data/face      # Libraries + stranger store location
+export FACE_EVIDENCE_DIR=./data/face/events  # JSONL logs + evidence images
+export FACE_DEFAULT_THRESHOLD=70         # Default recognition threshold (0-100)
+export FACE_DEVICE=0                     # GPU device ID
+export DEVICE_SN=EDGE_DEVICE_001         # Edge device serial number (for events)
+```
+
 ### Detection Thresholds
 - **YOLO Confidence**: 0.35 (configurable)
-- **Face Detection Minimum Size**: 10×10 pixels
+- **Face Detection Minimum Size**: 60×60 pixels (configurable per task via `facePixelSize`)
+- **Face Yaw Threshold**: 35° (configurable per task)
+- **Face Pitch Threshold**: 25° (configurable per task)
+- **Recognition Threshold**: 70% (configurable per task)
 - **Mood Classification**: All 3 classes enabled
 
 ---
@@ -1637,9 +2015,9 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/detection/status` | GET | Operational status per camera |
 | `/detection/stream` | GET | SSE: all cameras, one JSON per frame |
 | `/cashier/status` | GET | Latest cashier summary per camera |
-| `/cashier/events` | GET | Paginated alert/transaction log (`severity`, `case_id`, `camera_id`, `limit`, `offset`) |
+| `/cashier/events` | GET | Paginated alert/transaction log |
 | `/cashier/events` | DELETE | Clear in-memory event log |
-| `/cashier/evidence` | GET | List evidence JPEGs (`severity`, `case_id`, `limit`) |
+| `/cashier/evidence` | GET | List evidence JPEGs |
 | `/cashier/evidence/{path}` | GET | Download one evidence JPEG |
 | `/cashier/zones` | GET | Read `CASHIER_CONFIG` |
 | `/cashier/zones` | POST | Update zones and/or thresholds |
@@ -1651,6 +2029,24 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/cashier/media/{camera_id}/event/{event_id}/jpg` | GET | JPG for event |
 | `/cashier/media/{camera_id}/event/{event_id}/gif` | GET | GIF for event |
 | `/cashier/media/{camera_id}/drawer_count` | GET | Drawer-open count from JSONL log |
+| `/face/tasks` | POST | Create/update FACE task config |
+| `/face/tasks` | GET | List all FACE tasks |
+| `/face/tasks/{taskId}` | DELETE | Delete a FACE task |
+| `/face/lib` | POST | Create face library |
+| `/face/lib` | GET | List all face libraries |
+| `/face/lib/{libId}` | GET | Library details + persons |
+| `/face/lib/{libId}` | DELETE | Delete face library |
+| `/face/lib/{libId}/persons` | POST | Add person (multipart: name + images) |
+| `/face/lib/{libId}/persons` | GET | List persons in library |
+| `/face/lib/{libId}/persons/{personId}` | PUT | Update person (name / images) |
+| `/face/lib/{libId}/persons/{personId}` | DELETE | Delete person |
+| `/face/recognize` | POST | Single-image face recognition |
+| `/face/attendance/query` | POST | Query attendance records |
+| `/face/strangers` | GET | List stored stranger faces |
+| `/face/strangers/search` | POST | Search strangers by face image |
+| `/face/strangers` | DELETE | Clear all stranger records |
+| `/face/events` | GET | Query JSONL event log (filtered) |
+| `/face/evidence/{path}` | GET | Download evidence image |
 | `/docs` | GET | Swagger UI |
 | `/redoc` | GET | ReDoc |
 
