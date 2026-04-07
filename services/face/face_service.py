@@ -208,7 +208,7 @@ class FaceService:
             return None  # too small, silently skip (not a rejection event)
 
         # ── Step 2: Quality check ──
-        if face_det.quality < cfg.facePixelSize:
+        if face_det.quality < cfg.qualityThreshold:
             event = self._events.log_rejection_event(
                 task_id       = task.taskId,
                 task_name     = task.taskName,

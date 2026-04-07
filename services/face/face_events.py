@@ -202,7 +202,7 @@ class FaceEventLogger:
         if detail_config:
             required_yaw   = getattr(detail_config, "yawThreshold", 35)
             required_pitch = getattr(detail_config, "pitchThreshold", 25)
-            required_quality = getattr(detail_config, "facePixelSize", 60)
+            required_quality = getattr(detail_config, "qualityThreshold", 60)
 
         event = {
             "eventId"      : event_id,
