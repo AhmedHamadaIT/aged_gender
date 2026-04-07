@@ -35,6 +35,8 @@ pytest.ini
 curl_smoke.sh 
 # Project Specific
 outputs/
+# Local export trees (e.g. batch image+json dumps; not under outputs/)
+output*/
 models/
 videos/
 logger/app.log
@@ -62,10 +64,9 @@ yolov8n.pt
 yolov8n.onnx
 yolov8n.yaml
 
-# Tests (repo-wide patterns; allow tracked suite under tests/pipeline_test/)
-test_*.py
-!tests/pipeline_test/test_*.py
-*_test.py
+# Ad-hoc test scripts at repo root only (tracked pytest lives under tests/)
+/test_*.py
+/*_test.py
 test_results/
 test_results.log
 README_CASHIER_TESTING.md

@@ -2,7 +2,7 @@
 
 Single reference that merges:
 
-- **Service testing** — cURL, SSH, pytest for **v2** (`TASK_REGISTRY`, `/cashier/*`) — previously split across [`SERVICE_TEST.md`](./SERVICE_TEST.md) (stub) and [`tests/pipeline_test/README.md`](../tests/pipeline_test/README.md) (stub).
+- **Service testing** — cURL, SSH, and optional **pytest** under `tests/` for **v2** (`TASK_REGISTRY`, `/cashier/*`). Older notes lived in [`SERVICE_TEST.md`](./SERVICE_TEST.md) (pointer only).
 - **CASHIER_BOX_OPEN / cashier integration** — where frame **`data`** lives, schema, GIF/evidence (summary in Part II below); **Eyego cURL, Part III (Vision Pipeline cashier cURL / thresholds / stream), mock `personStructural`, appendix JSON:** [`CASHIER_BOX_OPEN.md`](./CASHIER_BOX_OPEN.md). Former **`cases-and-repo.md`** material is summarized here.
 
 **API version:** `2.0.0` (`GET /`).
@@ -27,7 +27,7 @@ Single reference that merges:
 5. [Cameras](#part-i--2-cameras)
 6. [Tasks — CROSS_LINE](#part-i--3-tasks--cross_line)
 7. [Tasks — MASK_HAIRNET_CHEF_HAT](#part-i--4-tasks--mask_hairnet_chef_hat-ppe-zone)
-8. [Tasks — CASHIER_DRAWER](#part-i--5-tasks--cashier_drawer-cashier-monitor)
+8. [Tasks — CASHIER_BOX_OPEN](#part-i--5-tasks--cashier_box_open-cashier-monitor)
 9. [List / get / delete tasks](#part-i--6-list--get--delete-tasks)
 10. [Detection — start, status, stop, stream](#part-i--7-detection--start-status-stop-stream)
 11. [Cashier HTTP](#part-i--8-cashier-http-all-services-on-cashier)
@@ -52,23 +52,19 @@ Single reference that merges:
 
 ## Part I — Run automated tests (all services)
 
-From the repo root:
+From the repo root, when pytest modules exist under `tests/`:
 
 ```bash
-python3 -m pytest tests/pipeline_test/ tests/test_task_services_smoke.py tests/test_cashier_box_open_cases.py -v --tb=short
+python3 -m pytest tests/ -v --tb=short
 ```
 
-| Test module | What it covers |
+| Test module (examples; add or restore under `tests/`) | What it covers |
 |-------------|----------------|
-| `tests/pipeline_test/test_pipeline_api.py` | `REGISTRY` / `TASK_REGISTRY` keys, OpenAPI paths, cameras, detection stop (409), cashier REST |
-| `tests/test_task_services_smoke.py` | `CrossLineTask`, `MaskHairnetChefHatTask` (empty frame), `CashierDrawerTask` (mocked ONNX service) |
-| `tests/test_cashier_box_open_cases.py` | Cashier rule table / `CashierService` offline logic |
+| API / OpenAPI smoke | Cameras, tasks, detection stop, cashier REST |
+| Task worker smoke | `CrossLineTask`, `MaskHairnetChefHatTask`, `CashierDrawerTask` |
+| Cashier rules | `CashierService` offline / envelope tests |
 
-**Single-file API smoke test:**
-
-```bash
-python3 -m pytest tests/pipeline_test/test_pipeline_api.py -v
-```
+There is no bundled pytest tree in this checkout beyond what you add under `tests/`; use the **cURL** sections below for a full manual pass.
 
 ---
 
@@ -77,9 +73,9 @@ python3 -m pytest tests/pipeline_test/test_pipeline_api.py -v
 | Kind | Where | HTTP? |
 |------|--------|--------|
 | **`REGISTRY`** | `services/__init__.py` | No direct routes — used by **`pipeline.py`** / `CameraPipeline` (batch or scripts): `detector`, `age_gender`, `ppe`, `mood`, `cashier` |
-| **`TASK_REGISTRY`** | Same file | Driven by **`POST /api/tasks`** + **`POST /detection/start`**: `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_DRAWER` |
+| **`TASK_REGISTRY`** | Same file | Driven by **`POST /api/tasks`** + **`POST /detection/start`**: `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_BOX_OPEN` |
 
-Cashier appears in both: **`CashierService`** and **`CashierDrawerTask`** in **`services/cashier.py`**.
+Cashier appears in both: **`CashierService`** and **`CashierDrawerTask`** (registered as **`CASHIER_BOX_OPEN`**) in **`services/cashier.py`**.
 
 ---
 
@@ -254,7 +250,7 @@ curl -s -X POST "$BASE/api/tasks" \
 
 ---
 
-## Part I — 5. Tasks — `CASHIER_DRAWER` (cashier monitor)
+## Part I — 5. Tasks — `CASHIER_BOX_OPEN` (cashier monitor)
 
 Set **`YOLO_MODEL`** to cashier weights so FrameBus emits person/drawer/cash on that channel. Use **`/cashier/*`** for zones, status, SSE.
 
@@ -264,7 +260,7 @@ curl -s -X POST "$BASE/api/tasks" \
   -d '{
     "taskId": 30,
     "taskName": "cashier_mon",
-    "algorithmType": "CASHIER_DRAWER",
+    "algorithmType": "CASHIER_BOX_OPEN",
     "channelId": 1,
     "enable": true,
     "threshold": 50,
@@ -281,7 +277,7 @@ curl -s -X POST "$BASE/api/tasks" \
   "task": {
     "taskId": 30,
     "taskName": "cashier_mon",
-    "algorithmType": "CASHIER_DRAWER",
+    "algorithmType": "CASHIER_BOX_OPEN",
     "channelId": 1,
     "enable": true,
     "threshold": 50,
@@ -462,7 +458,7 @@ curl -s -X POST "$BASE/api/tasks" \
 
 ```json
 {
-  "detail": "Unsupported algorithmType 'UNKNOWN'. Supported: ['CASHIER_DRAWER', 'CROSS_LINE', 'MASK_HAIRNET_CHEF_HAT']"
+  "detail": "Unsupported algorithmType 'UNKNOWN'. Supported: ['CASHIER_BOX_OPEN', 'CROSS_LINE', 'MASK_HAIRNET_CHEF_HAT']"
 }
 ```
 
@@ -625,12 +621,14 @@ curl -sS "${BASE}/cashier/status" | jq -r 'to_entries[0].value.personStructural 
 |------|------|
 | [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md) | Eyego `POST/PUT` + Part III (cashier cURL) + mocks (§§6–11) + appendix JSON |
 | [`services/cashier.py`](../services/cashier.py) | 14-rule evaluation, GIF budgets, persistence |
-| [`tests/test_cashier_box_open_cases.py`](../tests/test_cashier_box_open_cases.py) | Offline rule / envelope tests |
+| `tests/test_cashier_box_open_cases.py` (if present) | Offline rule / envelope tests |
 
 ---
 
 ## CI
 
 ```bash
-python3 -m pytest tests/pipeline_test/ -v --tb=short
+python3 -m pytest tests/ -v --tb=short
 ```
+
+If nothing is collected under `tests/`, pytest exits with code **5** (no tests); that is normal until you add or restore test modules.

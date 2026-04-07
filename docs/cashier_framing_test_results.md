@@ -36,7 +36,7 @@ paths = sorted(glob.glob(os.path.join(src, 'frame_*.jpg')))[:180]
 ## API sequence
 
 1. `POST /cameras` — camera `id`: `"1"`, `url`: absolute path to `cashier_framing_sample_720p.mp4`
-2. `POST /api/tasks` — `taskId`: `30`, `algorithmType`: `CASHIER_DRAWER`, `channelId`: `1`, `taskName`: `cashier_framing_test`
+2. `POST /api/tasks` — `taskId`: `30`, `algorithmType`: `CASHIER_BOX_OPEN`, `channelId`: `1`, `taskName`: `cashier_framing_test`
 3. `POST /detection/start`
 4. Polled `GET /detection/status` during run
 5. `POST /detection/stop`

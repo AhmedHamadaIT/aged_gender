@@ -2,9 +2,9 @@
 
 **Version 2.0.0** — FastAPI server for multi-camera computer vision.
 
-The runtime path is **task-based**: you register RTSP cameras (`POST /cameras`), define **tasks** per channel (`POST /api/tasks` with an `algorithmType` such as `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, or `CASHIER_DRAWER`), then start workers (`POST /detection/start`). **FrameBus** captures each stream once, runs a shared YOLO+tracker, and fans frames to **task workers** (`task_worker.py`). Task results (for example line-crossing events) are merged onto **`GET /detection/stream`** (SSE).
+The runtime path is **task-based**: you register RTSP cameras (`POST /cameras`), define **tasks** per channel (`POST /api/tasks` with an `algorithmType` such as `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, or `CASHIER_BOX_OPEN`), then start workers (`POST /detection/start`). **FrameBus** captures each stream once, runs a shared YOLO+tracker, and fans frames to **task workers** (`task_worker.py`). Task results (for example line-crossing events) are merged onto **`GET /detection/stream`** (SSE).
 
-**Cashier** is integrated as task type **`CASHIER_DRAWER`** — class **`CashierDrawerTask`** in [`services/cashier.py`](services/cashier.py) (same module as **`CashierService`**). Live cashier state, zones, evidence, and per-camera SSE remain under **`/cashier/*`**. For cashier, configure **`YOLO_MODEL`** (and related env) so FrameBus outputs the expected classes (person / drawer / cash) on that channel; see [Cashier + FrameBus model](#cashier--framebus-model).
+**Cashier** is integrated as API task type **`CASHIER_BOX_OPEN`** — implemented by class **`CashierDrawerTask`** in [`services/cashier.py`](services/cashier.py) (same module as **`CashierService`**), registered in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`. Live cashier state, zones, evidence, and per-camera SSE remain under **`/cashier/*`**. For cashier, configure **`YOLO_MODEL`** (and related env) so FrameBus outputs the expected classes (person / drawer / cash) on that channel; see [Cashier + FrameBus model](#cashier--framebus-model).
 
 The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detector`, `age_gender`, `mood`, `ppe`, `cashier`) is still in the repo for scripts and batch tooling; the **HTTP app does not** expose `POST /detection/setup`.
 
@@ -35,15 +35,15 @@ The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detect
 ## Features
 
 - **Multi-camera RTSP** — `POST /cameras`, `GET /cameras`, `DELETE /cameras/{cam_id}`. Successful bodies often use the standardized envelope `{ ..., "error": null }` (see `error_codes/response.py`).
-- **Tasks per channel** — `POST /api/tasks` (and GET/PUT/DELETE) registers algorithms keyed by `algorithmType`: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_DRAWER`**. Each enabled task with a matching registered camera gets a **task worker**; shared **FrameBus** processes per `channelId`.
+- **Tasks per channel** — `POST /api/tasks` (and GET/PUT/DELETE) registers algorithms keyed by `algorithmType`: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_BOX_OPEN`**. Each enabled task with a matching registered camera gets a **task worker**; shared **FrameBus** processes per `channelId`.
 - **Runtime control** — `POST /detection/start` / `POST /detection/stop` (optional `camera_id`); `GET /detection/status` for FPS, frame counts, and errors.
 - **Detection SSE** — `GET /detection/stream` streams **task events** (e.g. line-crossing JSON), not full per-frame pipeline frames. Shape depends on the task (see `app.py` docstring example).
-- **Cashier monitor** — Register a task with `algorithmType: "CASHIER_DRAWER"` (and `channelId` matching your camera id). HTTP: `GET` / `POST /cashier/zones`, `POST /cashier/zones/reset`, `GET /cashier/status`, `GET` / `DELETE /cashier/events`, evidence and media routes, SSE `GET /cashier/stream/{camera_id}` and `.../only`. Case logic **N1–N6** / **A1–A7** in [`services/cashier.py`](services/cashier.py) `_evaluate`.
+- **Cashier monitor** — Register a task with `algorithmType: "CASHIER_BOX_OPEN"` (and `channelId` matching your camera id). HTTP: `GET` / `POST /cashier/zones`, `POST /cashier/zones/reset`, `GET /cashier/status`, `GET` / `DELETE /cashier/events`, evidence and media routes, SSE `GET /cashier/stream/{camera_id}` and `.../only`. Case logic **N1–N6** / **A1–A7** in [`services/cashier.py`](services/cashier.py) `_evaluate`.
 - **Configuration on disk** — `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); `CASHIER_EVIDENCE_DIR` (default `./evidence/cashier`).
 
 ### Cashier + FrameBus model
 
-FrameBus uses **one** YOLO model per running camera process. **`CASHIER_DRAWER`** expects detections with cashier classes (e.g. person / drawer / cash). Point **`YOLO_MODEL`** at weights that expose those classes for channels where cashier runs. Tasks that assume COCO **`person`** (e.g. `CROSS_LINE`) need a compatible model if combined on the same channel—often you use **separate channels** or **separate deployments** for cashier vs. generic crossing.
+FrameBus uses **one** YOLO model per running camera process. **`CASHIER_BOX_OPEN`** expects detections with cashier classes (e.g. person / drawer / cash). Point **`YOLO_MODEL`** at weights that expose those classes for channels where cashier runs. Tasks that assume COCO **`person`** (e.g. `CROSS_LINE`) need a compatible model if combined on the same channel—often you use **separate channels** or **separate deployments** for cashier vs. generic crossing.
 
 ---
 
@@ -133,7 +133,7 @@ curl -s -X POST "$BASE/api/tasks" \
   -d '{
     "taskId": 101,
     "taskName": "cashier_drawer_monitor",
-    "algorithmType": "CASHIER_DRAWER",
+    "algorithmType": "CASHIER_BOX_OPEN",
     "channelId": 4,
     "enable": true,
     "threshold": 50,
@@ -148,7 +148,7 @@ curl -s "$BASE/api/tasks"
 curl -s "$BASE/api/tasks/101"
 ```
 
-`algorithmType` must be one of: `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_DRAWER` (see [`apis/tasks.py`](apis/tasks.py)).
+`algorithmType` must be one of: `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_BOX_OPEN` (see [`apis/tasks.py`](apis/tasks.py)).
 
 ### Detection — `start`, `stop`, `status`, `stream`
 
@@ -406,7 +406,7 @@ Delete a configured camera.
 
 Tasks are stored in memory and drive which algorithms run after `POST /detection/start`. Each task includes `taskId`, `taskName`, `algorithmType`, `channelId`, `enable`, `threshold`, `areaPosition` (JSON string; lines or polygons depending on algorithm), `detailConfig`, and schedule fields.
 
-Supported `algorithmType` values: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_DRAWER`**.
+Supported `algorithmType` values: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_BOX_OPEN`**.
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -817,7 +817,7 @@ Counts are **per-frame classifications** over the full run. Cases not observed a
 Recommended order:
 
 1. **`POST /cameras`** — register RTSP sources; use camera `id` values that match task `channelId` (e.g. `"4"` ↔ `channelId: 4`).  
-2. **`POST /api/tasks`** — add an enabled task with `"algorithmType": "CASHIER_DRAWER"` for that `channelId`.  
+2. **`POST /api/tasks`** — add an enabled task with `"algorithmType": "CASHIER_BOX_OPEN"` for that `channelId`.  
 3. **`POST /cashier/zones`** (optional) — zones/thresholds; defaults from `CASHIER_CONFIG`.  
 4. **`GET /cashier/zones`** (optional) — verify merged YAML on disk.  
 5. Set **`YOLO_MODEL`** (and env) so FrameBus outputs cashier classes on that deployment.  
@@ -1592,7 +1592,7 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 │   └── cashier_zones.yaml
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # This file (complete documentation)
-├── .gitignore                  # Git ignore rules (models/ excluded)
+├── .gitignore                  # Git ignore rules (e.g. models/, outputs/, output*/)
 ├── models/                     # ML models (not tracked in git)
 │   ├── yolov8n.pt             # YOLO v8 Nano (~25 MB)
 │   ├── best_ppe.onnx           # PPE ONNX (~38 MB)
@@ -1605,10 +1605,10 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 │   ├── mood.py                 # Mood/Emotion detection
 │   ├── cross_line.py           # CROSS_LINE task
 │   ├── mask_hairnet_chef_hat.py
-│   └── cashier.py              # CashierService + CashierDrawerTask (CASHIER_DRAWER)
+│   └── cashier.py              # CashierService + CashierDrawerTask (TASK key CASHIER_BOX_OPEN)
 ├── scripts/                    # Testing and utility scripts
 │   └── test_image_pipeline.py  # Image inference testing script
-├── tests/                      # pytest suite (`pytest.ini`, `tests/pipeline_test/`)
+├── tests/                      # pytest modules when present (`pytest` from repo root)
 ├── logger/                     # Logging configuration
 │   └── logger_config.py        # Logger setup
 └── outputs/                    # Test results directory
