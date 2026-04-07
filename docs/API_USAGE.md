@@ -340,11 +340,41 @@ curl http://localhost:9000/detection/status
 
 Connect once and receive events in real-time. Events arrive as they happen — one JSON object per line crossing, PPE violation, or cashier state transition.
 
+**Multiple clients** can connect simultaneously; each client receives its own copy of every event (in-process broadcast). Idle connections receive `: ping` keepalive comments every ~30 seconds.
+
+> **Deployment note:** The broadcast runs within a single uvicorn process. If you run multiple uvicorn workers (`--workers N`), subscribers in different workers will not share events. The current [`docker-compose.yml`](../docker-compose.yml) runs one worker, so broadcast works correctly as deployed.
+
 ```bash
+# All events from all tasks and cameras
 curl -N http://localhost:9000/detection/stream
 ```
 
 > `-N` disables buffering so you see events immediately.
+
+### Server-side filtering (optional query parameters)
+
+All parameters are optional and combine with **AND** logic:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `taskId` | int | Only events from this task ID |
+| `taskName` | string | Only events whose `taskName` matches (note: not guaranteed unique across tasks) |
+| `eventType` | string | Only events of this type (`CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_BOX_OPEN`) |
+| `channelId` | int | Only events from this camera channel |
+
+```bash
+# Only events from task 10
+curl -N "http://localhost:9000/detection/stream?taskId=10"
+
+# Only CROSS_LINE events on camera 1
+curl -N "http://localhost:9000/detection/stream?eventType=CROSS_LINE&channelId=1"
+
+# Only events from a named task
+curl -N "http://localhost:9000/detection/stream?taskName=entrance_line"
+
+# Combined (AND) — task 10 AND only on channel 1
+curl -N "http://localhost:9000/detection/stream?taskId=10&channelId=1"
+```
 
 ### CrossLine event example
 ```
