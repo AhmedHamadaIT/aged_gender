@@ -32,13 +32,14 @@ Run with:
 import asyncio
 import json
 
-from fastapi import FastAPI
+from fastapi import FastAPI,UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 
 from apis.cameras   import camera_registry, CameraSetupRequest
 from apis.detection import detection
 from apis.tasks     import task_registry, TaskConfig
 from schemas        import DetectionRequest, DetectionStatus
+from apis.reid import reid_api
 
 app = FastAPI(title="Vision Pipeline API", version="2.0.0")
 
@@ -141,3 +142,10 @@ async def detection_stream():
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+# ─────────────────────────────────────────────
+# ReID routes
+# ─────────────────────────────────────────────
+@app.post("/reid/search")
+async def reid_search(file: UploadFile = File(...), top_k: int = Form(10)):
+    return await reid_api.search(file, top_k)

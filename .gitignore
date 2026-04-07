@@ -2,6 +2,12 @@ outputs
 torch*
 videos
 .vscode
+**/__pycache__/
+**.pyc
+logger/app.log
+*.log
+gallery
+.vscode
 venv/
 __pycache__/
 *.resolved
