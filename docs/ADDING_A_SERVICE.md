@@ -66,7 +66,7 @@ class Detection:
 
 ### Step 1 — Create `services/your_task.py`
 
-You can place the task class in a **dedicated module** or **next to a related service** in the same file (this repo keeps **`CashierDrawerTask`** and **`CashierService`** together in [`services/cashier.py`](../services/cashier.py)).
+You can place the task class in a **dedicated module** or **next to a related service** in the same file (this repo keeps **`CashierDrawerTask`** and **`CashierService`** together in [`services/cashier.py`](../services/cashier.py), registered as `CASHIER_BOX_OPEN`).
 
 Your task is a class with:
 - `__init__(self, task_config: dict)` — receives the full task config from the backend
@@ -231,6 +231,11 @@ class DetailConfig(BaseModel):
     enableReid      : bool      = False
     # MASK_HAIRNET_CHEF_HAT
     alarmType       : List[str] = []
+    # CASHIER_BOX_OPEN
+    drawerOpenLimit : int       = 30
+    serviceWaitLimit: int       = 30
+    enableStaffList : bool      = False
+    staffIds        : List[int] = []
     # LOITERING
     dwellSeconds    : int       = 30    # <-- add this
 ```

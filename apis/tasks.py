@@ -30,6 +30,11 @@ class DetailConfig(BaseModel):
     enableReid      : bool       = False
     # MASK_HAIRNET_CHEF_HAT
     alarmType       : List[str]  = []
+    # CASHIER_BOX_OPEN
+    drawerOpenLimit : int        = 30
+    serviceWaitLimit: int        = 30
+    enableStaffList : bool       = False
+    staffIds        : List[int]  = []
 
 
 class TaskConfig(BaseModel):
@@ -52,7 +57,7 @@ class TaskConfig(BaseModel):
 # Registry
 # ─────────────────────────────────────────────
 class TaskRegistry:
-    SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_DRAWER"}
+    SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_BOX_OPEN"}
 
     def __init__(self):
         self._tasks: dict = {}   # {task_id (int): task_config (dict)}

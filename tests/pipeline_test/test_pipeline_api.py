@@ -20,7 +20,7 @@ EXPECTED_SERVICES = frozenset(
     {"detector", "age_gender", "ppe", "mood", "cashier"},
 )
 EXPECTED_TASKS = frozenset(
-    {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_DRAWER"},
+    {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_BOX_OPEN"},
 )
 
 

@@ -193,7 +193,7 @@ curl -X POST http://localhost:9000/api/tasks \
 }
 ```
 
-### Register a cashier drawer task (`CASHIER_DRAWER`)
+### Register a cashier drawer task (`CASHIER_BOX_OPEN`)
 
 Implementation: **`CashierDrawerTask`** and **`CashierService`** in [`services/cashier.py`](../services/cashier.py). Use `/cashier/*` HTTP routes for zones, status, and SSE. Point **`YOLO_MODEL`** at cashier weights on the server so FrameBus emits person/drawer/cash classes on that channel.
 
@@ -203,7 +203,7 @@ curl -X POST http://localhost:9000/api/tasks \
   -d '{
     "taskId": 30,
     "taskName": "cashier_drawer_monitor",
-    "algorithmType": "CASHIER_DRAWER",
+    "algorithmType": "CASHIER_BOX_OPEN",
     "channelId": 1,
     "enable": true,
     "threshold": 50,
@@ -212,7 +212,32 @@ curl -X POST http://localhost:9000/api/tasks \
   }'
 ```
 
-**Response:** same shape as other tasks — `"status": "created"`, `"task": { … "algorithmType": "CASHIER_DRAWER", … }`.
+**Response:**
+```json
+{
+  "status": "created",
+  "task": {
+    "taskId": 30,
+    "taskName": "cashier_drawer_monitor",
+    "algorithmType": "CASHIER_BOX_OPEN",
+    "channelId": 1,
+    "enable": true,
+    "threshold": 50,
+    "areaPosition": "[]",
+    "detailConfig": {
+      "drawerOpenLimit": 20,
+      "serviceWaitLimit": 90,
+      "enableStaffList": false,
+      "staffIds": []
+    },
+    "validWeekday": ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"],
+    "validStartTime": 0,
+    "validEndTime": 86400000
+  }
+}
+```
+
+> Cashier-specific knobs are supported in `detailConfig`: `drawerOpenLimit`, `serviceWaitLimit`, `enableStaffList`, `staffIds`.
 
 ---
 
@@ -228,14 +253,14 @@ curl -X POST http://localhost:9000/detection/start
 {
   "status": "started",
   "cameras": ["1", "2"],
-  "tasks": ["10", "11", "20"]
+  "tasks": ["10", "11", "20", "30"]
 }
 ```
 
 This spawns:
 - 1 FrameBus process for camera `1` (serving tasks 10 and 11)
 - 1 FrameBus process for camera `2` (serving task 20)
-- 1 task worker process per task (3 total)
+- 1 task worker process per task (4 total)
 
 ### Start one specific camera only
 ```bash
@@ -312,7 +337,7 @@ curl http://localhost:9000/detection/status
 
 ## 5. Stream Results (SSE)
 
-Connect once and receive events in real-time. Events arrive as they happen — one JSON object per line crossing or violation.
+Connect once and receive events in real-time. Events arrive as they happen — one JSON object per line crossing, PPE violation, or cashier state transition.
 
 ```bash
 curl -N http://localhost:9000/detection/stream
@@ -338,6 +363,12 @@ data: {"eventId":"c9e04f2b1a7d35cc","eventType":"MASK_HAIRNET_CHEF_HAT","timesta
 
 ```
 
+### Cashier drawer event
+```
+data: {"eventId":"d1f98a7c3b2e44aa","eventType":"CASHIER_BOX_OPEN","timestamp":1774310589000,"timestampUTC":"2026-04-05T10:03:09.000Z","taskId":30,"taskName":"cashier_drawer_monitor","channelId":1,"data":{"drawerOpen":true,"drawerOpenSeconds":24,"serviceWaitSeconds":11,"staffPresent":false,"personInZone":true,"labels":["person","cashier_open"],"evidence":{"captureImage":"/local/storage/captures/2026/04/05/d1f98a7c_crop.jpg","sceneImage":"/local/storage/scenes/2026/04/05/d1f98a7c_scene.jpg"}}}
+
+```
+
 ### Event fields reference
 
 **Common to all events:**
@@ -345,7 +376,7 @@ data: {"eventId":"c9e04f2b1a7d35cc","eventType":"MASK_HAIRNET_CHEF_HAT","timesta
 | Field | Type | Description |
 |---|---|---|
 | `eventId` | string | MD5 hash — unique per event |
-| `eventType` | string | `"CROSS_LINE"` or `"MASK_HAIRNET_CHEF_HAT"` |
+| `eventType` | string | `"CROSS_LINE"`, `"MASK_HAIRNET_CHEF_HAT"`, or `"CASHIER_BOX_OPEN"` |
 | `timestamp` | int | Unix timestamp in milliseconds |
 | `timestampUTC` | string | ISO 8601 UTC string |
 | `taskId` | int | ID of the task that fired the event |
@@ -373,6 +404,13 @@ data: {"eventId":"c9e04f2b1a7d35cc","eventType":"MASK_HAIRNET_CHEF_HAT","timesta
 | `alert.description` | string | Human-readable description of the violation |
 | `alert.confidence` | int | PPE model confidence 0–100 |
 | `person.areaPoints` | array | Polygon zone points from `areaPosition` config |
+
+**CASHIER_BOX_OPEN specific:**
+
+| Field | Type | Description |
+|---|---|---|
+| `eventType` | string | `"CASHIER_BOX_OPEN"` |
+| `data` | object | Cashier payload (status/timers/evidence; shape depends on runtime state) |
 
 ---
 
@@ -416,11 +454,12 @@ curl http://localhost:9000/api/tasks
 **Response:**
 ```json
 {
-  "count": 3,
+  "count": 4,
   "tasks": [
     { "taskId": 10, "taskName": "entrance_line", "algorithmType": "CROSS_LINE", ... },
     { "taskId": 11, "taskName": "exit_line_with_attrs", "algorithmType": "CROSS_LINE", ... },
-    { "taskId": 20, "taskName": "kitchen_ppe_check", "algorithmType": "MASK_HAIRNET_CHEF_HAT", ... }
+    { "taskId": 20, "taskName": "kitchen_ppe_check", "algorithmType": "MASK_HAIRNET_CHEF_HAT", ... },
+    { "taskId": 30, "taskName": "cashier_drawer_monitor", "algorithmType": "CASHIER_BOX_OPEN", ... }
   ]
 }
 ```
@@ -525,7 +564,7 @@ curl -X POST http://localhost:9000/detection/start
 ### 400 — Unsupported algorithmType
 ```json
 {
-  "detail": "Unsupported algorithmType 'UNKNOWN_TASK'. Supported: ['CROSS_LINE', 'MASK_HAIRNET_CHEF_HAT']"
+  "detail": "Unsupported algorithmType 'UNKNOWN_TASK'. Supported: ['CROSS_LINE', 'MASK_HAIRNET_CHEF_HAT', 'CASHIER_BOX_OPEN']"
 }
 ```
 
@@ -592,6 +631,15 @@ curl -X POST http://localhost:9000/api/tasks \
     "threshold":70,
     "areaPosition":"[{\"line_id\":\"z1\",\"point\":[{\"x\":0,\"y\":0},{\"x\":1280,\"y\":0},{\"x\":1280,\"y\":720},{\"x\":0,\"y\":720}],\"direction\":0}]",
     "detailConfig":{"alarmType":["no_mask","no_chef_hat"]}
+  }'
+
+curl -X POST http://localhost:9000/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskId":30,"taskName":"cashier_drawer_monitor","algorithmType":"CASHIER_BOX_OPEN","channelId":1,
+    "threshold":50,
+    "areaPosition":"[]",
+    "detailConfig":{"drawerOpenLimit":20,"serviceWaitLimit":90}
   }'
 
 # 3. Start

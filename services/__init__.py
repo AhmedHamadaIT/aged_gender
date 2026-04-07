@@ -35,5 +35,5 @@ REGISTRY = {
 TASK_REGISTRY = {
     "CROSS_LINE"           : CrossLineTask,
     "MASK_HAIRNET_CHEF_HAT": MaskHairnetChefHatTask,
-    "CASHIER_DRAWER"       : CashierDrawerTask,
+    "CASHIER_BOX_OPEN"     : CashierDrawerTask,
 }

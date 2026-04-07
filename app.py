@@ -11,7 +11,7 @@ Workflow:
     5. GET  /detection/status         → monitor camera status
     6. POST /detection/stop           → stop processing
 
-Cashier monitor (algorithmType CASHIER_DRAWER on /api/tasks): HTTP routes under
+Cashier monitor (algorithmType CASHIER_BOX_OPEN on /api/tasks): HTTP routes under
 ``/cashier/*`` (status, events, zones, SSE streams). Real-time cashier UI uses
 those endpoints; crossing events still use GET /detection/stream.
 

@@ -3,7 +3,7 @@ services/cashier.py  —  v1.2.0
 
 CashierService — ROI-based cashier drawer monitor.
 
-CashierDrawerTask — FrameBus task worker for ``algorithmType`` ``CASHIER_DRAWER``
+CashierDrawerTask — FrameBus task worker for ``algorithmType`` ``CASHIER_BOX_OPEN``
 (``POST /api/tasks``). Adapts each FrameBus ``payload`` to the pipeline-style
 ``context`` dict and invokes ``CashierService``. Same file keeps service + task
 adapter in one place.
@@ -147,9 +147,6 @@ ZONE_OUTSIDE  = "OUTSIDE"
 SEVERITY_NORMAL   = "NORMAL"
 SEVERITY_ALERT    = "ALERT"
 SEVERITY_CRITICAL = "CRITICAL"
-
-# Task config ``algorithmType`` (POST /api/tasks) — must match apis/tasks.TaskRegistry
-ALGORITHM_TYPE = "CASHIER_DRAWER"
 
 # ─────────────────────────────────────────────
 # Draw colours (BGR)
@@ -634,7 +631,7 @@ class CashierService:
     }
     _CLASS_NAMES: Dict[int, str] = {0: "Person", 1: "Drawer_Open", 2: "Cash"}
 
-    def __init__(self):
+    def __init__(self, task_config: Optional[Dict[str, Any]] = None):
         model_path   = os.getenv("CASHIER_MODEL",        "./models/best_cashier.onnx")
         config_path  = os.getenv("CASHIER_CONFIG",       "./config/cashier_zones.yaml")
         evidence_dir = os.getenv("CASHIER_EVIDENCE_DIR", "./evidence/cashier")
@@ -655,6 +652,8 @@ class CashierService:
         self._cfg         = _load_config(config_path)
         self._last_reload = time.monotonic()
         self._apply_config()
+        self._task_config = task_config if isinstance(task_config, dict) else {}
+        self._apply_task_overrides()
 
         self._cashier_poly, self._customer_poly = self._load_polys()
 
@@ -771,6 +770,37 @@ class CashierService:
             except (TypeError, ValueError):
                 pass
 
+    def _apply_task_overrides(self) -> None:
+        """
+        Merge task-config values from /api/tasks into cashier runtime config.
+        Keeps overrides scoped to cashier tasks only.
+        """
+        if not self._task_config:
+            return
+
+        task_name = self._task_config.get("taskName")
+        channel_id = self._task_config.get("channelId")
+        threshold = self._task_config.get("threshold")
+        task_meta: Dict[str, Any] = {
+            "algorithmType": ALGORITHM_TYPE,
+            "taskId": self._task_config.get("taskId"),
+            "taskName": task_name if task_name is not None else self._task_config.get("name"),
+            "channelId": channel_id,
+            "threshold": threshold,
+        }
+        self._task_meta = {k: v for k, v in task_meta.items() if v is not None}
+
+        detail = self._task_config.get("detailConfig")
+        if isinstance(detail, dict):
+            self._parse_detail_config(detail)
+
+        if threshold is not None:
+            try:
+                p = float(threshold)
+                self._global_conf_floor = max(0.0, min(1.0, p / 100.0))
+            except (TypeError, ValueError):
+                pass
+
     def _min_conf(self, class_id: int) -> float:
         base = float(self._CONF.get(class_id, 0.5))
         if self._global_conf_floor is not None:
@@ -788,6 +818,7 @@ class CashierService:
         if time.monotonic() - self._last_reload > self._reload_interval:
             self._cfg = _load_config(self._config_path)
             self._apply_config()
+            self._apply_task_overrides()
             self._cashier_poly, self._customer_poly = self._load_polys()
             self._last_reload = time.monotonic()
             log.debug("[CASHIER] Config reloaded from %s", self._config_path)
@@ -1768,7 +1799,7 @@ class CashierService:
 
 
 # ─────────────────────────────────────────────
-# FrameBus task — CASHIER_DRAWER
+# FrameBus task — CASHIER_BOX_OPEN
 # ─────────────────────────────────────────────
 #
 # FrameBus fans the same YOLO track output to every task on a channel. For
@@ -1777,11 +1808,11 @@ class CashierService:
 # class indices align (0=person, 1=drawer, 2=cash).
 
 class CashierDrawerTask:
-    """Register via POST /api/tasks with algorithmType CASHIER_DRAWER."""
+    """Register via POST /api/tasks with algorithmType CASHIER_BOX_OPEN."""
 
     def __init__(self, task_config: dict):
         self._task_config = task_config
-        self._svc = CashierService()
+        self._svc = CashierService(task_config=task_config)
 
     def __call__(self, payload: Dict[str, Any]) -> List[Any]:
         if not self._task_config.get("enable", True):
