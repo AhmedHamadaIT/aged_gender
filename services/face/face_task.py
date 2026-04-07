@@ -59,17 +59,30 @@ log = Logger.get_logger(__name__)
 @dataclass
 class DetailConfig:
     facePixelSize         : int  = 60
-    model                 : str  = "Fast"      # "Fast" | "Accurate"
-    yawThreshold          : int  = 35
-    pitchThreshold        : int  = 25
+    qualityThreshold      : int  = 60       # minimum face quality [0-100]
+    model                 : str  = "Fast"   # "Fast" | "Accurate"
+    yawThreshold          : int  = 35       # max absolute yaw (degrees)
+    pitchThreshold        : int  = 25       # max absolute pitch (degrees)
     failCount             : int  = 2
     enableAgeGenderDetect : bool = False
     enableEmotionDetect   : bool = False
+
+    def __post_init__(self):
+        """Validate and clamp config values."""
+        self.facePixelSize    = max(1, int(self.facePixelSize))
+        self.qualityThreshold = max(0, min(100, int(self.qualityThreshold)))
+        self.yawThreshold     = max(0, min(180, int(self.yawThreshold)))
+        self.pitchThreshold   = max(0, min(180, int(self.pitchThreshold)))
+        self.failCount        = max(1, int(self.failCount))
+        if self.model not in ("Fast", "Accurate"):
+            log.warning(f"[FACE_TASK] Unknown model '{self.model}', defaulting to 'Fast'")
+            self.model = "Fast"
 
     @staticmethod
     def from_dict(d: dict) -> "DetailConfig":
         return DetailConfig(
             facePixelSize         = d.get("facePixelSize", 60),
+            qualityThreshold      = d.get("qualityThreshold", 60),
             model                 = d.get("model", "Fast"),
             yawThreshold          = d.get("yawThreshold", 35),
             pitchThreshold        = d.get("pitchThreshold", 25),
@@ -81,6 +94,7 @@ class DetailConfig:
     def to_dict(self) -> dict:
         return {
             "facePixelSize"         : self.facePixelSize,
+            "qualityThreshold"      : self.qualityThreshold,
             "model"                 : self.model,
             "yawThreshold"          : self.yawThreshold,
             "pitchThreshold"        : self.pitchThreshold,
@@ -90,6 +104,9 @@ class DetailConfig:
         }
 
 
+_VALID_WEEKDAYS = {"MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"}
+
+
 @dataclass
 class FaceTaskConfig:
     taskId         : int
@@ -97,7 +114,7 @@ class FaceTaskConfig:
     algorithmType  : str  = "FACE"
     channelId      : int  = 0
     enable         : bool = True
-    threshold      : int  = 70
+    threshold      : int  = 70            # recognition similarity [0-100]
     libIds         : str  = "-1"
     enableStranger : bool = True
     detailConfig   : DetailConfig = field(default_factory=DetailConfig)
@@ -107,6 +124,19 @@ class FaceTaskConfig:
     ])
     validStartTime : int = 0           # ms from midnight
     validEndTime   : int = 86399000    # ms from midnight
+
+    def __post_init__(self):
+        """Validate and clamp task-level config values."""
+        self.taskId   = int(self.taskId)
+        self.taskName = str(self.taskName).strip() or f"task_{self.taskId}"
+        self.threshold = max(0, min(100, int(self.threshold)))
+        self.channelId = int(self.channelId)
+        self.validStartTime = max(0, int(self.validStartTime))
+        self.validEndTime   = max(self.validStartTime, min(86399000, int(self.validEndTime)))
+
+        # Sanitise weekday list
+        cleaned = [d.upper().strip() for d in self.validWeekday if d.upper().strip() in _VALID_WEEKDAYS]
+        self.validWeekday = cleaned if cleaned else list(_VALID_WEEKDAYS)
 
     @staticmethod
     def from_dict(d: dict) -> "FaceTaskConfig":

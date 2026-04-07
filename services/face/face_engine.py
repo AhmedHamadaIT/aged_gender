@@ -29,6 +29,24 @@ log = Logger.get_logger(__name__)
 
 
 # ─────────────────────────────────────────────
+# Pose / quality estimation parameters
+# ─────────────────────────────────────────────
+# These are extracted so they can be tuned without digging into formulas.
+# All are derived from InsightFace's 5-point landmark geometry.
+
+YAW_SCALE              = 2.0    # amplifier for raw atan2-based yaw estimate
+EXPECTED_NOSE_RATIO    = 0.45   # nose sits ~45% down from eyes to mouth
+PITCH_SCALE            = 60.0   # amplifier for raw atan2-based pitch estimate
+
+# Quality heuristic weights (must sum to 1.0)
+QUALITY_W_DET          = 0.4    # detection-confidence weight
+QUALITY_W_SHARP        = 0.3    # Laplacian-sharpness weight
+QUALITY_W_RES          = 0.3    # resolution weight
+SHARPNESS_NORMALISER   = 500.0  # Laplacian variance mapped to [0,1]
+RESOLUTION_BASELINE_PX = 112    # face width/height considered "full score"
+
+
+# ─────────────────────────────────────────────
 # Face detection result
 # ─────────────────────────────────────────────
 @dataclass
@@ -47,6 +65,40 @@ class FaceDetection:
 
     # mutable ID assigned during processing
     face_id   : int = 0
+
+    def __post_init__(self):
+        """Validate and clamp fields to sane ranges."""
+        # -- bbox: ensure ints and x2 > x1, y2 > y1
+        self.x1 = int(self.x1)
+        self.y1 = int(self.y1)
+        self.x2 = int(self.x2)
+        self.y2 = int(self.y2)
+        if self.x2 < self.x1:
+            self.x1, self.x2 = self.x2, self.x1
+        if self.y2 < self.y1:
+            self.y1, self.y2 = self.y2, self.y1
+
+        # -- det_score: clamp to [0, 1]
+        self.det_score = float(max(0.0, min(1.0, self.det_score)))
+
+        # -- quality: clamp to [0, 100]
+        self.quality = float(max(0.0, min(100.0, self.quality)))
+
+        # -- yaw / pitch: clamp to [-180, 180]
+        self.yaw   = float(max(-180.0, min(180.0, self.yaw)))
+        self.pitch = float(max(-180.0, min(180.0, self.pitch)))
+
+        # -- landmarks: must be (5, 2) ndarray or None
+        if self.landmarks is not None:
+            if not isinstance(self.landmarks, np.ndarray) or self.landmarks.shape != (5, 2):
+                log.warning("[FACE] Invalid landmarks shape, expected (5,2) — discarding")
+                self.landmarks = None
+
+        # -- embedding: must be 512-d ndarray or None
+        if self.embedding is not None:
+            if not isinstance(self.embedding, np.ndarray) or self.embedding.ndim != 1 or self.embedding.shape[0] != 512:
+                log.warning("[FACE] Invalid embedding shape, expected (512,) — discarding")
+                self.embedding = None
 
     @property
     def bbox(self) -> Tuple[int, int, int, int]:
@@ -124,7 +176,7 @@ def _estimate_pose_from_landmarks(landmarks: np.ndarray) -> Tuple[float, float]:
         return 0.0, 0.0
 
     nose_offset = nose[0] - eye_center[0]
-    yaw = math.degrees(math.atan2(nose_offset, eye_dist)) * 2.0
+    yaw = math.degrees(math.atan2(nose_offset, eye_dist)) * YAW_SCALE
 
     # Pitch — nose vertical position relative to eye-mouth midpoint
     mouth_center = (mouth_left + mouth_right) / 2.0
@@ -133,9 +185,8 @@ def _estimate_pose_from_landmarks(landmarks: np.ndarray) -> Tuple[float, float]:
         return yaw, 0.0
 
     nose_vert_offset = nose[1] - eye_center[1]
-    expected_ratio   = 0.45  # nose is roughly 45% down from eyes to mouth
     actual_ratio     = nose_vert_offset / face_height
-    pitch = math.degrees(math.atan2(actual_ratio - expected_ratio, 1.0)) * 60.0
+    pitch = math.degrees(math.atan2(actual_ratio - EXPECTED_NOSE_RATIO, 1.0)) * PITCH_SCALE
 
     return float(yaw), float(pitch)
 
@@ -150,19 +201,19 @@ def _estimate_quality(face_img: np.ndarray, det_score: float) -> float:
         - Face resolution       (30% weight)
     """
     # Detection confidence component
-    det_component = det_score * 100.0 * 0.4
+    det_component = det_score * 100.0 * QUALITY_W_DET
 
     # Sharpness (Laplacian variance)
     if face_img.size == 0:
         return det_component
     gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY) if len(face_img.shape) == 3 else face_img
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    sharpness = min(laplacian_var / 500.0, 1.0) * 100.0 * 0.3
+    sharpness = min(laplacian_var / SHARPNESS_NORMALISER, 1.0) * 100.0 * QUALITY_W_SHARP
 
     # Resolution component
     h, w = face_img.shape[:2]
     min_dim = min(h, w)
-    resolution = min(min_dim / 112.0, 1.0) * 100.0 * 0.3
+    resolution = min(min_dim / RESOLUTION_BASELINE_PX, 1.0) * 100.0 * QUALITY_W_RES
 
     return round(min(det_component + sharpness + resolution, 100.0), 1)
 
