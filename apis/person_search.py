@@ -11,7 +11,7 @@ from fastapi import HTTPException, UploadFile, File, Form
 from typing import Dict, Any
 
 from apis.base import BaseResource
-from services.person_search import ReIDService
+from services.person_search import PersonSearchTask
 from logger.logger_config import Logger
 
 log = Logger.get_logger(__name__)
@@ -23,8 +23,8 @@ class PersonSearchResource(BaseResource):
     def __init__(self):
         super().__init__()
         # Initialize service once so the model stays in memory
-        log.info("[PERSON_SEARCH API] Initializing ReID Service...")
-        self.reid_service = ReIDService()
+        log.info("[PERSON_SEARCH API] Initializing Person Search Service...")
+        self.person_search_task = PersonSearchTask()
 
     async def search(self, file: UploadFile = File(...), top_k: int = Form(10)) -> Dict[str, Any]:
         """
