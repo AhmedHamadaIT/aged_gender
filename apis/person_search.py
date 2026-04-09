@@ -22,9 +22,28 @@ log = Logger.get_logger(__name__)
 class PersonSearchResource(BaseResource):
     def __init__(self):
         super().__init__()
-        # Initialize service once so the model stays in memory
         log.info("[PERSON_SEARCH API] Initializing Person Search Service...")
-        self.person_search_task = PersonSearchTask()
+        
+        # 1. Define the default task configuration
+        default_config = {
+            "taskId": 1,
+            "taskName": "Main Camera Person Indexer",
+            "algorithmType": "PERSON_SEARCH",
+            "channelId": 101,
+            "enable": True,
+            "detailConfig": {
+                "padding": 10
+            },
+            "validWeekday": [
+                "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", 
+                "FRIDAY", "SATURDAY", "SUNDAY"
+            ],
+            "validStartTime": 0,
+            "validEndTime": 86400000
+        }
+
+        # 2. Pass the config to the task initializer
+        self.person_search_task = PersonSearchTask(default_config)
 
     async def search(self, file: UploadFile = File(...), top_k: int = Form(10)) -> Dict[str, Any]:
         """
@@ -36,8 +55,8 @@ class PersonSearchResource(BaseResource):
         try:
             image_bytes = await file.read()
             
-            # Call the search_by_image method added previously
-            results = self.reid_service.search_by_image(image_bytes, top_k=top_k)
+            # 3. Fixed reference (was self.reid_service)
+            results = self.person_search_task.search_by_image(image_bytes, top_k=top_k)
             
             return {
                 "status": "success",
