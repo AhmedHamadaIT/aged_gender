@@ -56,7 +56,8 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         "uvicorn[standard]"\
         qdrant-client \
         gdown \
-        python-multipart
+        python-multipart \ 
+        open_clip_torch
 
 # ── Create directories ───────────────────────
 RUN mkdir -p /app/models /app/videos /app/outputs
