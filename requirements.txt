@@ -29,3 +29,4 @@ gdown>=5.0.0
 # Face Recognition
 insightface>=0.7.3
 faiss-cpu>=1.7.4
+python-multipart>=0.0.9

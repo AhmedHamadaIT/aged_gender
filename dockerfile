@@ -72,11 +72,12 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         fastapi \
         onnxruntime \
         "uvicorn[standard]" \
+        "python-multipart"\
         qdrant-client \
         gdown \
         python-multipart \
         open_clip_torch \
-        redis
+        redis \
         insightface \
         faiss-cpu \
 
