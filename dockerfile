@@ -80,6 +80,7 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         redis \
         insightface \
         faiss-cpu \
+        lapx
 
 # RTSP stability for OpenCV/FFmpeg inside the container
 ENV OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|timeout;5000000|reconnect;1|reconnect_delay_max;5"

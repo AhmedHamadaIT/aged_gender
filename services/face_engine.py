@@ -102,7 +102,7 @@ class FaceEngine:
 
         Returns a list of FaceDetection with bbox in frame coordinates.
         """
-        faces = self._app.get(frame, det_thresh=det_thresh)
+        faces = self._app.get(frame)
         results = []
 
         for face in faces:
@@ -135,7 +135,7 @@ class FaceEngine:
         Detect the largest face in *image* and return its 512-d embedding.
         Returns None if no face is found.
         """
-        faces = self._app.get(image, det_thresh=0.4)
+        faces = self._app.get(image)
         if not faces:
             return None
 
