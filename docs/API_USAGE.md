@@ -23,35 +23,50 @@ Base URL for all examples: `http://localhost:9000`
 
 ## 1. Register Cameras
 
-Register one camera at a time. The `id` must match the `channelId` used in your tasks.
+The body takes a `cameras` array — you can register one or multiple cameras in a single call. The `id` must match the `channelId` used in your tasks.
 
-### Add a camera
+### Add one camera
 ```bash
 curl -X POST http://localhost:9000/cameras \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "1",
-    "url": "rtsp://192.168.1.10/stream"
+    "cameras": [
+      {"id": "1", "url": "rtsp://192.168.1.10/stream"}
+    ]
   }'
 ```
 
 **Response:**
 ```json
 {
-  "status": "registered",
-  "camera_id": "1",
-  "url": "rtsp://192.168.1.10/stream"
+  "status": "configured",
+  "cameras": {
+    "1": "rtsp://192.168.1.10/stream"
+  }
 }
 ```
 
-### Add a second camera
+### Add multiple cameras in one request
 ```bash
 curl -X POST http://localhost:9000/cameras \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "2",
-    "url": "rtsp://192.168.1.11/stream"
+    "cameras": [
+      {"id": "1", "url": "rtsp://192.168.1.10/stream"},
+      {"id": "2", "url": "rtsp://192.168.1.11/stream"}
+    ]
   }'
+```
+
+**Response:**
+```json
+{
+  "status": "configured",
+  "cameras": {
+    "1": "rtsp://192.168.1.10/stream",
+    "2": "rtsp://192.168.1.11/stream"
+  }
+}
 ```
 
 ### List all registered cameras
@@ -63,10 +78,10 @@ curl http://localhost:9000/cameras
 ```json
 {
   "count": 2,
-  "cameras": {
-    "1": "rtsp://192.168.1.10/stream",
-    "2": "rtsp://192.168.1.11/stream"
-  }
+  "cameras": [
+    {"id": "1", "url": "rtsp://192.168.1.10/stream"},
+    {"id": "2", "url": "rtsp://192.168.1.11/stream"}
+  ]
 }
 ```
 
@@ -634,14 +649,15 @@ curl -X POST http://localhost:9000/detection/start
 Complete sequence from scratch to streaming events:
 
 ```bash
-# 1. Register cameras
+# 1. Register cameras (both in one call)
 curl -X POST http://localhost:9000/cameras \
   -H "Content-Type: application/json" \
-  -d '{"id":"1","url":"rtsp://192.168.1.10/stream"}'
-
-curl -X POST http://localhost:9000/cameras \
-  -H "Content-Type: application/json" \
-  -d '{"id":"2","url":"rtsp://192.168.1.11/stream"}'
+  -d '{
+    "cameras": [
+      {"id": "1", "url": "rtsp://192.168.1.10/stream"},
+      {"id": "2", "url": "rtsp://192.168.1.11/stream"}
+    ]
+  }'
 
 # 2. Register tasks
 curl -X POST http://localhost:9000/api/tasks \
