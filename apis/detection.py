@@ -3,75 +3,54 @@ apis/detection.py
 -----------------
 Detection resource — manages camera processes and result streaming.
 
+Cameras and tasks are configured separately before starting:
+  - POST /cameras          → register cameras (camera_id → rtsp_url)
+  - POST /api/tasks        → register tasks (algorithmType, channelId, config)
+
+On start, one FrameBus process is spawned per unique channelId, and one
+task worker process is spawned per enabled task. Tasks that share a camera
+share the same FrameBus — the bus fans frames out to each task's queue.
+
 Routes registered in app.py:
-    POST /detection/setup           → configure pipeline services
-    POST /detection/start           → start cameras
-    POST /detection/stop            → stop cameras
-    GET  /detection/status          → current status of all cameras
-    GET  /detection/stream/{cam_id} → SSE stream per camera
+    POST /detection/start   → start all (or one) camera
+    POST /detection/stop    → stop all (or one) camera
+    GET  /detection/status  → current status of all cameras
+    GET  /detection/stream  → SSE stream of crossing events
 """
 
 import multiprocessing
-from typing import Dict, Optional, Callable, List
+from collections import defaultdict
+from typing import Dict, Optional
 
-from pydantic import BaseModel
+from fastapi import HTTPException
 
 from apis.base import BaseResource
 from apis.cameras import camera_registry
-from schemas import DetectionStatus, CameraStatus
-from error_codes.error_codes import ErrorCode
-from error_codes.response import success, error
+from apis.tasks import task_registry
+from schemas import DetectionRequest, DetectionStatus, CameraStatus
 
 
-# ─────────────────────────────────────────────
-# Setup schema
-# ─────────────────────────────────────────────
-class DetectionSetupRequest(BaseModel):
-    pipeline: List[str]
-
-
-# ─────────────────────────────────────────────
-# Detection resource
-# ─────────────────────────────────────────────
 class DetectionResource(BaseResource):
     def __init__(self):
         super().__init__()
+        self.class_instance = {
+            "start"   : self._start,
+            "stop"    : self._stop,
+            "stop_all": self._stop_all,
+        }
         self._manager        = multiprocessing.Manager()
         self._shared_state   = self._manager.dict()
-        self._result_queues  : Dict[str, any] = {}
-        self._processes      : Dict[str, multiprocessing.Process] = {}
-        self._stop_events    : Dict[str, multiprocessing.Event]   = {}
-        self._pipeline_fn    : Optional[Callable] = None
-        self._pipeline_names : List[str] = []
+        self._result_queue   = self._manager.Queue()
 
-    def set_pipeline(self, fn: Callable):
-        self._pipeline_fn = fn
+        # Keyed by camera_id (str of channelId)
+        self._bus_processes  : Dict[str, multiprocessing.Process]            = {}
+        self._task_processes : Dict[str, Dict[str, multiprocessing.Process]] = {}
+        self._stop_events    : Dict[str, object]                             = {}
 
-    # ── Action dispatcher ─────────────────────
+    # ── Status ───────────────────────────────────────────────────────────────
 
-    def on_post(self, action: str, camera_id: str = None):
-        actions = {
-            "start"   : self.on_start,
-            "stop"    : self.on_stop,
-        }
-        if action not in actions:
-            return error(ErrorCode.INTERNAL_ERROR, detail=f"Unknown action '{action}'.")
-        return actions[action](camera_id)
-
-    # ── Setup ────────────────────────────────
-
-    def on_setup(self, req: DetectionSetupRequest):
-        from services import REGISTRY
-        unknown = [n for n in req.pipeline if n not in REGISTRY]
-        if unknown:
-            return error(ErrorCode.UNKNOWN_SERVICE, detail=str(unknown))
-        self._pipeline_names = req.pipeline
-        return success({
-            "status"  : "configured",
-            "pipeline": self._pipeline_names,
-        })
-
-    # ── Status ───────────────────────────────
+    def on_post(self, req: DetectionRequest):
+        return self.get_service(req.action)(req.camera_id)
 
     def on_get(self):
         return DetectionStatus(cameras={
@@ -79,80 +58,127 @@ class DetectionResource(BaseResource):
             for cam_id, cam_state in self._shared_state.items()
         })
 
-    # ── Start ────────────────────────────────
+    # ── Start ─────────────────────────────────────────────────────────────────
 
-    def on_start(self, camera_id: Optional[str] = None):
-        if self._pipeline_fn is None:
-            return error(ErrorCode.PIPELINE_NOT_SET)
+    def _start(self, camera_id: Optional[str] = None):
+        from task_worker import run_task_worker
 
-        if not self._pipeline_names:
-            return error(ErrorCode.PIPELINE_NOT_CONFIGURED)
-
+        tasks   = task_registry.get_enabled()
         cameras = camera_registry.all()
+
+        if not tasks:
+            raise HTTPException(
+                status_code=400,
+                detail="No enabled tasks configured. Call POST /api/tasks first."
+            )
         if not cameras:
-            return error(ErrorCode.NO_CAMERAS_CONFIGURED)
+            raise HTTPException(
+                status_code=400,
+                detail="No cameras configured. Call POST /cameras first."
+            )
 
-        targets = [camera_id] if camera_id else list(cameras.keys())
-        started = []
+        # Optionally filter to a single camera
+        if camera_id:
+            tasks = [t for t in tasks if str(t["channelId"]) == str(camera_id)]
+            if not tasks:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No enabled tasks found for camera '{camera_id}'."
+                )
 
-        for cam_id in targets:
-            if cam_id not in cameras:
-                return error(ErrorCode.CAMERA_NOT_FOUND, detail=cam_id)
-            if cam_id in self._processes and self._processes[cam_id].is_alive():
-                return error(ErrorCode.CAMERA_ALREADY_RUNNING, detail=cam_id)
+        # Group tasks by channelId — one FrameBus per camera
+        channel_tasks: Dict[str, list] = defaultdict(list)
+        for task in tasks:
+            channel_tasks[str(task["channelId"])].append(task)
 
-            self._result_queues[cam_id] = self._manager.Queue()
-            stop_event = self._manager.Event()
-            process    = multiprocessing.Process(
-                target=self._pipeline_fn,
-                args=(
-                    cam_id,
-                    cameras[cam_id],
-                    self._shared_state,
-                    stop_event,
-                    self._result_queues[cam_id],
-                    self._pipeline_names,
-                ),
+        started_cameras = []
+        started_tasks   = []
+
+        for chan_id, chan_tasks in channel_tasks.items():
+            if chan_id not in cameras:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No camera registered for channelId '{chan_id}'. "
+                           f"Register it via POST /cameras with id='{chan_id}'."
+                )
+            if chan_id in self._bus_processes and self._bus_processes[chan_id].is_alive():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Camera '{chan_id}' is already running."
+                )
+
+            stop_event  = self._manager.Event()
+            task_queues = {}
+
+            # One task worker process per task
+            self._task_processes.setdefault(chan_id, {})
+            for task_cfg in chan_tasks:
+                task_id = str(task_cfg["taskId"])
+                q = self._manager.Queue(maxsize=10)
+                task_queues[task_id] = q
+
+                p = multiprocessing.Process(
+                    target=run_task_worker,
+                    args=(chan_id, task_cfg, q, self._result_queue, stop_event),
+                    daemon=True,
+                )
+                self._task_processes[chan_id][task_id] = p
+                p.start()
+                started_tasks.append(task_id)
+
+            # One FrameBus per camera — fans frames out to all task queues
+            bus = multiprocessing.Process(
+                target=_run_frame_bus,
+                args=(chan_id, cameras[chan_id], self._shared_state, stop_event, task_queues),
                 daemon=True,
             )
-            self._stop_events[cam_id] = stop_event
-            self._processes[cam_id]   = process
-            process.start()
-            started.append(cam_id)
+            self._bus_processes[chan_id] = bus
+            self._stop_events[chan_id]   = stop_event
+            bus.start()
+            started_cameras.append(chan_id)
 
-        return success({
+        return {
             "status" : "started",
-            "cameras": started,
-        })
+            "cameras": started_cameras,
+            "tasks"  : started_tasks,
+        }
 
-    # ── Stop ─────────────────────────────────
+    # ── Stop ──────────────────────────────────────────────────────────────────
 
-    def on_stop(self, camera_id: Optional[str] = None):
-        running = {k: v for k, v in self._processes.items() if v.is_alive()}
+    def _stop(self, camera_id: Optional[str] = None):
+        running = {k: v for k, v in self._bus_processes.items() if v.is_alive()}
         if not running:
-            return error(ErrorCode.NO_CAMERAS_RUNNING)
+            raise HTTPException(status_code=409, detail="No cameras are currently running.")
 
         targets = [camera_id] if camera_id else list(running.keys())
         stopped = []
 
         for cam_id in targets:
-            if cam_id not in self._processes or not self._processes[cam_id].is_alive():
-                return error(ErrorCode.NO_CAMERAS_RUNNING, detail=cam_id)
+            if cam_id not in self._bus_processes or not self._bus_processes[cam_id].is_alive():
+                raise HTTPException(status_code=409, detail=f"Camera '{cam_id}' is not running.")
             self._stop_events[cam_id].set()
-            self._processes[cam_id].join(timeout=5)
+            self._bus_processes[cam_id].join(timeout=5)
+            for p in self._task_processes.get(cam_id, {}).values():
+                p.join(timeout=5)
             stopped.append(cam_id)
 
-        return success({
-            "status" : "stopped",
-            "cameras": stopped,
-        })
+        return {"status": "stopped", "cameras": stopped}
 
-    # ── Stream ───────────────────────────────
+    def _stop_all(self, _=None):
+        return self._stop(None)
 
-    def get_result_queue(self, cam_id: str):
-        if cam_id not in self._result_queues:
-            return None, ErrorCode.STREAM_CAMERA_NOT_FOUND
-        return self._result_queues[cam_id], None
+    # ── SSE ───────────────────────────────────────────────────────────────────
+
+    def result_queue(self):
+        return self._result_queue
+
+
+# ─────────────────────────────────────────────
+# Top-level picklable entry for the FrameBus process
+# ─────────────────────────────────────────────
+def _run_frame_bus(camera_id, rtsp_url, shared_state, stop_event, task_queues):
+    from frame_bus import FrameBus
+    FrameBus(camera_id, rtsp_url, shared_state, stop_event, task_queues).run()
 
 
 # ── Singleton ─────────────────────────────────
