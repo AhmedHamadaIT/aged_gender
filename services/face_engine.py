@@ -89,7 +89,8 @@ class FaceEngine:
         self._app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size))
         self._face_counter = 0
 
-        print(f"[FaceEngine] Ready — models: {[m.taskname for m in self._app.models]}")
+        loaded_models = list(self._app.models.keys()) if isinstance(self._app.models, dict) else [getattr(m, "taskname", str(m)) for m in self._app.models]
+        print(f"[FaceEngine] Ready — models: {loaded_models}")
 
     def detect_and_embed(
         self,
