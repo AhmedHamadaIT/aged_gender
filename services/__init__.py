@@ -23,6 +23,7 @@ from .mask_hairnet_chef_hat import MaskHairnetChefHatTask
 from .cashier import CashierService, CashierDrawerTask
 from .phone       import PhoneService
 from .phone_usage import PhoneUsageTask
+from .face_recognition      import FaceRecognitionTask
 
 # Simple per-frame services (used by FrameBus internals and legacy code)
 REGISTRY = {
@@ -40,4 +41,6 @@ TASK_REGISTRY = {
     "MASK_HAIRNET_CHEF_HAT": MaskHairnetChefHatTask,
     "CASHIER_BOX_OPEN"     : CashierDrawerTask,
     "PHONE_USAGE"          : PhoneUsageTask,
+    "FACE"                 : FaceRecognitionTask,
 }
+
