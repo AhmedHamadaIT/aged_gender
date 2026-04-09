@@ -13,10 +13,8 @@ Endpoints (registered in app.py):
 """
 
 from typing import Dict, Optional
+from fastapi import HTTPException
 from pydantic import BaseModel
-
-from error_codes.error_codes import ErrorCode
-from error_codes.response import success, error
 
 
 # ─────────────────────────────────────────────
@@ -36,16 +34,15 @@ class CameraSetupRequest(BaseModel):
 # ─────────────────────────────────────────────
 class CameraRegistry:
     def __init__(self):
-        self._cameras: Dict[str, str] = {}
+        self._cameras: Dict[str, str] = {}  # {cam_id: rtsp_url}
 
     def add(self, cam_id: str, url: str):
         self._cameras[cam_id] = url
 
     def remove(self, cam_id: str):
         if cam_id not in self._cameras:
-            return False
+            raise HTTPException(status_code=404, detail=f"Camera '{cam_id}' not found.")
         del self._cameras[cam_id]
-        return True
 
     def get(self, cam_id: str) -> Optional[str]:
         return self._cameras.get(cam_id)
@@ -59,25 +56,24 @@ class CameraRegistry:
     def on_post(self, req: CameraSetupRequest):
         for cam in req.cameras:
             self.add(cam.id, cam.url)
-        return success({
+        return {
             "status" : "configured",
             "cameras": self.all(),
-        })
+        }
 
     def on_get(self):
-        return success({
+        return {
             "count"  : len(self._cameras),
             "cameras": [{"id": k, "url": v} for k, v in self._cameras.items()],
-        })
+        }
 
     def on_delete(self, cam_id: str):
-        if not self.remove(cam_id):
-            return error(ErrorCode.CAMERA_NOT_FOUND, detail=cam_id)
-        return success({
-            "status"   : "removed",
+        self.remove(cam_id)
+        return {
+            "status"  : "removed",
             "camera_id": cam_id,
             "remaining": self.ids(),
-        })
+        }
 
 
 # ── Singleton ─────────────────────────────────

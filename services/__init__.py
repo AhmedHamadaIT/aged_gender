@@ -18,7 +18,8 @@ from .detector   import DetectorService
 from .age_gender import AgeGenderService
 from .ppe        import PPEService
 from .mood       import MoodService
-from .cashier    import CashierService
+from .cross_line            import CrossLineTask
+from .mask_hairnet_chef_hat import MaskHairnetChefHatTask
 
 # Simple per-frame services (used by FrameBus internals and legacy code)
 REGISTRY = {
@@ -26,7 +27,10 @@ REGISTRY = {
     "age_gender": AgeGenderService,
     "ppe"       : PPEService,
     "mood"      : MoodService,
-    "cashier"   : CashierService,
-    # "counter" : CounterService,
-    # "tracker" : TrackerService,
+}
+
+# Full task classes — keyed by algorithmType string from task config
+TASK_REGISTRY = {
+    "CROSS_LINE"          : CrossLineTask,
+    "MASK_HAIRNET_CHEF_HAT": MaskHairnetChefHatTask,
 }

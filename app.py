@@ -1,16 +1,29 @@
 """
 app.py
 ------
-Application entry point.
-Owns all routes, startup, and pipeline composition.
+Application entry point — owns all routes and startup.
 
-Typical usage from a web app:
-    1. POST /cameras               → configure cameras
-    2. POST /detection/setup       → configure pipeline services
-    3. POST /detection/start       → start pipeline
-    4. GET  /detection/stream/{id} → SSE stream per camera (parallel)
-    5. GET  /detection/status      → monitor camera status
-    6. POST /detection/stop        → stop pipeline
+Workflow:
+    1. POST /cameras                  → register cameras (id → rtsp_url)
+    2. POST /api/tasks                → register tasks (algorithmType, channelId, config)
+    3. POST /detection/start          → start processing
+    4. GET  /detection/stream         → SSE stream of crossing events
+    5. GET  /detection/status         → monitor camera status
+    6. POST /detection/stop           → stop processing
+
+SSE stream events (one per crossing, per task):
+{
+    "eventId"     : "...",
+    "eventType"   : "CROSS_LINE",
+    "timestamp"   : 1774310401528,
+    "timestampUTC": "2026-04-02T...",
+    "taskId"      : 13,
+    "taskName"    : "customer_walkin_main",
+    "channelId"   : 4,
+    "line"        : {"id": "1", "name": "Entrance", "direction": 1},
+    "person"      : {"trackingId", "reidFeature", "boundingBox", "attributes", "confidence"},
+    "evidence"    : {"captureImage": "...", "sceneImage": "..."}
+}
 
 Run with:
     uvicorn app:app --host 0.0.0.0 --port 9000
@@ -22,39 +35,12 @@ import json
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-from apis.cameras import camera_registry, CameraSetupRequest
-from apis.test_responses import get_test_responses
-from apis.detection import detection, DetectionSetupRequest
-from apis.cashier import router as cashier_router
-from error_codes.response import error
-from pipeline import CameraPipeline
-from schemas import DetectionStatus
+from apis.cameras   import camera_registry, CameraSetupRequest
+from apis.detection import detection
+from apis.tasks     import task_registry, TaskConfig
+from schemas        import DetectionRequest, DetectionStatus
 
-app = FastAPI(title="Vision Pipeline API", version="1.0.0")
-app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
-
-
-# ─────────────────────────────────────────────
-# Pipeline factory — called once per camera process on start
-# ─────────────────────────────────────────────
-def build_pipeline(camera_id, rtsp_url, shared_state, stop_event, result_queue, pipeline_names):
-    from services import REGISTRY
-    cam_pipeline = CameraPipeline(
-        camera_id, rtsp_url, shared_state, stop_event, result_queue, pipeline_names
-    )
-    for name in pipeline_names:
-        cam_pipeline.register(REGISTRY[name])
-    cam_pipeline.run()
-
-
-# ─────────────────────────────────────────────
-# Startup
-# ─────────────────────────────────────────────
-@app.on_event("startup")
-def startup():
-    print("[APP] Configuring pipeline...")
-    detection.set_pipeline(build_pipeline)
-    print("[APP] Ready.")
+app = FastAPI(title="Vision Pipeline API", version="2.0.0")
 
 
 # ─────────────────────────────────────────────
@@ -116,12 +102,13 @@ def task_delete(task_id: int):
 # ─────────────────────────────────────────────
 @app.post("/detection/start")
 def detection_start(camera_id: str = None):
-    return detection.on_post("start", camera_id)
+    return detection.on_post(DetectionRequest(action="start", camera_id=camera_id))
 
 
 @app.post("/detection/stop")
 def detection_stop(camera_id: str = None):
-    return detection.on_post("stop", camera_id)
+    action = "stop_all" if not camera_id else "stop"
+    return detection.on_post(DetectionRequest(action=action, camera_id=camera_id))
 
 
 @app.get("/detection/status", response_model=DetectionStatus)
@@ -129,34 +116,13 @@ def detection_status():
     return detection.on_get()
 
 
-# ─────────────────────────────────────────────
-# Test route — remove in production
-# ─────────────────────────────────────────────
-@app.get("/test/responses")
-def test_responses():
-    return get_test_responses()
-
-
-@app.get("/detection/stream/{cam_id}")
-async def detection_stream(cam_id: str):
+@app.get("/detection/stream")
+async def detection_stream():
     """
-    SSE stream per camera. Open one connection per camera for parallel streaming.
-
-    Each event:
-    {
-        "camera_id"  : "cam1",
-        "frame_count": 42,
-        "timestamp"  : "2026-03-08T11:29:47.123456",
-        "frame"      : "<base64 JPEG>",
-        "data": {
-            "detection": {"count": 2, "items": [...]},
-            "use_case" : {"age_gender": [...]}
-        }
-    }
+    SSE stream — emits one JSON event per line crossing detected across all cameras.
+    Events are also persisted locally (JSONL + images) by each task worker.
     """
-    result_queue, err = detection.get_result_queue(cam_id)
-    if err:
-        return error(err, detail=cam_id)
+    result_queue = detection.result_queue()
 
     async def event_generator():
         while True:
