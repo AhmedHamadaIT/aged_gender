@@ -40,16 +40,6 @@ class ErrorCode(Enum):
     PIPELINE_NOT_SET        = 501, "Pipeline factory not set."
     INTERNAL_ERROR          = 502, "Internal server error."
 
-    # 6xx Face Recognition
-    FACE_LIB_NOT_FOUND      = 601, "Face library not found."
-    FACE_PERSON_NOT_FOUND   = 602, "Person not found in face library."
-    FACE_NO_FACE_DETECTED   = 603, "No face detected in the provided image."
-    FACE_TASK_NOT_FOUND     = 604, "Face task not found."
-    FACE_LIB_ALREADY_EXISTS = 605, "Face library with this ID already exists."
-    FACE_INVALID_IMAGE      = 606, "Invalid or unreadable image."
-    FACE_MODEL_LOAD_ERROR   = 607, "Failed to load face recognition model."
-    FACE_STORE_ERROR        = 608, "Face store operation failed."
-
     def __init__(self, code: int, message: str):
         self.code    = code
         self.message = message

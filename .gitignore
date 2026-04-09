@@ -57,9 +57,6 @@ runs/
 wandb/
 *.engine
 
-# Face
-data/
-
 # YOLOv8n weights (often large; use models/ or env YOLO_MODEL)
 yolov8n.pt
 yolov8n.onnx
@@ -73,5 +70,3 @@ test_*.py
 test_results/
 test_results.log
 README_CASHIER_TESTING.md
-
-
