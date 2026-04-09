@@ -20,7 +20,8 @@ from .ppe        import PPEService
 from .mood       import MoodService
 from .cross_line            import CrossLineTask
 from .mask_hairnet_chef_hat import MaskHairnetChefHatTask
-from .reid import ReIDService
+from .person_search import PersonSearchTask
+from .semantic_search import SemanticSearchTask
 
 # Simple per-frame services (used by FrameBus internals and legacy code)
 REGISTRY = {
@@ -28,7 +29,8 @@ REGISTRY = {
     "age_gender": AgeGenderService,
     "ppe"       : PPEService,
     "mood"      : MoodService,
-    "reid"      : ReIDService,
+    "person_search"      : PersonSearchTask,
+    "semantic_search"     : SemanticSearchTask,
 }
 
 # Full task classes — keyed by algorithmType string from task config
