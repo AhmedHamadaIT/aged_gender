@@ -67,10 +67,12 @@ SAVE_OUTPUT              : annotate + save frames   default: True
 
 Integration envelope (spec §4 ``data`` block), optional env:
 
-CASHIER_CLOUD_IMAGE_BASE : prefix for captureUrl/sceneUrl (both if capture/scene unset)
-CASHIER_CAPTURE_URL_BASE : override captureUrl base only
-CASHIER_SCENE_URL_BASE   : override sceneUrl base only
-CASHIER_DEVICE_SN        : deviceSN in ``data`` (else DEVICE_SN, else UNKNOWN)
+CASHIER_CLOUD_IMAGE_BASE : primary base for both captureUrl and sceneUrl when set
+CASHIER_CAPTURE_URL_BASE : captureUrl base if cloud base unset
+CASHIER_SCENE_URL_BASE   : sceneUrl base if cloud base unset
+CASHIER_FORCE_LOCAL_URLS : if truthy and a base is still empty, use file:///local/storage/images/
+CASHIER_COMPACT_PERSON_STRUCTURAL : if truthy, keep ``data.personStructural`` as one-line JSON (default: pretty ``indent=2``)
+CASHIER_DEVICE_SN        : deviceSN in ``data`` (else DEVICE_SN, else HOSTNAME, else UNKNOWN)
 CASHIER_CHANNEL_NAME     : channelName if not in config task
 
 CASHIER_DISABLE_DRAWER_TOTAL_PERSIST : set 1 to skip JSON persistence (RAM-only total)
@@ -147,6 +149,23 @@ ZONE_OUTSIDE  = "OUTSIDE"
 SEVERITY_NORMAL   = "NORMAL"
 SEVERITY_ALERT    = "ALERT"
 SEVERITY_CRITICAL = "CRITICAL"
+
+# personStructural / integration case_level (distinct from internal SEVERITY_* strings)
+CASE_LEVEL_INFO     = "INFO"
+CASE_LEVEL_WARNING  = "WARNING"
+CASE_LEVEL_CRITICAL = "CRITICAL"
+
+
+def _severity_to_case_level(severity: str) -> str:
+    """Map internal severity to personStructural.case_level vocabulary."""
+    if severity == SEVERITY_NORMAL:
+        return CASE_LEVEL_INFO
+    if severity == SEVERITY_ALERT:
+        return CASE_LEVEL_WARNING
+    if severity == SEVERITY_CRITICAL:
+        return CASE_LEVEL_CRITICAL
+    return CASE_LEVEL_INFO
+
 
 # ─────────────────────────────────────────────
 # Draw colours (BGR)
@@ -400,11 +419,26 @@ class CashierResult:
         return out
 
 
+def _env_truthy(name: str) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
 def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
     """
     Build the backend ``data`` object (algorithmType, captureId, personStructural, …).
-    URLs are optional; set CASHIER_CLOUD_IMAGE_BASE or per-field *_URL_BASE env vars.
-    GIF / frame-save logic is unchanged — this only shapes JSON for consumers.
+
+    URL bases: ``CASHIER_CLOUD_IMAGE_BASE`` first (both fields); if unset, use
+    ``CASHIER_CAPTURE_URL_BASE`` and ``CASHIER_SCENE_URL_BASE`` independently.
+    If ``CASHIER_FORCE_LOCAL_URLS`` is set and a side still has no base, use
+    ``file:///local/storage/images`` for that side.
+
+    ``personStructural``: pretty-printed JSON (``indent=2``, multi-line string) by
+    default to match integration log shape; set ``CASHIER_COMPACT_PERSON_STRUCTURAL``
+    for a single-line compact string. ``id`` matches the capture UUID (32-char hex,
+    same as in ``captureId`` without dashes).
     """
     meta = result.task_meta if isinstance(result.task_meta, dict) else {}
 
@@ -450,31 +484,73 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
         device_sn = (
             os.getenv("CASHIER_DEVICE_SN")
             or os.getenv("DEVICE_SN")
+            or os.getenv("HOSTNAME")
             or "UNKNOWN"
         )
 
     algo = _pick_str("algorithmType", "algorithm_type") or ALGORITHM_TYPE
-    capture_id = f"CASHIER_BOX_OPEN_{uuid.uuid4()}.jpg"
-    scene_id = f"CASHIER_BOX_OPEN_{uuid.uuid4()}.jpg"
+    cap_uuid = uuid.uuid4()
+    scene_uuid = uuid.uuid4()
+    capture_id = f"CASHIER_BOX_OPEN_{cap_uuid}.jpg"
+    scene_id = f"CASHIER_BOX_OPEN_{scene_uuid}.jpg"
+    correlation_id = cap_uuid.hex
 
     now = datetime.now(timezone.utc)
     record_ms = int(now.timestamp() * 1000)
     date_utc = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
-    cap_base = (
-        os.getenv("CASHIER_CAPTURE_URL_BASE")
-        or os.getenv("CASHIER_CLOUD_IMAGE_BASE")
-        or ""
-    ).rstrip("/")
-    scene_base = (
-        os.getenv("CASHIER_SCENE_URL_BASE")
-        or os.getenv("CASHIER_CLOUD_IMAGE_BASE")
-        or ""
-    ).rstrip("/")
+    cloud = (os.getenv("CASHIER_CLOUD_IMAGE_BASE") or "").strip().rstrip("/")
+    if cloud:
+        cap_base = cloud
+        scene_base = cloud
+    else:
+        cap_base = (os.getenv("CASHIER_CAPTURE_URL_BASE") or "").strip().rstrip("/")
+        scene_base = (os.getenv("CASHIER_SCENE_URL_BASE") or "").strip().rstrip("/")
+
+    local_fallback = "file:///local/storage/images"
+    if _env_truthy("CASHIER_FORCE_LOCAL_URLS"):
+        if not cap_base:
+            cap_base = local_fallback
+        if not scene_base:
+            scene_base = local_fallback
+
     capture_url = f"{cap_base}/{capture_id}" if cap_base else ""
     scene_url = f"{scene_base}/{scene_id}" if scene_base else ""
 
-    ps = result.person_structural if result.person_structural is not None else "{}"
+    if not capture_url:
+        log.warning(
+            "build_cashier_spec_data: captureUrl is empty (set CASHIER_CLOUD_IMAGE_BASE, "
+            "CASHIER_CAPTURE_URL_BASE, or CASHIER_FORCE_LOCAL_URLS)"
+        )
+    if not scene_url:
+        log.warning(
+            "build_cashier_spec_data: sceneUrl is empty (set CASHIER_CLOUD_IMAGE_BASE, "
+            "CASHIER_SCENE_URL_BASE, or CASHIER_FORCE_LOCAL_URLS)"
+        )
+
+    ps_raw = result.person_structural if result.person_structural is not None else "{}"
+    compact_ps = _env_truthy("CASHIER_COMPACT_PERSON_STRUCTURAL")
+    if not compact_ps:
+        try:
+            ps = json.dumps(json.loads(ps_raw), indent=2, ensure_ascii=False)
+        except json.JSONDecodeError:
+            ps = ps_raw
+    else:
+        try:
+            ps = json.dumps(json.loads(ps_raw), separators=(",", ":"), ensure_ascii=False)
+        except json.JSONDecodeError:
+            ps = ps_raw
+
+    log.debug("build_cashier_spec_data: deviceSN final=%r", device_sn)
+    log.debug(
+        "build_cashier_spec_data: captureUrl=%r sceneUrl=%r",
+        capture_url,
+        scene_url,
+    )
+    log.debug(
+        "build_cashier_spec_data: personStructural compact=%s",
+        compact_ps,
+    )
 
     return {
         "algorithmType": algo,
@@ -483,7 +559,7 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
         "channelId": channel_id,
         "channelName": channel_name,
         "deviceSN": device_sn,
-        "id": uuid.uuid4().hex,
+        "id": correlation_id,
         "taskId": task_id_out,
         "taskName": _pick_str("taskName", "task_name"),
         "recordTime": record_ms,
@@ -495,6 +571,93 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
         "captureUrl": capture_url,
         "sceneUrl": scene_url,
     }
+
+
+def build_cashier_structured_event(
+    cashier_dict: Dict[str, Any],
+    task_config: Dict[str, Any],
+    camera_id: str,
+) -> Dict[str, Any]:
+    """
+    One canonical structured event per frame for SSE + JSONL (aligned with CROSS_LINE-style task events).
+
+    Top-level keys support ``GET /detection/stream`` filters (eventType, taskId, channelId, taskName).
+    The Eyego-style payload lives under ``data`` exactly as in ``CashierResult.to_dict()`` / spec §4.
+    """
+    summary = cashier_dict.get("summary") if isinstance(cashier_dict.get("summary"), dict) else {}
+    data = cashier_dict.get("data")
+    if not isinstance(data, dict):
+        data = {}
+
+    case_id = cashier_dict.get("case_id") or summary.get("case_id", "N1")
+    severity = cashier_dict.get("severity") or summary.get("severity", SEVERITY_NORMAL)
+
+    now_ms = int(time.time() * 1000)
+    ts_utc = (
+        datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    event_id = hashlib.md5(
+        f"{task_config.get('taskId', 0)}_{camera_id}_{summary.get('frame_id', 0)}_{now_ms}".encode()
+    ).hexdigest()
+
+    tid = task_config.get("taskId")
+    try:
+        task_id_out: Any = int(tid) if tid is not None and str(tid).strip() != "" else None
+    except (TypeError, ValueError):
+        task_id_out = None
+
+    ch = data.get("channelId")
+    if ch is None and task_config.get("channelId") is not None:
+        try:
+            ch = int(task_config["channelId"])
+        except (TypeError, ValueError):
+            ch = None
+
+    event: Dict[str, Any] = {
+        "eventId"     : event_id,
+        "eventType"   : ALGORITHM_TYPE,
+        "timestamp"   : now_ms,
+        "timestampUTC": ts_utc,
+        "taskId"      : task_id_out,
+        "taskName"    : str(task_config.get("taskName", "") or ""),
+        "channelId"   : ch,
+        "camera_id"   : camera_id,
+        "case_id"     : case_id,
+        "severity"    : severity,
+        "data"        : data,
+    }
+
+    ev_path = summary.get("evidence_path")
+    if ev_path:
+        event["evidence"] = {
+            "captureImage": ev_path,
+            "sceneImage"  : ev_path,
+        }
+
+    txn = bool(summary.get("transaction", False))
+    if txn:
+        event["transaction"] = True
+
+    return event
+
+
+class _CashierTaskJsonlWriter:
+    """Append one JSON line per frame under EVENTS_DIR/task_<taskId>.jsonl (CROSS_LINE-style)."""
+
+    def __init__(self, task_id: int):
+        self._task_id = int(task_id)
+        base = os.getenv("EVENTS_DIR", "/local/storage/events")
+        os.makedirs(base, exist_ok=True)
+        self._path = os.path.join(base, f"task_{self._task_id}.jsonl")
+        self._lock = threading.Lock()
+
+    def append(self, event: Dict[str, Any]) -> None:
+        line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
+        with self._lock:
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
 
 # ─────────────────────────────────────────────
@@ -534,7 +697,7 @@ class _EvidenceWriter:
         with self._lock:
             cv2.imwrite(str(img_path), frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
             meta_path.write_text(json.dumps({**meta, "saved_at": ts}, indent=2))
-        log.info("[CASHIER] Frame saved → %s", img_path)
+        log.debug("[CASHIER] Frame saved → %s", img_path)
         return str(img_path)
 
     def append_log(self, record: Dict) -> None:
@@ -553,7 +716,7 @@ class _EvidenceWriter:
             ts       = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
             new_name = self._log_path.with_name(f"events.{ts}.jsonl")
             self._log_path.rename(new_name)
-            log.info("[CASHIER] Log rotated → %s", new_name)
+            log.debug("[CASHIER] Log rotated → %s", new_name)
 
     def compile_gif(
         self,
@@ -592,7 +755,7 @@ class _EvidenceWriter:
 
             if rgb_frames:
                 imageio.mimsave(str(gif_path), rgb_frames, fps=fps, loop=0)
-                log.info("[CASHIER] GIF saved → %s (%d frames)", gif_path, len(rgb_frames))
+                log.debug("[CASHIER] GIF saved → %s (%d frames)", gif_path, len(rgb_frames))
                 return str(gif_path), str(thumb_path)
         except Exception as exc:
             log.warning("[CASHIER] GIF generation failed: %s", exc)
@@ -1066,10 +1229,6 @@ class CashierService:
         if drawer_open and cash_any and cz.persons == 0:
             msg = "A3 CRITICAL: Cash + open drawer — register unguarded"
             alerts.append(msg)
-            log.critical(
-                "[CASHIER] %s | drawers=%d cash_cz=%d cash_kz=%d",
-                msg, cz.drawers, cz.cash, kz.cash,
-            )
             return ret("A3", SEVERITY_CRITICAL, alerts, False)
 
         # Row 2 — A4 (spec: non-staff + open drawer + cash), or legacy IoU when staff list off
@@ -1078,10 +1237,6 @@ class CashierService:
                 if unauthorized_in_cz:
                     msg = "A4 CRITICAL: Unauthorised person at open register with cash"
                     alerts.append(msg)
-                    log.critical(
-                        "[CASHIER] %s | persons_cz=%d drawers=%d",
-                        msg, cz.persons, cz.drawers,
-                    )
                     return ret("A4", SEVERITY_CRITICAL, alerts, False)
             else:
                 # Legacy: cash present but no person↔drawer proximity (staff may lack overlap)
@@ -1091,38 +1246,30 @@ class CashierService:
                 ):
                     msg = "A4 CRITICAL: Unauthorised person at open register with cash"
                     alerts.append(msg)
-                    log.critical(
-                        "[CASHIER] %s | persons_cz=%d drawers=%d (IoU fallback)",
-                        msg, cz.persons, cz.drawers,
-                    )
                     return ret("A4", SEVERITY_CRITICAL, alerts, False)
 
         # Row 3 — A1 elevated (CRITICAL)
         if cz.persons == 0 and kz.persons >= 1 and drawer_open and cash_zero:
             msg = "A1 CRITICAL: Unattended open drawer — customer present"
             alerts.append(msg)
-            log.warning("[CASHIER] %s | drawers=%d", msg, cz.drawers)
             return ret("A1", SEVERITY_CRITICAL, alerts, False)
 
         # Row 4 — A1 ALERT
         if cz.persons == 0 and drawer_open and cash_zero:
             msg = "A1 ALERT: Unattended open drawer"
             alerts.append(msg)
-            log.warning("[CASHIER] %s | drawers=%d", msg, cz.drawers)
             return ret("A1", SEVERITY_ALERT, alerts, False)
 
         # Row 5 — A2
         if unauthorized_in_cz:
             msg = "A2 ALERT: Unexpected person in cashier zone"
             alerts.append(msg)
-            log.warning("[CASHIER] %s | persons_cz=%d", msg, cz.persons)
             return ret("A2", SEVERITY_ALERT, alerts, False)
 
         # Row 6 — A7
         if cz.persons == 0 and not drawer_open and kz.cash >= 1:
             msg = "A7 ALERT: Cash in customer zone — no cashier present"
             alerts.append(msg)
-            log.warning("[CASHIER] %s | cash_kz=%d", msg, kz.cash)
             return ret("A7", SEVERITY_ALERT, alerts, False)
 
         # Row 7 — A5
@@ -1135,7 +1282,6 @@ class CashierService:
         ):
             msg = f"A5 ALERT: Customer waiting {wait_elapsed:.0f}s — no cashier present"
             alerts.append(msg)
-            log.warning("[CASHIER] %s", msg)
             return ret("A5", SEVERITY_ALERT, alerts, False)
 
         # Row 8 — A6 (authorized CZ staff only; unauthorized handled by A2)
@@ -1146,7 +1292,6 @@ class CashierService:
         ):
             msg = f"A6 ALERT: Drawer open {drawer_elapsed:.0f}s (limit {self._drawer_max:.0f}s)"
             alerts.append(msg)
-            log.warning("[CASHIER] %s", msg)
             return ret("A6", SEVERITY_ALERT, alerts, False)
 
         # Row 9 — N4
@@ -1156,7 +1301,6 @@ class CashierService:
             and self._all_nearby(cz.person_bboxes, cz.drawer_bboxes)
         ):
             alerts.append("N4 EVENT: Staff handover / supervisor at register")
-            log.info("[CASHIER] N4 | cashier_persons=%d", cz.persons)
             return ret("N4", SEVERITY_NORMAL, alerts, False)
 
         # Row 10 — N3
@@ -1168,10 +1312,6 @@ class CashierService:
             and self._nearby(cz.person_bboxes, cz.drawer_bboxes)
         ):
             alerts.append("N3 EVENT: Transaction in progress")
-            log.info(
-                "[CASHIER] N3 | cashier=%d drawer=%d customer=%d",
-                cz.persons, cz.drawers, kz.persons,
-            )
             return ret("N3", SEVERITY_NORMAL, alerts, True)
 
         # Row 11 — N6
@@ -1206,7 +1346,6 @@ class CashierService:
         if cz.persons >= 1 and not unauthorized_in_cz:
             msg = "A2 ALERT: Unexpected person in cashier zone"
             alerts.append(msg)
-            log.warning("[CASHIER] %s | persons_cz=%d (fallback)", msg, cz.persons)
             return ret("A2", SEVERITY_ALERT, alerts, False)
 
         return ret("N1", SEVERITY_NORMAL, [], False)
@@ -1282,7 +1421,7 @@ class CashierService:
                     except (TypeError, ValueError):
                         continue
                 self._total_drawer_open_duration_ms = out_d
-            log.info(
+            log.debug(
                 "[CASHIER] Loaded drawer totals: %d camera(s) count, %d duration map",
                 len(self._total_drawer_open_count),
                 len(self._total_drawer_open_duration_ms),
@@ -1373,7 +1512,7 @@ class CashierService:
         crit = severity == SEVERITY_CRITICAL
         body: Dict[str, Any] = {
             "case_matched": case_id,
-            "case_level": severity,
+            "case_level": _severity_to_case_level(severity),
             "alert_triggered": alert,
             "critical_triggered": crit,
             "total_open_count": int(total_open_count),
@@ -1392,9 +1531,10 @@ class CashierService:
                 },
             },
             "detections": detections_ps,
+            "drawer_open_duration_ms": int(drawer_ms)
+            if case_id in ("A1", "A3", "A4", "A6")
+            else 0,
         }
-        if case_id in ("A1", "A3", "A4", "A6") and drawer_ms > 0:
-            body["drawer_open_duration_ms"] = drawer_ms
         if case_id == "A5" and wait_ms > 0:
             body["wait_duration_ms"] = wait_ms
         return json.dumps(body, separators=(",", ":"))
@@ -1485,7 +1625,6 @@ class CashierService:
             "meta"            : meta,
             "_long_warned"    : False,
         }
-        self._evidence.append_log({**meta, "status": "triggered"})
         log.debug("[CASHIER] Event started: %s cam=%s", case_id, camera_id)
 
     def _accumulate_post(
@@ -1501,7 +1640,7 @@ class CashierService:
 
         elapsed = now - float(ev["start_time"])
         if max_post is None and elapsed >= _CRITICAL_UNBOUND_WARN_SEC and not ev.get("_long_warned"):
-            log.warning(
+            log.debug(
                 "[CASHIER] Case %s event > %.0fs — unbounded post buffer (memory risk on edge)",
                 case_id,
                 _CRITICAL_UNBOUND_WARN_SEC,
@@ -1557,15 +1696,7 @@ class CashierService:
             quality=self._gif_quality,
         )
 
-        meta = event.get("meta", {})
-        self._evidence.append_log({
-            **meta,
-            "status"     : "resolved",
-            "duration_s" : event.get("duration_s"),
-            "resolved_at": event.get("resolved_at"),
-            "gif_path"   : gif_path,
-            "thumb_path" : thumb_path,
-        })
+        # GIF + thumbnail paths are persisted on disk; structured cashier events are task JSONL + SSE.
 
     # ─────────────────────────────────────────────
     # Annotation
@@ -1680,7 +1811,7 @@ class CashierService:
         ) = self._evaluate(cz, kz, now, unauthorized_in_cz)
 
         if os.getenv("CASHIER_DEBUG_ZONES", "").lower() in ("1", "true", "yes", "on"):
-            log.info(
+            log.debug(
                 "[CASHIER] zones | frame=%d | CZ P=%d D=%d C=%d | KZ P=%d D=%d C=%d | "
                 "case=%s | transaction=%s | alerts=%s",
                 frame_id,
@@ -1768,19 +1899,13 @@ class CashierService:
         elif case_id == "N3" and transaction:
             meta     = self._build_meta(camera_id, case_id, severity, alerts, cz, kz, frame_id)
             img_path = self._evidence.save_frame(annotated, case_id, meta, camera_id, self._gif_quality)
-            self._evidence.append_log({**meta, "status": "triggered"})
             result.frame_saved   = True
             result.evidence_path = img_path
 
         elif camera_id in self._active_events:
             self._accumulate_post(camera_id, case_id, annotated, now)
 
-        # 10. Publish to API state tracker
-        try:
-            from apis.cashier import push_result
-            push_result(camera_id, result.to_dict())
-        except Exception:
-            pass
+        # 10. API / structured events: CashierDrawerTask publishes after each frame (see below).
 
         # 11. Write cashier output to context (Hybrid schema)
         context["data"]["use_case"]["cashier"] = result.to_dict()
@@ -1813,6 +1938,11 @@ class CashierDrawerTask:
     def __init__(self, task_config: dict):
         self._task_config = task_config
         self._svc = CashierService(task_config=task_config)
+        try:
+            tid = int(task_config.get("taskId", 0))
+        except (TypeError, ValueError):
+            tid = 0
+        self._jsonl = _CashierTaskJsonlWriter(tid)
 
     def __call__(self, payload: Dict[str, Any]) -> List[Any]:
         if not self._task_config.get("enable", True):
@@ -1831,4 +1961,22 @@ class CashierDrawerTask:
             },
         }
         self._svc(context)
-        return []
+        cashier_dict = context.get("data", {}).get("use_case", {}).get("cashier")
+        if not isinstance(cashier_dict, dict):
+            return []
+
+        event = build_cashier_structured_event(cashier_dict, self._task_config, camera_id)
+        try:
+            self._jsonl.append(event)
+        except Exception:
+            pass
+
+        try:
+            from apis.cashier import push_structured_cashier_event, sse_publish
+
+            push_structured_cashier_event(camera_id, event)
+            sse_publish(camera_id, "frame", event)
+        except Exception:
+            pass
+
+        return [event]

@@ -26,6 +26,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,7 +118,7 @@ _sse_publisher = _SSEPublisher()
 
 
 def sse_publish(camera_id: str, event_type: str, payload: Dict[str, Any]) -> None:
-    """Public hook called directly by CashierService (no injection needed)."""
+    """Public hook called from ``CashierDrawerTask`` (worker thread) for ``/cashier/stream``."""
     _sse_publisher.publish(camera_id, event_type, payload)
 
 
@@ -125,24 +126,133 @@ router = APIRouter()
 
 
 # ─────────────────────────────────────────────
-# Internal hook — called from CashierService
+# Internal hooks — called from CashierDrawerTask / tests
 # ─────────────────────────────────────────────
+_CASHIER_EVENT_TYPE = "CASHIER_BOX_OPEN"
+
+
+def push_structured_cashier_event(camera_id: str, event: Dict[str, Any]) -> None:
+    """
+    Canonical cashier output: one structured event per processed frame.
+    Updates live status and appends to the in-memory event log (newest-first).
+    """
+    with _lock:
+        _last_result[camera_id] = {**event, "camera_id": camera_id}
+        _event_log.appendleft(
+            {
+                **event,
+                "camera_id": camera_id,
+                "logged_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+
+def _legacy_hybrid_to_structured(camera_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a CASHIER_BOX_OPEN structured event from pre-refactor test payloads."""
+    summ = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    case_id = result.get("case_id") or summ.get("case_id", "N1")
+    severity = result.get("severity") or summ.get("severity", "NORMAL")
+    cz = summ.get("cashier_zone") if isinstance(summ.get("cashier_zone"), dict) else {}
+    kz = summ.get("customer_zone") if isinstance(summ.get("customer_zone"), dict) else {}
+
+    def _lvl(sev: str) -> str:
+        if sev == "NORMAL":
+            return "INFO"
+        if sev == "ALERT":
+            return "WARNING"
+        return "CRITICAL"
+
+    ps_obj = {
+        "case_matched": case_id,
+        "case_level": _lvl(severity),
+        "alert_triggered": severity != "NORMAL",
+        "critical_triggered": severity == "CRITICAL",
+        "total_open_count": 0,
+        "total_open_duration_ms": 0,
+        "current_open_duration_ms": 0,
+        "zones": {
+            "cashier": {
+                "persons_count": int(cz.get("persons", 0)),
+                "drawers_count": int(cz.get("drawers", 0)),
+                "cash_count": int(cz.get("cash", 0)),
+                "unauthorized_present": False,
+            },
+            "customer": {
+                "persons_count": int(kz.get("persons", 0)),
+                "cash_count": int(kz.get("cash", 0)),
+            },
+        },
+        "detections": [],
+        "drawer_open_duration_ms": 0,
+    }
+    now_ms = int(time.time() * 1000)
+    date_utc = (
+        datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+        + "Z"
+    )
+    data = {
+        "algorithmType": _CASHIER_EVENT_TYPE,
+        "captureId": f"{_CASHIER_EVENT_TYPE}_{uuid.uuid4()}.jpg",
+        "sceneId": f"{_CASHIER_EVENT_TYPE}_{uuid.uuid4()}.jpg",
+        "channelId": None,
+        "channelName": "",
+        "deviceSN": "UNKNOWN",
+        "id": uuid.uuid4().hex,
+        "taskId": None,
+        "taskName": "",
+        "recordTime": now_ms,
+        "dateUTC": date_utc,
+        "total_open_count": 0,
+        "total_open_duration_ms": 0,
+        "current_open_duration_ms": 0,
+        "personStructural": json.dumps(ps_obj, separators=(",", ":")),
+        "captureUrl": "",
+        "sceneUrl": "",
+    }
+    return {
+        "eventId": uuid.uuid4().hex,
+        "eventType": _CASHIER_EVENT_TYPE,
+        "timestamp": now_ms,
+        "timestampUTC": date_utc,
+        "taskId": None,
+        "taskName": "",
+        "channelId": None,
+        "camera_id": camera_id,
+        "case_id": case_id,
+        "severity": severity,
+        "data": data,
+    }
+
+
 def push_result(camera_id: str, result: Dict[str, Any]) -> None:
     """
-    Called by CashierService every frame to keep the API state current.
-    Logged events must contain alerts or be a transaction.
+    Back-compat for tests and older callers.
+
+    If ``result`` is already a structured cashier event (``eventType`` + ``data``),
+    behaves like :func:`push_structured_cashier_event`.
+    Otherwise coerces legacy hybrid dicts into the structured shape; status is
+    always updated, but the event log only grows when there are alerts or a
+    transaction (previous behavior).
     """
+    if result.get("eventType") == _CASHIER_EVENT_TYPE and isinstance(result.get("data"), dict):
+        push_structured_cashier_event(camera_id, result)
+        return
+
     summ = result.get("summary") if isinstance(result.get("summary"), dict) else {}
     alerts = summ.get("alerts") or result.get("alerts") or []
     txn = bool(summ.get("transaction", result.get("transaction", False)))
+    event = _legacy_hybrid_to_structured(camera_id, result)
     with _lock:
-        _last_result[camera_id] = {**result, "camera_id": camera_id}
+        _last_result[camera_id] = {**event, "camera_id": camera_id}
         if alerts or txn:
-            _event_log.appendleft({
-                **result,
-                "camera_id": camera_id,
-                "logged_at": datetime.now(timezone.utc).isoformat(),
-            })
+            _event_log.appendleft(
+                {
+                    **event,
+                    "camera_id": camera_id,
+                    "logged_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
 
 # ─────────────────────────────────────────────
@@ -186,23 +296,23 @@ class ZoneConfigRequest(BaseModel):
 @router.get(
     "/status",
     summary="Live cashier status for all cameras",
-    response_description="Zone counts, current case and severity per camera",
+    response_description="Latest structured cashier event per camera (see data / case_id / severity)",
 )
 def get_status():
     """
-    Returns the latest processed frame result for every active camera.
+    Returns the latest structured cashier event per camera (same object as
+    ``GET /detection/stream`` bodies for ``CASHIER_BOX_OPEN``): top-level
+    ``eventType``, ``taskId``, ``case_id``, ``severity``, Eyego ``data`` block, etc.
 
-    Example response::
+    Example (fields abbreviated)::
 
         {
           "cam1": {
-            "camera_id"    : "cam1",
-            "case_id"      : "N3",
-            "severity"     : "NORMAL",
-            "alerts"       : ["N3 EVENT: Transaction in progress"],
-            "transaction"  : true,
-            "cashier_zone" : {"persons": 1, "drawers": 1, "cash": 0},
-            "customer_zone": {"persons": 1, "drawers": 0, "cash": 1}
+            "camera_id" : "cam1",
+            "eventType" : "CASHIER_BOX_OPEN",
+            "case_id"   : "N3",
+            "severity"  : "NORMAL",
+            "data"      : { "algorithmType": "CASHIER_BOX_OPEN", "personStructural": "..." }
           }
         }
     """
@@ -219,7 +329,9 @@ def get_events(
     offset   : int            = Query(0,   ge=0),
 ):
     """
-    Returns logged events (alerts and transactions) newest-first.
+    Returns structured cashier events (one per processed frame when the task worker
+    is running) newest-first. Legacy :func:`push_result` test payloads still append
+    only on alerts/transaction.
     Use ``offset`` + ``limit`` for pagination.
     """
     with _lock:
@@ -501,18 +613,25 @@ async def event_gif(camera_id: str, event_id: str):
     return FileResponse(str(f), media_type="image/gif")
 
 
-@router.get("/media/{camera_id}/drawer_count", summary="Lifetime drawer-open count from event log")
+@router.get(
+    "/media/{camera_id}/drawer_count",
+    summary="Lifetime drawer-open edge count (cashier ROI) from persisted totals",
+)
 async def drawer_count_from_log(camera_id: str):
-    log_path = _evidence_dir / "logs" / "events.jsonl"
-    count    = 0
-    if log_path.exists():
-        with open(log_path) as fh:
-            for line in fh:
-                try:
-                    rec = json.loads(line.strip())
-                    if rec.get("camera_id") == camera_id and rec.get("status") == "triggered":
-                        count += 1
-                except json.JSONDecodeError:
-                    continue
+    """
+    Reads ``cashier_drawer_open_totals.json`` under the evidence ``logs/`` folder
+    (same file ``CashierService`` maintains). This is cumulative closed→open edges
+    per camera, not a tally of legacy ``events.jsonl`` trigger rows.
+    """
+    totals_path = _evidence_dir / "logs" / "cashier_drawer_open_totals.json"
+    count = 0
+    if totals_path.is_file():
+        try:
+            raw = json.loads(totals_path.read_text(encoding="utf-8"))
+            m = raw.get("by_camera")
+            if isinstance(m, dict) and camera_id in m:
+                count = int(m[camera_id])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            count = 0
     return JSONResponse({"camera_id": camera_id, "drawer_open_count": count})
 

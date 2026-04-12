@@ -2,7 +2,7 @@
 
 Base URL for all examples: `http://localhost:9000`
 
-**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — combined pytest, cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence (replaces `SERVICE_TEST.md` + `cases-and-repo.md`). Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md). [SERVICE_TEST.md](./SERVICE_TEST.md) redirects there.
+**See also:** [logs.md](./logs.md) — test command, log/JSONL paths, SSE + cashier curl cheat sheet. [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — combined pytest, cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence (replaces `SERVICE_TEST.md` + `cases-and-repo.md`). Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md). [SERVICE_TEST.md](./SERVICE_TEST.md) redirects there.
 
 ---
 
@@ -353,13 +353,46 @@ curl http://localhost:9000/detection/status
 
 ## 5. Stream Results (SSE)
 
-Connect once and receive events in real-time. Events arrive as they happen — one JSON object per line crossing, PPE violation, or cashier state transition.
+Connect once and receive events in real-time. Events arrive as they happen — one JSON object per **line crossing**, **PPE violation**, or **cashier frame** (`CASHIER_BOX_OPEN` emits one structured event per processed frame while detection is running).
+
+**Multiple clients** can connect simultaneously; each client receives its own copy of every event (in-process broadcast). Idle connections receive `: ping` keepalive comments every ~30 seconds.
+
+> **Deployment note:** The broadcast runs within a single uvicorn process. If you run multiple uvicorn workers (`--workers N`), subscribers in different workers will not share events. The current [`docker-compose.yml`](../docker-compose.yml) runs one worker, so broadcast works correctly as deployed.
 
 ```bash
+# All events from all tasks and cameras
 curl -N http://localhost:9000/detection/stream
 ```
 
 > `-N` disables buffering so you see events immediately.
+
+### Server-side filtering (optional query parameters)
+
+All parameters are optional and combine with **AND** logic:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `taskId` | int | Only events from this task ID |
+| `taskName` | string | Only events whose `taskName` matches (note: not guaranteed unique across tasks) |
+| `eventType` | string | Only events of this type (`CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_BOX_OPEN`) |
+| `channelId` | int | Only events from this camera channel |
+
+```bash
+# Only events from task 10
+curl -N "http://localhost:9000/detection/stream?taskId=10"
+
+# Only CROSS_LINE events on camera 1
+curl -N "http://localhost:9000/detection/stream?eventType=CROSS_LINE&channelId=1"
+
+# Only events from a named task
+curl -N "http://localhost:9000/detection/stream?taskName=entrance_line"
+
+# Combined (AND) — task 10 AND only on channel 1
+curl -N "http://localhost:9000/detection/stream?taskId=10&channelId=1"
+
+# Cashier task events only (Eyego-shaped payload under `data`)
+curl -N "http://localhost:9000/detection/stream?eventType=CASHIER_BOX_OPEN"
+```
 
 ### CrossLine event example
 ```
@@ -379,11 +412,50 @@ data: {"eventId":"c9e04f2b1a7d35cc","eventType":"MASK_HAIRNET_CHEF_HAT","timesta
 
 ```
 
-### Cashier drawer event
-```
-data: {"eventId":"d1f98a7c3b2e44aa","eventType":"CASHIER_BOX_OPEN","timestamp":1774310589000,"timestampUTC":"2026-04-05T10:03:09.000Z","taskId":30,"taskName":"cashier_drawer_monitor","channelId":1,"data":{"drawerOpen":true,"drawerOpenSeconds":24,"serviceWaitSeconds":11,"staffPresent":false,"personInZone":true,"labels":["person","cashier_open"],"evidence":{"captureImage":"/local/storage/captures/2026/04/05/d1f98a7c_crop.jpg","sceneImage":"/local/storage/scenes/2026/04/05/d1f98a7c_scene.jpg"}}}
+### Cashier structured event (`CASHIER_BOX_OPEN`)
 
+One event **per processed frame** while the task worker is running. Top-level fields support SSE filters; the Eyego §4 payload is under **`data`**. **`data.personStructural`** is a **string** containing JSON. By default it is **pretty-printed** (`indent=2`, newlines appear as `\n` inside the SSE/JSONL line). Set **`CASHIER_COMPACT_PERSON_STRUCTURAL=1`** for a single-line minified string. Parse with `jq -r '.data.personStructural | fromjson'` (or the top-level event’s `.data.personStructural` when you hold the full object).
+
+**`data` field notes:** `id` is the **same** UUID as in `captureId`, as 32 hex characters without dashes. `sceneId` uses a **separate** UUID. **`deviceSN`** resolves from task / zone config, then `CASHIER_DEVICE_SN`, `DEVICE_SN`, `HOSTNAME`, else `"UNKNOWN"`. **`captureUrl` / `sceneUrl`:** `CASHIER_CLOUD_IMAGE_BASE` applies to both sides; if unset, use `CASHIER_CAPTURE_URL_BASE` and `CASHIER_SCENE_URL_BASE` independently. If still empty, set **`CASHIER_FORCE_LOCAL_URLS=1`** to use `file:///local/storage/images` per missing side; otherwise URLs are `""` and a **warning** is logged. Details: [logs.md](./logs.md).
+
+SSE sends **one** `data:` line per event (minified outer JSON). Equivalent structure (pretty outer JSON for readability; UUIDs are examples):
+
+```json
+{
+  "eventId": "a1b2c3d4e5f6789012345678abcdef01",
+  "eventType": "CASHIER_BOX_OPEN",
+  "timestamp": 1774310589000,
+  "timestampUTC": "2026-04-05T10:03:09.000Z",
+  "taskId": 30,
+  "taskName": "cashier_drawer_monitor",
+  "channelId": 1,
+  "camera_id": "1",
+  "case_id": "N3",
+  "severity": "NORMAL",
+  "transaction": true,
+  "data": {
+    "algorithmType": "CASHIER_BOX_OPEN",
+    "captureId": "CASHIER_BOX_OPEN_550e8400-e29b-41d4-a716-446655440000.jpg",
+    "sceneId": "CASHIER_BOX_OPEN_6ba7b810-9dad-11d1-80b4-00c04fd430c8.jpg",
+    "channelId": 1,
+    "channelName": "CAM-01-MAIN",
+    "deviceSN": "UNKNOWN",
+    "id": "550e8400e29b41d4a716446655440000",
+    "taskId": 30,
+    "taskName": "cashier_drawer_monitor",
+    "recordTime": 1774310589000,
+    "dateUTC": "2026-04-05T10:03:09.000Z",
+    "total_open_count": 9,
+    "total_open_duration_ms": 1100000,
+    "current_open_duration_ms": 3000,
+    "personStructural": "{\n  \"case_matched\": \"N3\",\n  \"case_level\": \"INFO\",\n  \"alert_triggered\": false,\n  \"critical_triggered\": false\n}",
+    "captureUrl": "https://storage.example.com/logs-data-images/CASHIER_BOX_OPEN_550e8400-e29b-41d4-a716-446655440000.jpg",
+    "sceneUrl": "https://storage.example.com/logs-data-images/CASHIER_BOX_OPEN_6ba7b810-9dad-11d1-80b4-00c04fd430c8.jpg"
+  }
+}
 ```
+
+Persisted to disk as one JSON line per frame: **`$EVENTS_DIR/task_<taskId>.jsonl`** (default `EVENTS_DIR=/local/storage/events`).
 
 ### Event fields reference
 
@@ -398,6 +470,8 @@ data: {"eventId":"d1f98a7c3b2e44aa","eventType":"CASHIER_BOX_OPEN","timestamp":1
 | `taskId` | int | ID of the task that fired the event |
 | `taskName` | string | Human-readable name from task config |
 | `channelId` | int | Camera that produced the frame |
+
+**`CASHIER_BOX_OPEN` also sets (top-level):** `camera_id` (string), `case_id`, `severity` (`NORMAL` \| `ALERT` \| `CRITICAL`), optional `transaction`, optional `evidence` when a JPEG was saved this frame.
 
 **CrossLine specific:**
 
@@ -426,7 +500,8 @@ data: {"eventId":"d1f98a7c3b2e44aa","eventType":"CASHIER_BOX_OPEN","timestamp":1
 | Field | Type | Description |
 |---|---|---|
 | `eventType` | string | `"CASHIER_BOX_OPEN"` |
-| `data` | object | Cashier payload (status/timers/evidence; shape depends on runtime state) |
+| `data` | object | Eyego §4 block: `algorithmType`, `captureId`, `sceneId`, `id` (32-hex, same UUID as `captureId`), `recordTime`, `dateUTC`, `personStructural` (string), `total_open_*`, URLs, `taskId` / `channelId` / `deviceSN`, … |
+| `data.personStructural` | string | String holding JSON: `case_matched`, `case_level` (`INFO` \| `WARNING` \| `CRITICAL`), zone counts, `detections`, `drawer_open_duration_ms`, … Default formatting is **pretty** (multi-line inside the string); use env `CASHIER_COMPACT_PERSON_STRUCTURAL=1` for one line. |
 
 ---
 
@@ -662,8 +737,9 @@ curl -X POST http://localhost:9000/api/tasks \
 # 3. Start
 curl -X POST http://localhost:9000/detection/start
 
-# 4. Open SSE stream in terminal (keep open)
+# 4. Open SSE stream in terminal (keep open) — all tasks, or cashier-only:
 curl -N http://localhost:9000/detection/stream
+# curl -N "http://localhost:9000/detection/stream?eventType=CASHIER_BOX_OPEN&taskId=30"
 
 # 5. Check status in another terminal
 curl http://localhost:9000/detection/status
@@ -671,6 +747,7 @@ curl http://localhost:9000/detection/status
 # 6. Cashier monitor (optional — uses task 30 on channel 1)
 curl -s http://localhost:9000/cashier/zones
 curl -s http://localhost:9000/cashier/status
+curl -s "http://localhost:9000/cashier/events?limit=5"
 # curl -N http://localhost:9000/cashier/stream/1
 
 # 7. Stop when done
@@ -681,9 +758,9 @@ curl -X POST http://localhost:9000/detection/stop
 
 ## 10. Cashier monitor API (`/cashier/*`)
 
-These routes serve the **cashier** monitor (live state, zones on disk, evidence, per-camera SSE). They are separate from `GET /detection/stream`, which merges **task** events for all algorithms.
+These routes serve the **cashier** monitor (live state, zones on disk, evidence, per-camera SSE). **`GET /detection/stream`** also carries **`CASHIER_BOX_OPEN`** task events (same structured object as below, one line per frame) alongside crossings and PPE — use `?eventType=CASHIER_BOX_OPEN` to filter.
 
-**Prerequisites:** Register a task with `algorithmType: "CASHIER_BOX_OPEN"` and start detection so `GET /cashier/status` and event logs fill from the runtime. **Zone read/write** works whenever the server can access the config file.
+**Prerequisites:** Register a task with `algorithmType: "CASHIER_BOX_OPEN"` and start detection so `GET /cashier/status`, `GET /cashier/events`, and **`GET /detection/stream`** fill from the runtime. **Zone read/write** works whenever the server can access the config file.
 
 **Config file:** `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`). `POST` bodies use **normalized** coordinates in `[0, 1]` as `{"x", "y"}` objects; the file stores `points` as nested lists `[[x, y], …]`. Omitted keys in `POST /cashier/zones` are left unchanged (partial update).
 
@@ -766,6 +843,8 @@ curl -s http://localhost:9000/cashier/status
 
 ### Event log (paginated)
 
+While the cashier task worker is running, each processed frame appends a **structured** event (same shape as `GET /detection/stream` for `CASHIER_BOX_OPEN`). Legacy test callers may still log only alert/transaction frames.
+
 ```bash
 curl -s "http://localhost:9000/cashier/events?limit=50&offset=0"
 curl -s "http://localhost:9000/cashier/events?camera_id=1&severity=CRITICAL&case_id=A3"
@@ -794,6 +873,14 @@ curl -N http://localhost:9000/cashier/stream/1/only
 ```
 
 `{camera_id}` is the string camera id (same as your registered camera `id`). The `/only` route suppresses routine `frame` events and keeps alerts / `gif_ready`.
+
+### Drawer open-edge count (persisted totals)
+
+Returns cumulative **closed→open** drawer transitions in the cashier ROI for that camera (from `cashier_drawer_open_totals.json`), not a line count from legacy `events.jsonl`.
+
+```bash
+curl -s "http://localhost:9000/cashier/media/1/drawer_count"
+```
 
 ### Latest media (optional)
 

@@ -7,7 +7,7 @@ Workflow:
     1. POST /cameras                  → register cameras (id → rtsp_url)
     2. POST /api/tasks                → register tasks (algorithmType, channelId, config)
     3. POST /detection/start          → start processing
-    4. GET  /detection/stream         → SSE stream of crossing events
+    4. GET  /detection/stream         → SSE stream of task events (broadcast, optional filters)
     5. GET  /detection/status         → monitor camera status
     6. POST /detection/stop           → stop processing
 
@@ -35,17 +35,42 @@ Run with:
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import StreamingResponse
 
 from apis.cameras   import camera_registry, CameraSetupRequest
 from apis.cashier   import router as cashier_router
 from apis.detection import detection
+from apis.detection_stream import (
+    DETECTION_SSE_KEEPALIVE_SEC,
+    DetectionSSEBridge,
+    StreamFilters,
+)
 from apis.tasks     import task_registry, TaskConfig
 from schemas        import DetectionRequest, DetectionStatus
 
-app = FastAPI(title="Vision Pipeline API", version="2.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start one SSE bridge per process; stop on shutdown."""
+    bridge = DetectionSSEBridge(detection.result_queue())
+    await bridge.start()
+    app.state.detection_sse_bridge = bridge
+    try:
+        yield
+    finally:
+        await bridge.stop()
+        app.state.detection_sse_bridge = None
+
+
+app = FastAPI(
+    title="Vision Pipeline API",
+    version="2.0.0",
+    lifespan=lifespan,
+)
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
 
 
@@ -123,20 +148,64 @@ def detection_status():
 
 
 @app.get("/detection/stream")
-async def detection_stream():
+async def detection_stream(
+    request: Request,
+    taskId: Optional[int] = Query(
+        None,
+        description="If set, only events for this task id (AND with other filters).",
+    ),
+    taskName: Optional[str] = Query(
+        None,
+        description="If set, only events whose task name matches (AND). Not unique across tasks.",
+    ),
+    eventType: Optional[str] = Query(
+        None,
+        description="If set, only events with this eventType (e.g. CROSS_LINE).",
+    ),
+    channelId: Optional[int] = Query(
+        None,
+        description="If set, only events from this camera channel id.",
+    ),
+):
     """
-    SSE stream — emits one JSON event per line crossing detected across all cameras.
-    Events are also persisted locally (JSONL + images) by each task worker.
+    SSE stream — one JSON object per task event across all cameras.
+
+    Multiple clients each receive a copy of every event (in-process broadcast).
+    Optional query params filter server-side with AND semantics.
+
+    Idle connections receive ``: ping`` keepalive comments about every 30 seconds.
+
+    Run a single uvicorn worker for one shared broadcast; multiple workers need
+    an external message broker.
     """
-    result_queue = detection.result_queue()
+    bridge: DetectionSSEBridge = request.app.state.detection_sse_bridge
+    filters = StreamFilters(
+        task_id=taskId,
+        task_name=taskName,
+        event_type=eventType,
+        channel_id=channelId,
+    )
+    client_q = bridge.subscribe()
+    keepalive_sec = DETECTION_SSE_KEEPALIVE_SEC
+
+    def _task_lookup(tid: int):
+        return task_registry.get(tid)
 
     async def event_generator():
-        while True:
-            try:
-                event = result_queue.get_nowait()
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(client_q.get(), timeout=keepalive_sec)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if not filters.matches(event, task_lookup=_task_lookup):
+                    continue
                 yield f"data: {json.dumps(event)}\n\n"
-            except Exception:
-                await asyncio.sleep(0.01)
+        finally:
+            bridge.unsubscribe(client_q)
 
     return StreamingResponse(
         event_generator(),

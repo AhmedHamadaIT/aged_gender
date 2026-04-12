@@ -73,14 +73,14 @@ curl -si "http://<jetson-ip>:9000/cashier/evidence/missing.jpg"
 
 ## Event-level media (GIF vs JPEG)
 
-The multiplexed stream (`GET /detection/stream`) carries **per-frame** cashier results under `data.use_case.cashier.summary`. **JPEG evidence** and **GIF clips** are produced by different mechanisms in [`services/cashier.py`](services/cashier.py).
+The multiplexed stream (`GET /detection/stream`) carries **per-frame** cashier task events with `eventType: "CASHIER_BOX_OPEN"` (Eyego payload under top-level **`data`**; filter with `?eventType=CASHIER_BOX_OPEN`). Batch / legacy JSONL may still embed results under `data.use_case.cashier.summary`. **JPEG evidence** and **GIF clips** are produced by different mechanisms in [`services/cashier.py`](services/cashier.py). See also [`docs/logs.md`](docs/logs.md).
 
 ### Where each artifact appears
 
 | Media | When | Where |
 |--------|------|--------|
 | **JPEG** | When a frame is persisted as annotated evidence (`frame_saved: true`) | `data.use_case.cashier.summary.evidence_path` (relative path string). Also served under the cashier **Media** HTTP routes (see below). |
-| **GIF** | After an **alert/critical “event session” ends** — the active `case_id` changes, so buffered pre/post frames are compiled | Written asynchronously to the evidence tree; **`gif_path`** is attached in the internal event log (`events.jsonl` under the evidence dir), not in every per-frame `summary`. Fetch via **`GET /cashier/media/.../gif`** or listen on **`GET /cashier/stream/{camera_id}`** (event types include `gif_ready` per [`apis/cashier.py`](apis/cashier.py); your build may rely on HTTP polling if `gif_ready` is not emitted yet). |
+| **GIF** | After an **alert/critical “event session” ends** — the active `case_id` changes, so buffered pre/post frames are compiled | Written asynchronously to the evidence tree. Legacy **`evidence/.../logs/events.jsonl`** rows for GIF resolution are **no longer** written; use **`GET /cashier/media/.../gif`** or **`GET /cashier/stream/{camera_id}`** (and structured per-frame events on **`GET /detection/stream`** for state). |
 
 **JPEG (per frame, when saved):**
 
