@@ -40,6 +40,9 @@ from apis.detection import detection
 from apis.tasks     import task_registry, TaskConfig
 from schemas        import DetectionRequest, DetectionStatus
 from apis.person_search import person_search_api
+from apis.semantic_search import semantic_search_api
+
+
 
 app = FastAPI(title="Vision Pipeline API", version="2.0.0")
 
@@ -149,3 +152,10 @@ async def detection_stream():
 @app.post("/person_search/search")
 async def person_search(file: UploadFile = File(...), top_k: int = Form(10)):
     return await person_search_api.search(file, top_k)
+
+# ─────────────────────────────────────────────
+# Semantic Search routes
+# ─────────────────────────────────────────────
+@app.post("/semantic_search/search")
+async def semantic_search(text_query: str = Form(...), top_k: int = Form(10)):
+    return await semantic_search_api.search_text(text_query, top_k)

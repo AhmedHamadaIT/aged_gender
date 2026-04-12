@@ -73,16 +73,29 @@ class SemanticSearchTask:
         # Free memory: we don't need the PyTorch model anymore
         del base_model 
         import gc; gc.collect()
-
-        # ── ONNX Runtime Setup ──
-        image_onnx_path = os.getenv("IMAGE_ENCODER_ONNX", "mobileclip2_image.onnx")
-        text_onnx_path  = os.getenv("TEXT_ENCODER_ONNX", "mobileclip2_text.onnx")
+        image_onnx_path = os.getenv("IMAGE_ENCODER_ONNX", "./models/image_encoder.onnx")
+        text_onnx_path  = os.getenv("TEXT_ENCODER_ONNX", "./models/text_encoder.onnx")
 
         # Prioritize GPU if requested
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if 'cuda' in self.device_str else ['CPUExecutionProvider']
 
-        log.info(f"[SemanticSearch/{self.task_id}] Initializing ONNX Sessions (Providers: {providers[0]})")
-        
+        providers = [
+                ('TensorrtExecutionProvider', {
+                    'device_id': 0,
+                 'trt_max_workspace_size': 2147483648, # 2GB    
+                    'trt_fp16_enable': True,              # Speed boost on supported GPUs
+                    'trt_engine_cache_enable': True,      # Avoid recompiling every start
+            'trt_engine_cache_path': './trt_cache',
+                }),     
+                'CUDAExecutionProvider',
+                'CPUExecutionProvider'
+                 ]
+
+# Ensure the cache directory exists 
+        if 'TensorrtExecutionProvider' in str(providers):
+            os.makedirs('./trt_cache', exist_ok=True)
+            log.info(f"[SemanticSearch/{self.task_id}] Initializing ONNX Sessions (Providers: {providers[0]})")
+
         self.image_session = ort.InferenceSession(image_onnx_path, providers=providers)
         self.text_session  = ort.InferenceSession(text_onnx_path, providers=providers)
 
@@ -94,6 +107,7 @@ class SemanticSearchTask:
 
         # State tracking: { track_id: {"best_area": int, "last_frame": int} }
         self.track_state = {}  
+
 
         # Storage paths
         self._gallery_dir = os.getenv("GALLERY_DIR", "/local/storage/gallery")
