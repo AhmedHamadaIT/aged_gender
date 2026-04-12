@@ -124,13 +124,15 @@ curl -sS -X POST "${BASE}/detection/start?camera_id=cam1"
 |---------------|-----------------|
 | Full `data` object (§4) | `use_case.cashier.data` — same keys as spec (`captureId`, `sceneId`, `recordTime`, `dateUTC`, `personStructural`, URLs, …) |
 | `algorithmType` | Top-level `use_case.cashier.algorithmType` and inside `data` |
-| `personStructural` | Duplicated: `use_case.cashier.personStructural` and `use_case.cashier.data.personStructural` (JSON string); includes **`total_open_count`** (cumulative drawer open edges, per camera) |
+| `personStructural` | Duplicated: `use_case.cashier.personStructural` and `use_case.cashier.data.personStructural` (JSON string); includes **`total_open_count`** and related metrics. In **`data`**, default formatting is **pretty** (`indent=2`); set **`CASHIER_COMPACT_PERSON_STRUCTURAL=1`** for one-line JSON. |
 | `total_open_count`, `total_open_duration_ms`, `current_open_duration_ms` | Also on `data` and `summary` (mirror `personStructural`) |
-| `captureUrl` / `sceneUrl` | Built when `CASHIER_CLOUD_IMAGE_BASE` and/or `CASHIER_CAPTURE_URL_BASE` / `CASHIER_SCENE_URL_BASE` are set (else `""`) |
-| `captureId` / `sceneId` | New UUID-based filenames per frame (logical names for upload; local disk may still use one JPEG until bridge maps both) |
-| `deviceSN` | `task.deviceSN` or env `CASHIER_DEVICE_SN` / `DEVICE_SN` |
+| `captureUrl` / `sceneUrl` | `CASHIER_CLOUD_IMAGE_BASE` is the **primary** base for both; if unset, `CASHIER_CAPTURE_URL_BASE` and `CASHIER_SCENE_URL_BASE` apply per side. If still empty, `CASHIER_FORCE_LOCAL_URLS=1` fills missing sides with `file:///local/storage/images`; else `""` (and a warning is logged). |
+| `captureId` / `sceneId` / `id` | Per frame: `captureId` and `sceneId` are `CASHIER_BOX_OPEN_<uuid>.jpg` with **independent** UUIDs. **`id`** is the **same** UUID as `captureId`, as 32 hex characters without dashes. |
+| `deviceSN` | `task.deviceSN` (or zone `task`) → env `CASHIER_DEVICE_SN` → `DEVICE_SN` → `HOSTNAME` → `"UNKNOWN"` |
 | `channelId`, `taskId`, `channelName`, … | Config `task` in `cashier_zones.yaml` or `POST /cashier/zones` |
-| SSE / status | `GET /cashier/status`, `GET /detection/stream` |
+| SSE / status | `GET /cashier/status`, `GET /detection/stream` (`eventType=CASHIER_BOX_OPEN`, payload under `data`), `GET /cashier/stream/{camera_id}` |
+| Per-frame task JSONL | `$EVENTS_DIR/task_<taskId>.jsonl` (default `EVENTS_DIR=/local/storage/events`, same pattern as `CROSS_LINE`) |
+| `personStructural.case_level` | `INFO` / `WARNING` / `CRITICAL` (maps from internal `NORMAL` / `ALERT` / `CRITICAL`) |
 
 **Parse spec `data` or `personStructural` from status:**
 
@@ -154,7 +156,7 @@ Implemented in [`services/cashier.py`](../services/cashier.py): N3 keyframe; ALE
 | [`scripts/curl_eyego_style_tasks.sh`](../scripts/curl_eyego_style_tasks.sh) | Eyego `POST/PUT /api/tasks` with string `areaPosition` / `detailConfig` |
 | [`scripts/curl_cashier_box_open_mock.sh`](../scripts/curl_cashier_box_open_mock.sh) | Local API health + zones + status (needs `uvicorn` on `BASE`) |
 | [`scripts/test_cashier_14_rules.py`](../scripts/test_cashier_14_rules.py) | Offline 14-rule table tests (standalone, no pytest) |
-| [`tests/test_cashier_box_open_cases.py`](../tests/test_cashier_box_open_cases.py) | Pytest: all cases + `personStructural` / duration fields |
+| [`tests/test_cashier_api.py`](../tests/test_cashier_api.py), [`tests/test_cashier_structured_events.py`](../tests/test_cashier_structured_events.py) | Pytest: cashier HTTP + structured `CASHIER_BOX_OPEN` event shape |
 | [`scripts/mock_cashier_all_cases_md.py`](../scripts/mock_cashier_all_cases_md.py) | Runs pytest and prints this doc path |
 | **This document** | §§1–4 Eyego + mapping; **Part III** Vision Pipeline cashier cURL; §§6–11 mocks + tests; appendix JSON |
 
@@ -663,14 +665,14 @@ Both are **time-based** escalations in [`CashierService._evaluate`](../services/
 Mnemonic (the route name is easy to misread):
 
 - **`drawer_count` ≠** total frames where the drawer is open (or total drawer detections).
-- **`drawer_count` =** number of logged **`triggered`** events in `events.jsonl` for that camera (alert/session starts and N3 transaction logs — see implementation note below).
+- **`drawer_count` =** cumulative **closed→open** drawer edges in the cashier ROI for that camera, read from **`cashier_drawer_open_totals.json`** (`by_camera`), maintained by [`CashierService`](../services/cashier.py).
 
 | What you need | Where to get it |
 |----------------|-----------------|
-| **Open drawers in this frame** (zone tally) | SSE / stream JSON: `data.use_case.cashier.summary.cashier_zone.drawers` (integer count for the current frame). |
-| **Lifetime “triggered” events** (log lines) | `GET /cashier/media/{camera_id}/drawer_count` — see below. |
+| **Open drawers in this frame** (zone tally) | Structured event: parse `data.personStructural` → `zones.cashier.drawers_count`, or batch JSONL `data.use_case.cashier.summary.cashier_zone.drawers`. |
+| **Lifetime open-edge count** (cumulative) | `GET /cashier/media/{camera_id}/drawer_count` — see below. |
 
-**Important:** The route name says `drawer_count`, but the implementation counts **lines** in `evidence/.../logs/events.jsonl` where `status == "triggered"` for that `camera_id` (see [`apis/cashier.py`](../apis/cashier.py)). A `"triggered"` row is written when an **alert/critical evidence session starts** or when a **transaction (N3)** is logged — it is **not** a raw count of “how many times the drawer was detected open” across all frames. For “how many frames had an open drawer”, aggregate `cashier_zone.drawers > 0` from your stream or batch `stream.jsonl`. For “how many alert/critical sessions were opened”, use this endpoint or parse `events.jsonl`.
+**Note:** Canonical per-frame cashier output is **`GET /detection/stream?eventType=CASHIER_BOX_OPEN`** and **`$EVENTS_DIR/task_<taskId>.jsonl`** — not legacy `evidence/.../logs/events.jsonl` (that audit file is no longer used for business events).
 
 ```bash
 curl -s "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/drawer_count"
@@ -990,31 +992,37 @@ Runtime health and frame counters:
 curl -s "http://<jetson-ip>:9000/detection/status"
 ```
 
-Latest cashier summary per camera (from in-memory state updated by `CashierService`):
+Latest structured cashier event per camera (in-memory state updated by `CashierDrawerTask` each frame):
 
 ```bash
 curl -s "http://<jetson-ip>:9000/cashier/status"
 ```
 
-Recent alerts / transactions (newest first):
+Recent structured events (newest first; one entry per processed frame while the worker is running):
 
 ```bash
 curl -s "http://<jetson-ip>:9000/cashier/events?limit=20"
 ```
 
-Triggered-event tally from `events.jsonl` (not per-frame drawer detections — see **Drawer metrics** in this document):
+Cumulative drawer open-edge count for that camera (`cashier_drawer_open_totals.json` — see **Drawer metrics** above):
 
 ```bash
 curl -s "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/drawer_count"
 ```
 
-Multiplexed vision SSE (all cameras):
+Multiplexed vision SSE (all task types):
 
 ```bash
 curl -N "http://<jetson-ip>:9000/detection/stream"
 ```
 
-Per-camera cashier SSE (`event:` lines: `connected`, `frame`, `alert`, …):
+Cashier-only task events (Eyego `data` block, one `data:` line per frame):
+
+```bash
+curl -N "http://<jetson-ip>:9000/detection/stream?eventType=CASHIER_BOX_OPEN"
+```
+
+Per-camera cashier SSE (`event:` lines: `connected`, `frame`, …; `frame` carries the full structured event object):
 
 ```bash
 curl -N "http://<jetson-ip>:9000/cashier/stream/cashier_cam_01"
@@ -1058,9 +1066,9 @@ The following sections (§6–§11) supplement §§1–4 above: quick ml-server 
 
 **Cumulative drawer metrics:** `personStructural` (and `data`) include **`total_open_count`**, **`total_open_duration_ms`**, and **`current_open_duration_ms`**. Persisted under `evidence/cashier/logs/cashier_drawer_open_totals.json`. Disable with `CASHIER_DISABLE_DRAWER_TOTAL_PERSIST=1`. Optional `CASHIER_DRAWER_DURATION_PERSIST_SEC` (default 10) flushes duration while the drawer remains open.
 
-**Offline QA:** fake detection counts map to **`personStructural`** (JSON string); shapes match **`pytest`** (`tests/test_cashier_box_open_cases.py`).
+**Offline QA:** fake detection counts map to **`personStructural`** (JSON string); automated checks: **`tests/test_cashier_api.py`**, **`tests/test_cashier_structured_events.py`** (and any standalone scripts under `scripts/`).
 
-**Backend envelope** wraps these fields under `data`: `algorithmType`, `captureId`, `sceneId`, `channelId`, …, `personStructural`, `captureUrl`, `sceneUrl`. Live pipeline exposes `personStructural` on **`use_case.cashier`** ([`services/cashier.py`](../services/cashier.py)); cloud URLs are added by your integration layer.
+**Backend envelope** wraps these fields under `data`: `algorithmType`, `captureId`, `sceneId`, `id`, `channelId`, …, `personStructural`, `captureUrl`, `sceneUrl`. Built in [`services/cashier.py`](../services/cashier.py) (`build_cashier_spec_data`); URL bases and formatting are controlled by env vars (see table in §3 and [logs.md](./logs.md)).
 
 ---
 
@@ -1104,7 +1112,7 @@ Replace `cam` with `CASHIER_CAMERA_ID`.
 
 ## 8. All 13 cases — mock `personStructural` (parsed)
 
-Values below are **illustrative**; your engine fills `confidence`, `detections[]`, and durations from real frames.
+Values below are **illustrative**; your engine fills `confidence`, `detections[]`, and durations from real frames. In production, the same structure is serialized into **`data.personStructural`** as a string (default **pretty** JSON with newlines; optional **`CASHIER_COMPACT_PERSON_STRUCTURAL`** for one line). The appendix JSON blocks below show the **parsed** object shape for readability.
 
 ### N1 — Idle register
 
@@ -1426,7 +1434,7 @@ When `enableStaffList` is true and bindings mark a cashier-zone person as non-st
 
 ## 9. Full synthetic `data` envelope (spec §6 shape)
 
-Example **N3** (pretty-printed `personStructural` string in real payloads is one line):
+Example **N3** — `personStructural` is shown here as a **pretty** multi-line string (default runtime shape; in SSE/JSONL the same string appears with `\n` escapes on one outer line). Use **`CASHIER_COMPACT_PERSON_STRUCTURAL=1`** for a single-line `personStructural`.
 
 ```json
 {
@@ -1442,9 +1450,12 @@ Example **N3** (pretty-printed `personStructural` string in real payloads is one
     "taskName": "cashier_drawer_monitor",
     "recordTime": 1774463039587,
     "dateUTC": "2026-04-02T10:23:59.587Z",
-    "personStructural": "{\"case_matched\":\"N3\",\"case_level\":\"NORMAL\",\"alert_triggered\":false,\"critical_triggered\":false,\"zones\":{\"cashier\":{\"persons_count\":1,\"drawers_count\":1,\"cash_count\":1,\"unauthorized_present\":false},\"customer\":{\"persons_count\":1,\"cash_count\":1}},\"detections\":[{\"class\":\"Person\",\"confidence\":0.94,\"zone_id\":1}]}",
-    "captureUrl": "https://storage.example.com/.../capture.jpg",
-    "sceneUrl": "https://storage.example.com/.../scene.jpg"
+    "total_open_count": 5,
+    "total_open_duration_ms": 890000,
+    "current_open_duration_ms": 12000,
+    "personStructural": "{\n  \"case_matched\": \"N3\",\n  \"case_level\": \"NORMAL\",\n  \"alert_triggered\": false,\n  \"critical_triggered\": false,\n  \"total_open_count\": 5,\n  \"total_open_duration_ms\": 890000,\n  \"current_open_duration_ms\": 12000,\n  \"zones\": {\n    \"cashier\": { \"persons_count\": 1, \"drawers_count\": 1, \"cash_count\": 1, \"unauthorized_present\": false },\n    \"customer\": { \"persons_count\": 1, \"cash_count\": 1 }\n  },\n  \"detections\": [\n    { \"class\": \"Person\", \"confidence\": 0.94, \"zone_id\": 1 }\n  ]\n}",
+    "captureUrl": "https://storage.googleapis.com/logs-data-images/CASHIER_BOX_OPEN_a3f9c2d1-e8b7-4a65-9c2d-1e8b7a654123.jpg",
+    "sceneUrl": "https://storage.googleapis.com/logs-data-images/CASHIER_BOX_OPEN_b4e0d3f2-c9a8-4b76-8e5f-2c9a8b765234.jpg"
   }
 }
 ```
@@ -1454,10 +1465,10 @@ Example **N3** (pretty-printed `personStructural` string in real payloads is one
 ## 10. Automated tests
 
 ```bash
-# 14-rule table + personStructural helpers + evidence mapping check
-python3 -m pytest tests/test_cashier_box_open_cases.py -v
+# Cashier API + structured events (SSE / JSONL shape helpers)
+python3 -m pytest tests/test_cashier_api.py tests/test_cashier_structured_events.py -q
 
-# Legacy standalone script (same rules, no pytest)
+# Legacy standalone script (same rules, no pytest), if present
 python3 scripts/test_cashier_14_rules.py
 ```
 

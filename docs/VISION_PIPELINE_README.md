@@ -9,6 +9,7 @@ Single reference that merges:
 
 | More detail | Doc |
 |-------------|-----|
+| Tests, log paths, curl cheat sheet | [logs.md](./logs.md) |
 | Add a FrameBus task | [ADDING_A_SERVICE.md](./ADDING_A_SERVICE.md) |
 | API walkthrough | [API_USAGE.md](./API_USAGE.md) |
 | Cashier (Eyego, `/cashier` cURL Part III, mocks, appendix JSON) | [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md) |
@@ -252,7 +253,7 @@ curl -s -X POST "$BASE/api/tasks" \
 
 ## Part I — 5. Tasks — `CASHIER_BOX_OPEN` (cashier monitor)
 
-Set **`YOLO_MODEL`** to cashier weights so FrameBus emits person/drawer/cash on that channel. Use **`/cashier/*`** for zones, status, SSE.
+Set **`YOLO_MODEL`** to cashier weights so FrameBus emits person/drawer/cash on that channel. Use **`/cashier/*`** for zones, status, and per-camera SSE; use **`GET /detection/stream?eventType=CASHIER_BOX_OPEN`** for multiplexed structured frames and **`$EVENTS_DIR/task_<taskId>.jsonl`** for durable JSONL (see [logs.md](./logs.md)). Each cashier line matches the **task-event** pattern used by `CROSS_LINE` (one JSON object per line, shared top-level keys) but carries nested Eyego **`data`** (`personStructural` as a string, **pretty JSON by default**; **`id`** ties to **`captureId`** UUID; URL bases via **`CASHIER_CLOUD_IMAGE_BASE`** / per-side bases / optional **`CASHIER_FORCE_LOCAL_URLS`**).
 
 ```bash
 curl -s -X POST "$BASE/api/tasks" \
@@ -389,12 +390,40 @@ curl -sN --max-time 15 "$BASE/detection/stream" | head -n 20
   "channelId": 1,
   "line": { "id": "1", "name": "Entrance", "direction": 1 },
   "person": {
-    "trackingId": 42,
+    "trackingId": "42",
     "boundingBox": {},
     "attributes": {},
-    "confidence": 0.91
+    "confidence": 91
   },
   "evidence": { "captureImage": "…", "sceneImage": "…" }
+}
+```
+
+### Example structured `CASHIER_BOX_OPEN` (illustrative)
+
+Same outer envelope as above; body under **`data`**. `personStructural` is abbreviated — in real output it is a longer pretty-printed JSON string.
+
+```json
+{
+  "eventId": "…",
+  "eventType": "CASHIER_BOX_OPEN",
+  "timestamp": 1774310401528,
+  "timestampUTC": "2026-04-02T12:00:00.000Z",
+  "taskId": 101,
+  "taskName": "cashier_drawer_monitor",
+  "channelId": 1,
+  "camera_id": "1",
+  "case_id": "N3",
+  "severity": "NORMAL",
+  "data": {
+    "algorithmType": "CASHIER_BOX_OPEN",
+    "captureId": "CASHIER_BOX_OPEN_550e8400-e29b-41d4-a716-446655440000.jpg",
+    "sceneId": "CASHIER_BOX_OPEN_6ba7b810-9dad-11d1-80b4-00c04fd430c8.jpg",
+    "id": "550e8400e29b41d4a716446655440000",
+    "personStructural": "{\n  \"case_matched\": \"N3\",\n  \"case_level\": \"INFO\"\n}",
+    "captureUrl": "",
+    "sceneUrl": ""
+  }
 }
 ```
 
@@ -440,11 +469,13 @@ curl -sN --max-time 10 "$BASE/cashier/stream/1/only" | head -n 15
 curl -s "$BASE/cashier/media/1/drawer_count"
 ```
 
-### SSH — evidence log
+### SSH — structured cashier task JSONL
 
 ```bash
-ssh user@jetson 'tail -f /path/to/ml-server/evidence/cashier/logs/events.jsonl'
+ssh user@jetson 'tail -f /local/storage/events/task_101.jsonl'
 ```
+
+(`EVENTS_DIR` defaults to `/local/storage/events`; filename is `task_<taskId>.jsonl`.)
 
 ---
 
@@ -562,7 +593,7 @@ The **`personStructural`** string parses to an object with `case_matched`, `case
 | Level | Cases | Behaviour |
 |-------|-------|-----------|
 | NORMAL (no file) | N1, N2, N4, N5, N6 | State only — no JPEG |
-| NORMAL (audit) | N3 | Annotated keyframe + JSONL `triggered` |
+| NORMAL (audit) | N3 | Annotated keyframe (no legacy `events.jsonl` row) |
 | ALERT | A1, A2, A5, A6, A7 | JPEG + GIF budgets (`_GIF_BUDGET` in `services/cashier.py`) |
 | CRITICAL | A3, A4 | Large post-buffer until case resolves; GIF when event ends |
 
@@ -581,8 +612,8 @@ Replace `cam` with your `CASHIER_CAMERA_ID` (default `cam`).
 
 Under **`CASHIER_EVIDENCE_DIR`** (default `./evidence/cashier`):
 
-- **`logs/events.jsonl`** — one line per `triggered` / `resolved` (and related) events; GIF paths after compile.
-- **`logs/cashier_drawer_open_totals.json`** — drawer count + duration aggregates (optional).
+- **`$EVENTS_DIR/task_<taskId>.jsonl`** — one JSON line per processed cashier frame (structured `CASHIER_BOX_OPEN` event), same pattern as `CROSS_LINE` task logs.
+- **`logs/cashier_drawer_open_totals.json`** — drawer open-edge count + duration aggregates (optional).
 - **Case folders** — e.g. `normal/N3/`, `alert/A5/`, `critical/A3/` with JPEG + sidecar JSON (see `services/cashier.py` → `_EvidenceWriter`).
 
 ---
@@ -621,7 +652,7 @@ curl -sS "${BASE}/cashier/status" | jq -r 'to_entries[0].value.personStructural 
 |------|------|
 | [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md) | Eyego `POST/PUT` + Part III (cashier cURL) + mocks (§§6–11) + appendix JSON |
 | [`services/cashier.py`](../services/cashier.py) | 14-rule evaluation, GIF budgets, persistence |
-| `tests/test_cashier_box_open_cases.py` (if present) | Offline rule / envelope tests |
+| `tests/test_cashier_api.py`, `tests/test_cashier_structured_events.py` | Cashier HTTP + structured event envelope |
 
 ---
 

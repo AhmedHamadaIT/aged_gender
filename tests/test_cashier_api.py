@@ -432,13 +432,11 @@ def test_media_event_gif(client: TestClient, evidence_dir):
 def test_media_drawer_count(client: TestClient, evidence_dir):
     logs = evidence_dir / "logs"
     logs.mkdir(parents=True)
-    logf = logs / "events.jsonl"
-    logf.write_text(
-        '{"camera_id": "1", "status": "triggered"}\n'
-        '{"camera_id": "1", "status": "idle"}\n'
-        '{"camera_id": "2", "status": "triggered"}\n',
+    totals = logs / "cashier_drawer_open_totals.json"
+    totals.write_text(
+        '{"by_camera": {"1": 5, "2": 2}}',
         encoding="utf-8",
     )
     r = client.get("/cashier/media/1/drawer_count")
     assert r.status_code == 200
-    assert r.json() == {"camera_id": "1", "drawer_open_count": 1}
+    assert r.json() == {"camera_id": "1", "drawer_open_count": 5}

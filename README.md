@@ -4,19 +4,36 @@
 
 The runtime path is **task-based**: you register RTSP cameras (`POST /cameras`), define **tasks** per channel (`POST /api/tasks` with an `algorithmType` such as `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, or `CASHIER_BOX_OPEN`), then start workers (`POST /detection/start`). **FrameBus** captures each stream once, runs a shared YOLO+tracker, and fans frames to **task workers** (`task_worker.py`). Task results (for example line-crossing events) are merged onto **`GET /detection/stream`** (SSE).
 
-**Cashier** is integrated as API task type **`CASHIER_BOX_OPEN`** — implemented by class **`CashierDrawerTask`** in [`services/cashier.py`](services/cashier.py) (same module as **`CashierService`**), registered in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`. Live cashier state, zones, evidence, and per-camera SSE remain under **`/cashier/*`**. For cashier, configure **`YOLO_MODEL`** (and related env) so FrameBus outputs the expected classes (person / drawer / cash) on that channel; see [Cashier + FrameBus model](#cashier--framebus-model).
+**Cashier** is integrated as API task type **`CASHIER_BOX_OPEN`** — implemented by class **`CashierDrawerTask`** in [`services/cashier.py`](services/cashier.py) (same module as **`CashierService`**), registered in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`. Each processed frame emits one structured task event on **`GET /detection/stream`** (`eventType`: **`CASHIER_BOX_OPEN`**, Eyego-style payload under **`data`**), is appended to **`EVENTS_DIR/task_<taskId>.jsonl`** (same pattern as `CROSS_LINE`), and updates **`/cashier/status`** and **`/cashier/events`**. Zones, evidence JPEGs/GIFs, and optional **`/cashier/stream/{camera_id}`** remain under **`/cashier/*`**. Configure **`YOLO_MODEL`** so FrameBus outputs person / drawer / cash on that channel; see [Cashier + FrameBus model](#cashier--framebus-model).
 
 The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detector`, `age_gender`, `mood`, `ppe`, `cashier`) is still in the repo for scripts and batch tooling; the **HTTP app does not** expose `POST /detection/setup`.
 
 ---
 
-##  Setup & Run
+## Contents
+
+| Section | What it covers |
+|--------|----------------|
+| [Setup & run](#setup--run) | Local `uvicorn`, Docker Compose (GPU), base URL, `/docs` |
+| [Features (complete inventory)](#features-complete-inventory) | Architecture, every task type, SSE, cashier, legacy pipeline, models |
+| [Sample `cashier_zones.yaml`](#sample-configuration-file-configcashier_zonesyaml) | Zone/threshold layout |
+| [cURL reference](#complete-curl-reference-all-http-routes) | All HTTP examples |
+| [API reference](#api-endpoints-reference) | Lifecycle and route descriptions |
+| [Testing & examples](#testing--real-result-examples) | Image tests, JSON samples |
+| [Cashier validation & cases](#cashier-full-dataset-validation-report) | Batch metrics, N1–A7 tables |
+| [Models & structure](#-models--services) | Weights, ONNX, repo layout |
+| [Configuration](#-configuration) | Env vars, thresholds |
+| [Endpoint summary table](#-api-endpoints-summary) | Quick lookup |
+
+---
+
+## Setup & Run
 
 ### Prerequisites
 - Python 3.9+
 - CUDA/cuDNN enabled environment (optional but recommended for GPU acceleration)
 
-### Installation
+### Installation (local)
 1. Install dependencies:
    ```bash
    pip install -r requirements.txt
@@ -26,20 +43,65 @@ The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detect
    uvicorn app:app --host 0.0.0.0 --port 9000
    ```
 
-*(Alternatively, you can run it via Docker Compose if standard deployment is configured).*
+### Docker Compose (GPU)
+The repo includes [`docker-compose.yml`](docker-compose.yml): NVIDIA runtime, project bind-mount, `models/` and `outputs/` volumes, port **9000**, optional [`.env`](.env).
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+# shell inside container:
+docker compose exec yolo-detect bash
+```
 
 **Default base URL:** `http://localhost:9000` — use `http://<host>:9000` on a Jetson or remote machine. Interactive OpenAPI: `/docs`, `/redoc`.
 
 ---
 
-## Features
+## Features (complete inventory)
 
-- **Multi-camera RTSP** — `POST /cameras`, `GET /cameras`, `DELETE /cameras/{cam_id}`. Successful bodies often use the standardized envelope `{ ..., "error": null }` (see `error_codes/response.py`).
-- **Tasks per channel** — `POST /api/tasks` (and GET/PUT/DELETE) registers algorithms keyed by `algorithmType`: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_BOX_OPEN`**. Each enabled task with a matching registered camera gets a **task worker**; shared **FrameBus** processes per `channelId`.
-- **Runtime control** — `POST /detection/start` / `POST /detection/stop` (optional `camera_id`); `GET /detection/status` for FPS, frame counts, and errors.
-- **Detection SSE** — `GET /detection/stream` streams **task events** (e.g. line-crossing JSON) to all connected clients simultaneously (in-process broadcast). Optional server-side filters: `?taskId=`, `?taskName=`, `?eventType=`, `?channelId=` — all combine with AND logic. Idle connections receive `: ping` keepalives every ~30 s. Runs correctly on a single uvicorn worker (current deployment); multiple workers need an external broker. Shape depends on the task (see `app.py` docstring example and [docs/API_USAGE.md](docs/API_USAGE.md#5-stream-results-sse)).
-- **Cashier monitor** — Register a task with `algorithmType: "CASHIER_BOX_OPEN"` (and `channelId` matching your camera id). HTTP: `GET` / `POST /cashier/zones`, `POST /cashier/zones/reset`, `GET /cashier/status`, `GET` / `DELETE /cashier/events`, evidence and media routes, SSE `GET /cashier/stream/{camera_id}` and `.../only`. Case logic **N1–N6** / **A1–A7** in [`services/cashier.py`](services/cashier.py) `_evaluate`.
-- **Configuration on disk** — `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); `CASHIER_EVIDENCE_DIR` (default `./evidence/cashier`).
+### Architecture (v2 runtime)
+- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, then fan-out of `{frame + tracks}` to each task queue. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`.
+- **Task workers** ([`task_worker.py`](task_worker.py)) — One worker process per enabled task; looks up `algorithmType` in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY` and emits events to the shared result queue.
+- **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` so `GET /detection/stream` subscribers receive multiprocessing queue events on the asyncio loop (use **one** uvicorn worker for a single in-process broadcast; scale-out needs a broker).
+
+### Cameras
+- **Multi-camera RTSP** — `POST /cameras`, `GET /cameras`, `DELETE /cameras/{cam_id}`. Many responses use the standardized envelope pattern (`error_codes/response.py`).
+
+### Tasks (`/api/tasks` CRUD)
+- Register work per **`channelId`** (must match a camera **`id`** from `POST /cameras`).
+- **`algorithmType`** must be one of: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_BOX_OPEN`** ([`apis/tasks.py`](apis/tasks.py) `TaskRegistry.SUPPORTED`).
+
+| `algorithmType` | Implementation | What it does | SSE `eventType` on `/detection/stream` |
+|-----------------|----------------|--------------|----------------------------------------|
+| `CROSS_LINE` | [`CrossLineTask`](services/cross_line.py) | Person crosses configured lines (`areaPosition` JSON); optional age/gender on crossing via `detailConfig.enableAttrDetect`; `enableReid` reserved | `CROSS_LINE` |
+| `MASK_HAIRNET_CHEF_HAT` | [`MaskHairnetChefHatTask`](services/mask_hairnet_chef_hat.py) | PPE compliance inside polygon zones; violations from `detailConfig.alarmType` (`no_mask`, `no_hat`, `no_chef_hat`, …) | `MASK_HAIRNET_CHEF_HAT` |
+| `CASHIER_BOX_OPEN` | [`CashierDrawerTask`](services/cashier.py) | Zones, drawer/cash/person logic **N1–N6** / **A1–A7**; structured JSON per frame on detection SSE + `/cashier/*` | `CASHIER_BOX_OPEN` |
+
+**Shared task fields** (see `TaskConfig` in [`apis/tasks.py`](apis/tasks.py)): `taskId`, `taskName`, `channelId`, `enable`, `threshold` (0–100 confidence), `areaPosition` (JSON string: lines or polygons per algorithm), `detailConfig`, `validWeekday`, `validStartTime`, `validEndTime` (ms).
+
+**`detailConfig` per algorithm**
+- **CROSS_LINE:** `enableAttrDetect`, `enableReid`
+- **MASK_HAIRNET_CHEF_HAT:** `alarmType` (list of violation keys)
+- **CASHIER_BOX_OPEN:** `drawerOpenLimit`, `serviceWaitLimit`, `enableStaffList`, `staffIds`
+
+### Detection control & global SSE
+- **Runtime** — `POST /detection/start` / `POST /detection/stop` (optional query `camera_id`); `GET /detection/status` (FPS, frame counts, errors per camera).
+- **`GET /detection/stream`** — Server-Sent Events: one JSON **task event** per message (crossings, PPE violations, etc.). Optional filters (AND): `taskId`, `taskName`, `eventType`, `channelId`. Idle `: ping` keepalives; interval overridable with **`DETECTION_SSE_KEEPALIVE_SEC`** ([`apis/detection_stream.py`](apis/detection_stream.py)). CORS header `Access-Control-Allow-Origin: *` on the stream response.
+
+### Cashier monitor (`/cashier/*`)
+- Enable with **`POST /api/tasks`** using `algorithmType: "CASHIER_BOX_OPEN"` and matching `channelId`.
+- **HTTP:** `GET /cashier/status`; `GET` / `POST /cashier/zones` (optional body keys: `detail_config`, `task`, `detection_threshold` per [`apis/cashier.py`](apis/cashier.py)); `POST /cashier/zones/reset`; `GET` / `DELETE /cashier/events` (filters: `severity`, `case_id`, `camera_id`, `limit`, `offset`); `GET /cashier/evidence` + download path; **media** routes for latest/event JPG/GIF; `GET .../drawer_count`.
+- **Cashier SSE:** `GET /cashier/stream/{camera_id}` (all events), `GET .../only` (alerts-oriented; skips `frame`-type events). Publisher emits typed SSE (`event:` lines); connect handshake includes `connected`.
+- **On disk / env:** `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`), `CASHIER_EVIDENCE_DIR` (default `./evidence/cashier`), **`EVENTS_DIR`** (default `/local/storage/events` — per-task JSONL `task_<taskId>.jsonl` for cashier frames), **`CASHIER_LOG_MAX`** (default 5000 — in-memory event deque cap).
+
+### Legacy batch / scripts
+
+- **`pipeline.py` + `REGISTRY`** — Per-frame services: `detector`, `age_gender`, `mood`, `ppe`, `cashier` for offline JSONL, tests, and tooling (not the primary HTTP v2 path).
+
+### Developer surface
+- **OpenAPI** — `/docs`, `/redoc`
+- **Tests** — `tests/` (e.g. `test_detection_stream.py`, `test_cashier_api.py`); run `pytest` from repo root when present
+- **Adding tasks** — See [`services/__init__.py`](services/__init__.py) docstring and [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md)
 
 ### Cashier + FrameBus model
 
@@ -272,9 +334,11 @@ curl -sN "$BASE/detection/stream" \
   | jq '{eventType, taskId, channelId}'
 ```
 
-**Cashier** summary and zones: use **`/cashier/*`** (not `/detection/stream`):
+**Cashier** — structured frames also appear on **`/detection/stream`** (`eventType=CASHIER_BOX_OPEN`, `data.personStructural`, …). For HTTP status, zones, and per-camera SSE:
 
 ```bash
+curl -sN "$BASE/detection/stream?eventType=CASHIER_BOX_OPEN" \
+  | grep "^data:" | head -1 | sed 's/^data: //' | jq '{eventType, taskId, data}'
 curl -s "$BASE/cashier/status" | jq .
 curl -s "$BASE/cashier/zones" | jq '.thresholds'
 ```
@@ -298,10 +362,10 @@ ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329
 ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/test_70/*.json"
 ```
 
-**Cashier evidence log** (`triggered` / `resolved` lines, GIF paths after compile):
+**Cashier structured task log** (one JSON line per processed frame; set `EVENTS_DIR` if not using the default):
 
 ```bash
-ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/evidence/cashier/logs/events.jsonl"
+ssh <user>@<jetson-ip> "tail -f /local/storage/events/task_101.jsonl"
 ```
 
 **Application log** (if your deployment writes here):
@@ -822,7 +886,7 @@ Recommended order:
 4. **`GET /cashier/zones`** (optional) — verify merged YAML on disk.  
 5. Set **`YOLO_MODEL`** (and env) so FrameBus outputs cashier classes on that deployment.  
 6. **`POST /detection/start`** — start FrameBus + workers.  
-7. **`GET /cashier/status`**, **`GET /cashier/stream/{camera_id}`**, **`GET /cashier/events`** — cashier UI and logs. **`GET /detection/stream`** is for **task events** (e.g. crossings), not cashier frame payloads.
+7. **`GET /cashier/status`**, **`GET /cashier/stream/{camera_id}`**, **`GET /cashier/events`** — cashier HTTP/SSE. **`GET /detection/stream`** carries **all** task events, including **`CASHIER_BOX_OPEN`** structured frames (`eventType`, `data`, …) alongside crossings and PPE.
 
 Copy-paste **`curl`**: [Complete cURL reference (all HTTP routes)](#complete-curl-reference-all-http-routes). SSH tail examples are in that section.
 
@@ -1521,9 +1585,10 @@ curl -sN "$BASE/detection/stream" \
   | jq '{eventType, taskId, channelId, line}'
 ```
 
-**Cashier** — use `/cashier/stream` or `/cashier/status` (not `/detection/stream`):
+**Cashier** — same structured events as **`GET /detection/stream?eventType=CASHIER_BOX_OPEN`**, plus `/cashier/stream` and `/cashier/status`:
 
 ```bash
+curl -sN "$BASE/detection/stream?eventType=CASHIER_BOX_OPEN" | head -n 5
 curl -sN "$BASE/cashier/stream/cam1" | head -n 20
 curl -s "$BASE/cashier/status" | jq .
 ```
@@ -1586,7 +1651,10 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 │   ├── cameras.py
 │   ├── tasks.py                # /api/tasks CRUD
 │   ├── detection.py            # start/stop/status + result queue for SSE
+│   ├── detection_stream.py     # SSE bridge + stream filters
 │   └── cashier.py              # /cashier/* (zones, SSE, evidence, media)
+├── docker-compose.yml          # GPU stack (NVIDIA runtime, port 9000)
+├── Dockerfile                  # Container image for the API
 ├── error_codes/                # Standardized success/error envelopes
 ├── config/                     # Default cashier zones YAML
 │   └── cashier_zones.yaml
@@ -1656,8 +1724,24 @@ export MOOD_MODEL="./models/best_mood.onnx"
 export PPE_MODEL="./models/best_PPE.onnx"
 ```
 
+### FrameBus, streams, and cashier (env)
+
+| Variable | Default | Role |
+|----------|---------|------|
+| `YOLO_MODEL` | `yolov8n.pt` | YOLO weights path in each FrameBus process |
+| `CONF_THRESHOLD` | `0.35` | YOLO confidence |
+| `DEVICE` | `0` | CUDA device index or device string |
+| `FILTER_CLASSES` | *(empty)* | Comma-separated class IDs to restrict detection |
+| `WIDTH` / `HEIGHT` | `1280` / `0` | Capture resize |
+| `SAVE_OUTPUT` | `True` | Persist frames under `OUTPUT_DIR` when true |
+| `OUTPUT_DIR` | `./outputs` | Base directory for saved runs |
+| `DETECTION_SSE_KEEPALIVE_SEC` | `30` | Idle ping interval for `GET /detection/stream` |
+| `CASHIER_CONFIG` | `./config/cashier_zones.yaml` | Cashier YAML path |
+| `CASHIER_EVIDENCE_DIR` | `./evidence/cashier` | Evidence storage |
+| `CASHIER_LOG_MAX` | `5000` | Max in-memory cashier events |
+
 ### Detection Thresholds
-- **YOLO Confidence**: 0.35 (configurable)
+- **YOLO Confidence**: 0.35 (configurable via `CONF_THRESHOLD`)
 - **Face Detection Minimum Size**: 10×10 pixels
 - **Mood Classification**: All 3 classes enabled
 
@@ -1679,9 +1763,9 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/detection/start` | POST | Start FrameBus + task workers (optional `camera_id`) |
 | `/detection/stop` | POST | Stop processing (optional `camera_id`; omit = all) |
 | `/detection/status` | GET | Operational status per camera |
-| `/detection/stream` | GET | SSE: task events (e.g. crossings), not pipeline frames |
+| `/detection/stream` | GET | SSE: task events (e.g. crossings, PPE); optional `taskId`, `taskName`, `eventType`, `channelId` |
 | `/cashier/status` | GET | Latest cashier summary per camera |
-| `/cashier/events` | GET | Paginated alert/transaction log (`severity`, `case_id`, `camera_id`, `limit`, `offset`) |
+| `/cashier/events` | GET | Paginated structured cashier event log (`severity`, `case_id`, `camera_id`, `limit`, `offset`) |
 | `/cashier/events` | DELETE | Clear in-memory event log |
 | `/cashier/evidence` | GET | List evidence JPEGs (`severity`, `case_id`, `limit`) |
 | `/cashier/evidence/{path}` | GET | Download one evidence JPEG |
@@ -1694,7 +1778,7 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/cashier/media/{camera_id}/latest/gif` | GET | Latest evidence GIF |
 | `/cashier/media/{camera_id}/event/{event_id}/jpg` | GET | JPG for event |
 | `/cashier/media/{camera_id}/event/{event_id}/gif` | GET | GIF for event |
-| `/cashier/media/{camera_id}/drawer_count` | GET | Drawer-open count from JSONL log |
+| `/cashier/media/{camera_id}/drawer_count` | GET | Cumulative drawer open-edge count from `cashier_drawer_open_totals.json` |
 | `/docs` | GET | Swagger UI |
 | `/redoc` | GET | ReDoc |
 
@@ -1707,7 +1791,7 @@ After starting the server (`uvicorn` on port **9000** by default):
 - Swagger UI: `http://localhost:9000/docs`
 - ReDoc: `http://localhost:9000/redoc`
 
-Supplementary docs: [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest + cURL + SSH + cashier **`data`/cases/evidence — single combined README), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL Part III + mocks + JSON), [`sse_cashier.md`](sse_cashier.md).
+Supplementary docs: [`docs/logs.md`](docs/logs.md) (tests, log paths, curl reference), [`docs/API_USAGE.md`](docs/API_USAGE.md) (API walkthrough including SSE), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest + cURL + SSH + cashier **`data`/cases/evidence — single combined README), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL Part III + mocks + JSON), [`sse_cashier.md`](sse_cashier.md).
 
 ## Models file
 https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link
