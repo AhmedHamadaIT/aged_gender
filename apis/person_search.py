@@ -11,7 +11,7 @@ from fastapi import HTTPException, UploadFile, File, Form
 from typing import Dict, Any
 
 from apis.base import BaseResource
-from services.person_search import PersonSearchTask
+from services.person_search import PersonSearchService
 from logger.logger_config import Logger
 
 log = Logger.get_logger(__name__)
@@ -23,27 +23,7 @@ class PersonSearchResource(BaseResource):
     def __init__(self):
         super().__init__()
         log.info("[PERSON_SEARCH API] Initializing Person Search Service...")
-        
-        # 1. Define the default task configuration
-        default_config = {
-            "taskId": 1,
-            "taskName": "Main Camera Person Indexer",
-            "algorithmType": "PERSON_SEARCH",
-            "channelId": 101,
-            "enable": True,
-            "detailConfig": {
-                "padding": 10
-            },
-            "validWeekday": [
-                "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", 
-                "FRIDAY", "SATURDAY", "SUNDAY"
-            ],
-            "validStartTime": 0,
-            "validEndTime": 86400000
-        }
-
-        # 2. Pass the config to the task initializer
-        self.person_search_task = PersonSearchTask(default_config)
+        self.person_search_service = PersonSearchService()
 
     async def search(self, file: UploadFile = File(...), top_k: int = Form(10)) -> Dict[str, Any]:
         """
@@ -56,7 +36,7 @@ class PersonSearchResource(BaseResource):
             image_bytes = await file.read()
             
             # 3. Fixed reference (was self.reid_service)
-            results = self.person_search_task.search_by_image(image_bytes, top_k=top_k)
+            results = self.person_search_service.search_by_image(image_bytes, top_k=top_k)
             
             return {
                 "status": "success",

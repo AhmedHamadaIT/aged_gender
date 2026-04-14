@@ -11,7 +11,7 @@ from fastapi import HTTPException, Form
 from typing import Dict, Any
 
 from apis.base import BaseResource
-from services.semantic_search import SemanticSearchTask
+from services.semantic_search import SemanticSearchService
 from logger.logger_config import Logger
 
 log = Logger.get_logger(__name__)
@@ -23,26 +23,7 @@ class SemanticSearchResource(BaseResource):
     def __init__(self):
         super().__init__()
         log.info("[SEMANTIC_SEARCH API] Initializing Semantic Search Service...")
-        
-        # 1. Define the default task configuration
-        default_config = {
-            "taskId": 2,
-            "taskName": "Main Camera Semantic Indexer",
-            "channelId": 101,
-            "enable": True,
-            "detailConfig": {
-                "padding": 10
-            },
-            "validWeekday": [
-                "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", 
-                "FRIDAY", "SATURDAY", "SUNDAY"
-            ],
-            "validStartTime": 0,
-            "validEndTime": 86400000
-        }
-
-        # 2. Pass the config to the task initializer
-        self.semantic_search_task = SemanticSearchTask(default_config)
+        self.semantic_search_service = SemanticSearchService()
 
     async def search_text(self, text_query: str = Form(...), top_k: int = Form(10)) -> Dict[str, Any]:
         """
@@ -52,8 +33,7 @@ class SemanticSearchResource(BaseResource):
             raise HTTPException(status_code=400, detail="Text query cannot be empty.")
 
         try:
-            # 3. Call the search_by_text method from the task
-            results = self.semantic_search_task.search_by_text(text_query=text_query, top_k=top_k)
+            results = self.semantic_search_service.search_by_text(text_query=text_query, top_k=top_k)
             
             return {
                 "status": "success",

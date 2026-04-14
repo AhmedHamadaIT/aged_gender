@@ -111,3 +111,25 @@ class IdentityManager:
             raise
 
         return point_id
+
+    def upsert_by_id(self, point_id: str, feature_vector: list[float], payload: dict = None) -> str:
+        """
+        Upsert a vector with a deterministic point ID.
+        If a point with this ID already exists, it is overwritten.
+        Used by EmbeddingWorker for progressive crop overwrites.
+        """
+        payload = payload or {}
+        try:
+            self.client.upsert(
+                collection_name=self.collection,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=feature_vector,
+                        payload=payload,
+                    )
+                ],
+            )
+        except Exception as e:
+            raise
+        return point_id
