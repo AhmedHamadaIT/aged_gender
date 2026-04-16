@@ -2,6 +2,21 @@
 
 This guide walks through every file you need to touch to add a brand new task (e.g. `CROWD_DENSITY`, `LOITERING`, `UNIFORM_CHECK`) to the ML server.
 
+**See also:** [logs.md](./logs.md) — pytest command, `EVENTS_DIR` JSONL paths, curl for `/detection/stream` and `/cashier/*`. [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — tests, cURL/SSH, and cashier **`data`** / cases. [SERVICE_TEST.md](./SERVICE_TEST.md) redirects there.
+
+---
+
+## Reference: structured task events (`CASHIER_BOX_OPEN`)
+
+[`CashierDrawerTask`](../services/cashier.py) is the in-repo pattern for tasks that must be **analytics-friendly**:
+
+- **`__call__`** returns a **list of one event dict per frame** (or `[]` if disabled). Each dict includes top-level **`eventType`**, **`taskId`**, **`taskName`**, **`channelId`**, plus a nested **`data`** object for integration (Eyego §4 for cashier).
+- **Disk:** append JSON lines to **`$EVENTS_DIR/task_<taskId>.jsonl`** (same layout as `CrossLineTask`).
+- **HTTP:** optional hooks such as [`push_structured_cashier_event`](../apis/cashier.py) update **`GET /cashier/status`** and **`GET /cashier/events`** (see [API_USAGE.md](./API_USAGE.md) §10).
+- **Cashier-only integration:** nested **`data`** is built by `build_cashier_spec_data` ([`services/cashier.py`](../services/cashier.py)) — URL bases (`CASHIER_CLOUD_IMAGE_BASE`, per-side bases, `CASHIER_FORCE_LOCAL_URLS`), **`deviceSN`** fallback chain (including `HOSTNAME`), and **`personStructural`** formatting (**pretty** default; `CASHIER_COMPACT_PERSON_STRUCTURAL` for one line). See [logs.md](./logs.md).
+
+When adding a new algorithm, mirror this shape if consumers need **`GET /detection/stream`** filters (`eventType`, `taskId`, `channelId`) and durable JSONL.
+
 ---
 
 ## Concepts to understand first
@@ -63,6 +78,8 @@ class Detection:
 ## Step-by-step: adding a new task
 
 ### Step 1 — Create `services/your_task.py`
+
+You can place the task class in a **dedicated module** or **next to a related service** in the same file (this repo keeps **`CashierDrawerTask`** and **`CashierService`** together in [`services/cashier.py`](../services/cashier.py), registered as `CASHIER_BOX_OPEN`).
 
 Your task is a class with:
 - `__init__(self, task_config: dict)` — receives the full task config from the backend
@@ -227,6 +244,11 @@ class DetailConfig(BaseModel):
     enableReid      : bool      = False
     # MASK_HAIRNET_CHEF_HAT
     alarmType       : List[str] = []
+    # CASHIER_BOX_OPEN
+    drawerOpenLimit : int       = 30
+    serviceWaitLimit: int       = 30
+    enableStaffList : bool      = False
+    staffIds        : List[int] = []
     # LOITERING
     dwellSeconds    : int       = 30    # <-- add this
 ```
@@ -240,7 +262,7 @@ class DetailConfig(BaseModel):
 - [ ] `apis/tasks.py → TaskRegistry.SUPPORTED` — `algorithmType` string added
 - [ ] `apis/tasks.py → DetailConfig` — any new fields added (if needed)
 
-That's it. The task worker, FrameBus, and SSE stream pick it up automatically.
+That's it. The task worker, FrameBus, and **`GET /detection/stream`** pick it up automatically whenever `__call__` returns non-empty event lists.
 
 ---
 
@@ -252,7 +274,8 @@ That's it. The task worker, FrameBus, and SSE stream pick it up automatically.
 | Never block inside `__call__` | The task worker has no timeout — a hanging task stalls that queue permanently |
 | Filter `track_id == -1` if you use tracking | BoT-SORT takes 1–2 frames to assign stable IDs; `-1` means "not yet tracked" |
 | Persist evidence yourself | The task worker does not save anything — persistence is the task's responsibility |
-| Use `put_nowait` semantics | The result queue drops silently if full — don't rely on every event making it to SSE; always write to JSONL too |
+| Use `put_nowait` semantics | The result queue drops silently if full — don't rely on every event making it to SSE; persist a durable copy (e.g. `$EVENTS_DIR/task_<taskId>.jsonl`) for replay |
+| SSE filter fields | Include top-level **`eventType`**, **`taskId`**, **`channelId`** (and **`taskName`** if needed) so `GET /detection/stream?...` filters work |
 | Keep `__init__` fast | It runs inside the worker process after `fork()` — loading large models here is fine, but keep it focused |
 
 ---
