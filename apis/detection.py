@@ -41,11 +41,13 @@ class DetectionResource(BaseResource):
         self._manager        = multiprocessing.Manager()
         self._shared_state   = self._manager.dict()
         self._result_queue   = self._manager.Queue()
+        self._embedding_queue = self._manager.Queue(maxsize=200)
 
         # Keyed by camera_id (str of channelId)
-        self._bus_processes  : Dict[str, multiprocessing.Process]            = {}
-        self._task_processes : Dict[str, Dict[str, multiprocessing.Process]] = {}
-        self._stop_events    : Dict[str, object]                             = {}
+        self._bus_processes       : Dict[str, multiprocessing.Process]            = {}
+        self._task_processes      : Dict[str, Dict[str, multiprocessing.Process]] = {}
+        self._stop_events         : Dict[str, object]                             = {}
+        self._embedding_worker    : multiprocessing.Process = None
 
     # ── Status ───────────────────────────────────────────────────────────────
 
@@ -129,13 +131,23 @@ class DetectionResource(BaseResource):
             # One FrameBus per camera — fans frames out to all task queues
             bus = multiprocessing.Process(
                 target=_run_frame_bus,
-                args=(chan_id, cameras[chan_id], self._shared_state, stop_event, task_queues),
+                args=(chan_id, cameras[chan_id], self._shared_state, stop_event, task_queues, self._embedding_queue),
                 daemon=True,
             )
             self._bus_processes[chan_id] = bus
             self._stop_events[chan_id]   = stop_event
             bus.start()
             started_cameras.append(chan_id)
+
+        # ── Start the shared EmbeddingWorker (if not already running) ─────
+        if self._embedding_worker is None or not self._embedding_worker.is_alive():
+            self._embedding_stop = self._manager.Event()
+            self._embedding_worker = multiprocessing.Process(
+                target=_run_embedding_worker,
+                args=(self._embedding_queue, self._embedding_stop),
+                daemon=True,
+            )
+            self._embedding_worker.start()
 
         return {
             "status" : "started",
@@ -162,6 +174,12 @@ class DetectionResource(BaseResource):
                 p.join(timeout=5)
             stopped.append(cam_id)
 
+        # ── Stop EmbeddingWorker if no cameras remain running ─────────────
+        still_running = {k: v for k, v in self._bus_processes.items() if v.is_alive()}
+        if not still_running and self._embedding_worker and self._embedding_worker.is_alive():
+            self._embedding_stop.set()
+            self._embedding_worker.join(timeout=10)
+
         return {"status": "stopped", "cameras": stopped}
 
     def _stop_all(self, _=None):
@@ -176,9 +194,14 @@ class DetectionResource(BaseResource):
 # ─────────────────────────────────────────────
 # Top-level picklable entry for the FrameBus process
 # ─────────────────────────────────────────────
-def _run_frame_bus(camera_id, rtsp_url, shared_state, stop_event, task_queues):
+def _run_frame_bus(camera_id, rtsp_url, shared_state, stop_event, task_queues, embedding_queue=None):
     from frame_bus import FrameBus
-    FrameBus(camera_id, rtsp_url, shared_state, stop_event, task_queues).run()
+    FrameBus(camera_id, rtsp_url, shared_state, stop_event, task_queues, embedding_queue).run()
+
+
+def _run_embedding_worker(embedding_queue, stop_event):
+    from embedding_worker import run_embedding_worker
+    run_embedding_worker(embedding_queue, stop_event)
 
 
 # ── Singleton ─────────────────────────────────

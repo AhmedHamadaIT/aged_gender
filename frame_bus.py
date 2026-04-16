@@ -6,6 +6,10 @@ FrameBus — runs inside each camera process.
 Captures frames, runs YOLO BoT-SORT tracking, then fans out
 {frame + tracked detections} to each registered task queue.
 
+Additionally saves the best crop per tracked person (progressive overwrite)
+and emits lightweight messages to an embedding_queue for async embedding
+extraction by the EmbeddingWorker.
+
 Track IDs are assigned here and carried on each Detection object,
 so task workers never need to run their own detector or tracker.
 """
@@ -13,8 +17,9 @@ so task workers never need to run their own detector or tracker.
 import os
 import time
 import base64
+import hashlib
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 import cv2
 from ultralytics import YOLO
@@ -26,22 +31,25 @@ from services.detector import Detection
 class FrameBus:
     def __init__(
         self,
-        camera_id   : str,
-        rtsp_url    : str,
+        camera_id       : str,
+        rtsp_url        : str,
         shared_state,
         stop_event,
-        task_queues : Dict[str, object],  # {task_id: Queue}
+        task_queues     : Dict[str, object],  # {task_id: Queue}
+        embedding_queue = None,                # Queue for EmbeddingWorker
     ):
-        self.camera_id    = camera_id
-        self.rtsp_url     = rtsp_url
-        self.shared_state = shared_state
-        self.stop_event   = stop_event
-        self.task_queues  = task_queues
+        self.camera_id       = camera_id
+        self.rtsp_url        = rtsp_url
+        self.shared_state    = shared_state
+        self.stop_event      = stop_event
+        self.task_queues     = task_queues
+        self.embedding_queue = embedding_queue
 
         self.save_output = os.getenv("SAVE_OUTPUT", "True").lower() in ("true", "1", "yes")
         self.out_dir     = os.path.join(os.getenv("OUTPUT_DIR", "./outputs"), camera_id)
         self.width       = int(os.getenv("WIDTH",  "1280"))
         self.height      = int(os.getenv("HEIGHT", "0"))
+        self._padding    = int(os.getenv("REID_PADDING", "10"))
 
         model_path   = os.getenv("YOLO_MODEL", "yolov8n.pt")
         conf         = float(os.getenv("CONF_THRESHOLD", "0.35"))
@@ -55,6 +63,13 @@ class FrameBus:
         self._device  = device
         self._classes = classes
         self._names   = self._model.names
+
+        # ── Best-crop-per-track state ─────────────────────────────────────
+        # { track_id: {"best_area": int, "last_frame": int} }
+        self._track_state: Dict[int, Dict] = {}
+        self._gallery_dir = os.getenv("GALLERY_DIR", "/local/storage/gallery")
+        self._crop_dir    = os.path.join(self._gallery_dir, "crops", camera_id)
+        os.makedirs(self._crop_dir, exist_ok=True)
 
     def run(self):
         from stream import frames
@@ -117,6 +132,9 @@ class FrameBus:
                 last_det   = len(detections)
                 total_detections += last_det
 
+                # ── Save best crop per tracked person ─────────────────────────
+                self._save_best_crops(resized_frame, detections, frame_count)
+
                 annotated = results[0].plot() if self.save_output and results else resized_frame
 
                 payload = {
@@ -162,6 +180,78 @@ class FrameBus:
                 "running": False,
             }
             print(f"[{self.camera_id}] FrameBus stopped. Frames: {frame_count}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Best-crop-per-track: progressive overwrite
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _save_best_crops(self, frame, detections, frame_id: int):
+        """
+        For each tracked person, save the crop only when the bounding box area
+        exceeds the previous best by 20%. Emits a message to the embedding_queue
+        so the EmbeddingWorker can extract embeddings asynchronously.
+        """
+        persons = [d for d in detections if d.class_name == "person" and d.track_id not in (None, -1)]
+        current_track_ids = set()
+
+        for det in persons:
+            tid = det.track_id
+            current_track_ids.add(tid)
+
+            x1, y1, x2, y2 = det.bbox
+            current_area = (x2 - x1) * (y2 - y1)
+
+            state = self._track_state.get(tid, {"best_area": 0, "last_frame": frame_id})
+            previous_best = state["best_area"]
+            state["last_frame"] = frame_id
+
+            # Only save when crop is 20% larger (or first time)
+            if current_area > (previous_best * 1.2):
+                crop = self._crop_bbox(frame, x1, y1, x2, y2)
+                if crop.size == 0:
+                    self._track_state[tid] = state
+                    continue
+
+                # Deterministic filename: 1 file per track per camera
+                crop_path = os.path.join(self._crop_dir, f"track_{tid}.jpg")
+                cv2.imwrite(crop_path, crop)
+
+                # Emit to embedding worker (non-blocking)
+                if self.embedding_queue is not None:
+                    msg = {
+                        "camera_id" : self.camera_id,
+                        "track_id"  : tid,
+                        "crop_path" : crop_path,
+                        "frame_id"  : frame_id,
+                        "bbox"      : [x1, y1, x2, y2],
+                        "confidence": det.confidence,
+                        "timestamp" : datetime.utcnow().isoformat(),
+                    }
+                    try:
+                        self.embedding_queue.put_nowait(msg)
+                    except Exception:
+                        pass  # drop if worker is backlogged — crop is on disk
+
+                state["best_area"] = current_area
+
+            self._track_state[tid] = state
+
+        # ── Cleanup stale tracks (not seen in 60 frames) ──
+        stale = [
+            t for t, s in self._track_state.items()
+            if (frame_id - s["last_frame"] > 60) and (t not in current_track_ids)
+        ]
+        for t in stale:
+            del self._track_state[t]
+
+    def _crop_bbox(self, frame, x1: int, y1: int, x2: int, y2: int):
+        """Crop bounding box with padding, clamped to frame bounds."""
+        h, w = frame.shape[:2]
+        x1 = max(0, x1 - self._padding)
+        y1 = max(0, y1 - self._padding)
+        x2 = min(w, x2 + self._padding)
+        y2 = min(h, y2 + self._padding)
+        return frame[y1:y2, x1:x2]
 
     # ─────────────────────────────────────────────────────────────────────────
 

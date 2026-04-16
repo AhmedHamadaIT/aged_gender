@@ -594,6 +594,115 @@ The following structure applies to **offline or script-driven** runs that use `C
   }
 }
 ```
+### POST `/person_search/search`
+
+Upload an image to find the top **K** similar identities using image-based person re-identification (OSNet) from the Qdrant vector database.  
+This is used to track a specific person across different cameras and frames.
+
+#### Parameters (Multipart Form Data)
+- `file`: Image file containing the person to search for (`UploadFile`).
+- `top_k` *(optional)*: Integer — number of top matches to return. Default is `10`.
+
+#### Sample Response
+```json
+{
+  "status": "success",
+  "count": 3,
+  "results": [
+    {
+      "score": 0.6129,
+      "metadata": {
+        "type": "person_search",
+        "camera_id": "test_cam",
+        "track_id": 13,
+        "image_path": "/local/storage/gallery/crops/test_cam/track_13.jpg",
+        "frame_id": 13,
+        "confidence": 0.7773560881614685,
+        "timestamp": "2026-04-14T11:23:05.384983"
+      }
+    },
+    {
+      "score": 0.5816,
+      "metadata": {
+        "type": "person_search",
+        "camera_id": "test_cam",
+        "track_id": 37,
+        "image_path": "/local/storage/gallery/crops/test_cam/track_37.jpg",
+        "frame_id": 15,
+        "confidence": 0.496114581823349,
+        "timestamp": "2026-04-14T11:23:05.684256"
+      }
+    },
+    {
+      "score": 0.5759,
+      "metadata": {
+        "type": "person_search",
+        "camera_id": "test_cam",
+        "track_id": 5,
+        "image_path": "/local/storage/gallery/crops/test_cam/track_5.jpg",
+        "frame_id": 1,
+        "confidence": 0.7277824878692627,
+        "timestamp": "2026-04-14T11:22:59.393466"
+      }
+    }
+  ]
+}
+```
+
+### POST `/semantic_search/search`
+
+Upload an image to retrieve the top **K** semantically similar objects or scenes using image embeddings (mobileclip2-s0) from the Qdrant vector database.
+
+#### Parameters (Multipart Form Data)
+
+* `file`: Image file to search with (`UploadFile`).
+* `top_k` *(optional)*: Integer — number of top matches to return. Default is `10`.
+
+#### Sample Response
+
+```json
+{
+  "status": "success",
+  "count": 3,
+  "results": [
+    {
+      "score": 0.2387,
+      "metadata": {
+        "type": "semantic_search",
+        "camera_id": "test_cam",
+        "track_id": 5,
+        "image_path": "/local/storage/gallery/crops/test_cam/track_5.jpg",
+        "frame_id": 1,
+        "confidence": 0.7277824878692627,
+        "timestamp": "2026-04-14T11:22:59.393466"
+      }
+    },
+    {
+    "score": 0.2387,
+      "metadata": {
+        "type": "semantic_search",
+        "camera_id": "test_cam",
+        "track_id": 5,
+        "image_path": "/local/storage/gallery/crops/test_cam/track_5.jpg",
+        "frame_id": 1,
+        "confidence": 0.7277824878692627,
+        "timestamp": "2026-04-14T11:22:59.393466"
+      }
+    },
+    {
+     "score": 0.2387,
+      "metadata": {
+        "type": "semantic_search",
+        "camera_id": "test_cam",
+        "track_id": 5,
+        "image_path": "/local/storage/gallery/crops/test_cam/track_5.jpg",
+        "frame_id": 1,
+        "confidence": 0.7277824878692627,
+        "timestamp": "2026-04-14T11:22:59.393466"
+    }
+  ]
+}
+```
 
 ---
 
@@ -1639,6 +1748,19 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 
 ---
 
+### 6. Person Search 
+- **Model**: `models/os_net.pt`
+- **Input**: person crops (224×224 pixels)
+- **Output**: embeddings
+
+### 7. Semantic Search 
+- **Model**: `models/mobile-clip2-s0.pt`
+- **Framework**: ONNX Runtime
+- **Input**: person crops 
+- **Output**: embeddings
+
+
+---
 ## 📁 Project Structure
 
 ```
@@ -1665,7 +1787,10 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 │   ├── yolov8n.pt             # YOLO v8 Nano (~25 MB)
 │   ├── best_ppe.onnx           # PPE ONNX (~38 MB)
 │   ├── best_aged_gender_6.onnx # Age/Gender ONNX (~85 MB)
-│   └── best_mood.onnx          # Mood/Emotion ONNX (~15 MB)
+│   ├── best_mood.onnx          # Mood/Emotion ONNX (~15 MB)
+│   ├── os_net.pt               #Person search
+│   ├── text_encoder.onnx       #semantic search
+│   └── image_encoder.onnx      #semantic search
 ├── services/                   # Service modules
 │   ├── detector.py             # YOLO detection service (REGISTRY / pipeline)
 │   ├── age_gender.py           # Age/Gender classification
@@ -1673,7 +1798,12 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 │   ├── mood.py                 # Mood/Emotion detection
 │   ├── cross_line.py           # CROSS_LINE task
 │   ├── mask_hairnet_chef_hat.py
-│   └── cashier.py              # CashierService + CashierDrawerTask (TASK key CASHIER_BOX_OPEN)
+│   ├── cashier.py              # CashierService + CashierDrawerTask (TASK key CASHIER_BOX_OPEN)
+│   ├── person_search.py
+│   └── semantic_search.py
+├── store/
+│   └── Identity_manger.py      #handling qdrant embeddings
+
 ├── scripts/                    # Testing and utility scripts
 │   └── test_image_pipeline.py  # Image inference testing script
 ├── tests/                      # pytest modules when present (`pytest` from repo root)
@@ -1779,6 +1909,8 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/cashier/media/{camera_id}/event/{event_id}/jpg` | GET | JPG for event |
 | `/cashier/media/{camera_id}/event/{event_id}/gif` | GET | GIF for event |
 | `/cashier/media/{camera_id}/drawer_count` | GET | Cumulative drawer open-edge count from `cashier_drawer_open_totals.json` |
+| `/person_search/search` | POST | ReID-based person retrieval using OSNet + Qdrant |
+| `/semantic_search/search` | POST | Image-based semantic search using MobileCLIP2-S0 + Qdrant |
 | `/docs` | GET | Swagger UI |
 | `/redoc` | GET | ReDoc |
 

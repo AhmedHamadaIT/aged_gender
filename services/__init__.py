@@ -22,7 +22,7 @@ from .cross_line            import CrossLineTask
 from .mask_hairnet_chef_hat import MaskHairnetChefHatTask
 from .cashier import CashierService, CashierDrawerTask
 
-# Simple per-frame services (used by CameraPipeline internals and legacy code)
+# Simple per-frame services (used by FrameBus internals and legacy code)
 REGISTRY = {
     "detector"  : DetectorService,
     "age_gender": AgeGenderService,

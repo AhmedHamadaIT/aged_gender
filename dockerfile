@@ -33,6 +33,7 @@ WORKDIR /app
 # Use --no-deps on ultralytics to prevent pip from pulling in CPU torch
 # Install all other ultralytics deps manually
 RUN python3 -m pip install --no-cache-dir --no-deps \
+        --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
         --extra-index-url https://pypi.org/simple \
         ultralytics && \
     python3 -m pip install --no-cache-dir \
@@ -52,7 +53,11 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         py-cpuinfo \
         fastapi \   
         onnxruntime \     
-        "uvicorn[standard]"
+        "uvicorn[standard]"\
+        qdrant-client \
+        gdown \
+        python-multipart \ 
+        open_clip_torch
 
 # ── Create directories ───────────────────────
 RUN mkdir -p /app/models /app/videos /app/outputs
