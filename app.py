@@ -167,7 +167,7 @@ async def detection_stream(
         None,
         description="If set, only events with this eventType (e.g. CROSS_LINE).",
     ),
-    channelId: Optional[int] = Query(
+    channelId: Optional[str] = Query(
         None,
         description="If set, only events from this camera channel id.",
     ),

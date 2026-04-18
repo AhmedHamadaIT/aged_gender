@@ -41,7 +41,7 @@ class TaskConfig(BaseModel):
     taskId        : int
     taskName      : str
     algorithmType : str
-    channelId     : int
+    channelId     : str
     enable        : bool        = True
     threshold     : int         = 50
     areaPosition  : str         = "[]"

@@ -35,7 +35,7 @@ class StreamFilters:
     task_id: Optional[int] = None
     task_name: Optional[str] = None
     event_type: Optional[str] = None
-    channel_id: Optional[int] = None
+    channel_id: Optional[str] = None
 
     def matches(
         self,
@@ -48,7 +48,7 @@ class StreamFilters:
             return False
         if self.channel_id is not None:
             ch = event.get("channelId")
-            if ch is None or int(ch) != int(self.channel_id):
+            if ch is None or str(ch) != str(self.channel_id):
                 return False
         if self.task_name is not None:
             name = event.get("taskName")

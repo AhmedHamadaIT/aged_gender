@@ -43,7 +43,6 @@ mediamtx*.yml
 store/
 # Test / QA artifacts
 test_logs/
-BUG_REPORT.md
 # Local export trees (e.g. batch image+json dumps; not under outputs/)
 output*/
 models/
