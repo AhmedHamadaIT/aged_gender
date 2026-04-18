@@ -18,6 +18,7 @@ Base URL for all examples: `http://localhost:9000`
 8. [Common Errors](#8-common-errors)
 9. [Full Walkthrough Example](#9-full-walkthrough-example)
 10. [Cashier monitor API (`/cashier/*`)](#10-cashier-monitor-api-cashier)
+11. [Live Stream WebSocket (`/cameras/{id}/live`)](#11-live-stream-websocket-camerasidlive)
 
 ---
 
@@ -353,11 +354,13 @@ curl http://localhost:9000/detection/status
 
 ## 5. Stream Results (SSE)
 
-Connect once and receive events in real-time. Events arrive as they happen — one JSON object per **line crossing**, **PPE violation**, or **cashier frame** (`CASHIER_BOX_OPEN` emits one structured event per processed frame while detection is running).
+Connect once and receive **detection events** (line crossings, PPE violations, cashier frames) in real-time as JSON. For **live annotated video frames**, use the WebSocket endpoint instead — see [section 11](#11-live-stream-websocket-camerasidlive).
 
-**Multiple clients** can connect simultaneously; each client receives its own copy of every event (in-process broadcast). Idle connections receive `: ping` keepalive comments every ~30 seconds.
+Events arrive as they happen — one JSON object per **line crossing**, **PPE violation**, or **cashier frame** (`CASHIER_BOX_OPEN` emits one structured event per processed frame while detection is running).
 
-> **Deployment note:** The broadcast runs within a single uvicorn process. If you run multiple uvicorn workers (`--workers N`), subscribers in different workers will not share events. The current [`docker-compose.yml`](../docker-compose.yml) runs one worker, so broadcast works correctly as deployed.
+**Multiple clients** can connect simultaneously; each client receives its own copy of every event. Idle connections receive `: ping` keepalive comments every ~30 seconds.
+
+> **Deployment note:** When Redis is configured (`REDIS_URL`), the SSE bridge subscribes from `live:event:*` on Redis in addition to the in-process queue — multiple uvicorn workers can all serve SSE clients from the same broadcast. Without Redis it falls back to a single-worker in-process broadcast (default [`docker-compose.yml`](../docker-compose.yml) runs one worker).
 
 ```bash
 # All events from all tasks and cameras
@@ -750,7 +753,18 @@ curl -s http://localhost:9000/cashier/status
 curl -s "http://localhost:9000/cashier/events?limit=5"
 # curl -N http://localhost:9000/cashier/stream/1
 
-# 7. Stop when done
+# 7. Open live annotated video stream in a browser (WebSocket — see section 11)
+# Paste this HTML into a file and open it in your browser:
+# <img id="s"> <script>
+#   function c(id){const w=new WebSocket(`ws://localhost:9000/cameras/${id}/live`);
+#   w.binaryType="arraybuffer";
+#   w.onmessage=e=>{const b=new Blob([e.data],{type:"image/jpeg"});
+#   URL.revokeObjectURL(document.getElementById("s").src);
+#   document.getElementById("s").src=URL.createObjectURL(b)};
+#   w.onclose=()=>setTimeout(()=>c(id),2000);}c("1");
+# </script>
+
+# 8. Stop when done
 curl -X POST http://localhost:9000/detection/stop
 ```
 
@@ -912,6 +926,154 @@ curl -s -o latest.gif "http://localhost:9000/cashier/media/1/latest/gif"
 ```
 
 Polygon needs at least 3 points. Persons whose centroid falls outside all zones are ignored. If `areaPosition` is `"[]"`, the entire frame is the detection zone.
+
+---
+
+## 11. Live Stream WebSocket (`/cameras/{id}/live`)
+
+Real-time annotated video stream for any running camera. FrameBus draws YOLO bounding boxes and BoT-SORT track IDs on each frame and publishes them to Redis; the WebSocket endpoint subscribes from Redis and pushes raw JPEG bytes to connected browser clients.
+
+**Transport design:**
+- Messages are **binary** (raw JPEG bytes) — no Base64 encoding, no JSON wrapper
+- Frames are **dropped** (never queued) when a client cannot receive within 50 ms (`WS_SEND_TIMEOUT_MS`) — prevents memory growth on slow or hidden browser tabs
+- Requires Redis (configure `REDIS_URL`; the Docker Compose stack starts Redis automatically)
+- FrameBus publishes at `REDIS_LIVE_FPS` (default 13 fps); cadence auto-adjusts to measured camera FPS
+- WebSocket does **not** auto-reconnect — implement a 2-second retry loop (see examples below)
+
+### Endpoints
+
+| Endpoint | Protocol | Content | Description |
+|---|---|---|---|
+| `/cameras/{camera_id}/live` | WebSocket binary | JPEG bytes | Annotated frame stream for one camera |
+| `/cameras/{camera_id}/events` | WebSocket text | JSON string | Detection event stream for one camera |
+
+### Live annotated frame stream
+
+```bash
+# Verify the WebSocket upgrade handshake (expects HTTP 101)
+curl -i -N \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  -H "Sec-WebSocket-Version: 13" \
+  http://localhost:9000/cameras/1/live
+```
+
+**Browser (minimal HTML — save as `stream.html` and open in browser):**
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { background:#111; color:#0f0; font-family:monospace; text-align:center; }
+    img  { max-width:100%; border:2px solid #0f0; margin-top:16px; }
+  </style>
+</head>
+<body>
+  <h2>Camera 1 — Live Annotated Stream</h2>
+  <div id="status">Connecting…</div>
+  <img id="stream" alt="stream" />
+  <script>
+    function connect(cameraId) {
+      const ws = new WebSocket(`ws://localhost:9000/cameras/${cameraId}/live`);
+      ws.binaryType = "arraybuffer";
+      ws.onopen  = () => document.getElementById("status").textContent = "Connected";
+      ws.onclose = () => {
+        document.getElementById("status").textContent = "Reconnecting…";
+        setTimeout(() => connect(cameraId), 2000);   // manual reconnect required
+      };
+      ws.onerror = () => ws.close();
+      ws.onmessage = e => {
+        const blob = new Blob([e.data], { type: "image/jpeg" });
+        const img  = document.getElementById("stream");
+        URL.revokeObjectURL(img.src);                // free previous frame memory
+        img.src = URL.createObjectURL(blob);
+      };
+    }
+    connect("1");
+  </script>
+</body>
+</html>
+```
+
+### Detection event stream (WebSocket)
+
+```bash
+# Connect and print received JSON events (requires websocat or similar CLI tool)
+websocat ws://localhost:9000/cameras/1/events
+```
+
+**Browser:**
+
+```javascript
+function connectEvents(cameraId) {
+    const ws = new WebSocket(`ws://localhost:9000/cameras/${cameraId}/events`);
+    ws.onmessage = e => {
+        const event = JSON.parse(e.data);
+        console.log(event.eventType, event.timestamp, event.taskId);
+    };
+    ws.onclose = () => setTimeout(() => connectEvents(cameraId), 2000);
+}
+connectEvents("1");
+```
+
+### Serving multiple cameras simultaneously
+
+Each camera has its own WebSocket channel:
+
+```javascript
+["1", "2", "3"].forEach(id => {
+    const img = document.createElement("img");
+    document.body.appendChild(img);
+
+    function connect() {
+        const ws = new WebSocket(`ws://localhost:9000/cameras/${id}/live`);
+        ws.binaryType = "arraybuffer";
+        ws.onmessage = e => {
+            URL.revokeObjectURL(img.src);
+            img.src = URL.createObjectURL(new Blob([e.data], { type: "image/jpeg" }));
+        };
+        ws.onclose = () => setTimeout(connect, 2000);
+    }
+    connect();
+});
+```
+
+### Configuration env vars
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL (required for live stream) |
+| `REDIS_LIVE_FPS` | `13` | Target publish rate in frames per second. FrameBus auto-adjusts cadence to match measured camera FPS. |
+| `WS_SEND_TIMEOUT_MS` | `50` | Max milliseconds to wait for a WebSocket send before dropping the frame. Prevents TCP buffer bloat on slow clients. |
+
+### Verify Redis is running
+
+```bash
+# From Docker Compose
+docker compose ps redis
+# Expect: redis   redis:7-alpine   Up
+
+# Check FrameBus connected to Redis
+docker compose logs yolo-detect | grep "FrameBus: Redis"
+# Expect: [1] FrameBus: Redis connected (redis://redis:6379/0)
+
+# Verify frames are being published (redis-cli inside the redis container)
+docker exec -it redis redis-cli SUBSCRIBE live:frame:1
+# Messages arrive every ~80ms (13fps)
+```
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| WebSocket closes immediately | Redis not reachable | Check `REDIS_URL`; verify `docker compose ps redis` is Up |
+| Stream connects but shows nothing | Detection not started | Run `POST /detection/start` first |
+| Very laggy / old frames | `WS_SEND_TIMEOUT_MS` too high | Lower it (e.g. `WS_SEND_TIMEOUT_MS=30`) or check client CPU |
+| WebSocket closes after ~30s idle | Normal — client should reconnect | Implement `ws.onclose = () => setTimeout(connect, 2000)` |
+
+---
 
 ### `validStartTime` / `validEndTime` — milliseconds from midnight
 

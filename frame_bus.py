@@ -27,6 +27,12 @@ from ultralytics import YOLO
 from utils import resize, save_frame
 from services.detector import Detection
 
+try:
+    import redis as _redis_lib
+    _REDIS_AVAILABLE = True
+except ImportError:
+    _REDIS_AVAILABLE = False
+
 
 class FrameBus:
     def __init__(
@@ -71,6 +77,27 @@ class FrameBus:
         self._crop_dir    = os.path.join(self._gallery_dir, "crops", camera_id)
         os.makedirs(self._crop_dir, exist_ok=True)
 
+        # ── Redis live-stream publisher ────────────────────────────────────
+        # Publishes annotated JPEG frames to channel  live:frame:{camera_id}
+        # so the FastAPI WebSocket endpoint can fan them out to browser clients.
+        self._redis: Optional[object] = None
+        if _REDIS_AVAILABLE:
+            try:
+                redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+                self._redis = _redis_lib.Redis.from_url(redis_url, socket_connect_timeout=2)
+                self._redis.ping()
+                print(f"[{camera_id}] FrameBus: Redis connected ({redis_url})")
+            except Exception as exc:
+                print(f"[{camera_id}] FrameBus: Redis unavailable — live stream disabled ({exc})")
+                self._redis = None
+
+        # Publish every Nth frame to hit the target REDIS_LIVE_FPS.
+        # We don't know the actual camera FPS at init time, so we start with
+        # a conservative default and recalculate after the first FPS measurement.
+        _target_fps        = float(os.getenv("REDIS_LIVE_FPS", "13"))
+        self._publish_every = max(1, round(25.0 / _target_fps))  # assume 25 FPS until measured
+        self._target_fps    = _target_fps
+
     def run(self):
         from stream import frames
 
@@ -111,6 +138,9 @@ class FrameBus:
                     fps         = round(fps_counter / elapsed, 2)
                     fps_counter = 0
                     fps_timer   = time.time()
+                    # Recalculate publish cadence once we have a real FPS measurement
+                    if fps > 0 and self._redis is not None:
+                        self._publish_every = max(1, round(fps / self._target_fps))
 
                 resized_frame = resize(frame, self.width, self.height)
 
@@ -135,7 +165,20 @@ class FrameBus:
                 # ── Save best crop per tracked person ─────────────────────────
                 self._save_best_crops(resized_frame, detections, frame_count)
 
-                annotated = results[0].plot() if self.save_output and results else resized_frame
+                # Always annotate — needed for live stream even when SAVE_OUTPUT is off
+                annotated = results[0].plot() if results else resized_frame
+
+                # ── Publish annotated JPEG to Redis (live stream) ──────────────
+                if self._redis is not None and frame_count % self._publish_every == 0:
+                    try:
+                        _, _buf = cv2.imencode(
+                            ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75]
+                        )
+                        self._redis.publish(
+                            f"live:frame:{self.camera_id}", bytes(_buf)
+                        )
+                    except Exception:
+                        pass  # never block inference on Redis errors
 
                 payload = {
                     "camera_id" : self.camera_id,

@@ -38,7 +38,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI,UploadFile, File, Form ,Query, Request
+from fastapi import FastAPI, UploadFile, File, Form, Query, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from apis.cameras   import camera_registry, CameraSetupRequest
@@ -50,6 +50,7 @@ from apis.detection_stream import (
     StreamFilters,
 )
 from apis.tasks     import task_registry, TaskConfig
+from apis.ws_live   import live_frames_ws, live_events_ws
 from schemas        import DetectionRequest, DetectionStatus
 from apis.person_search import person_search_api
 from apis.semantic_search import semantic_search_api
@@ -220,6 +221,48 @@ async def detection_stream(
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+# ─────────────────────────────────────────────
+# Live stream WebSocket routes
+# ─────────────────────────────────────────────
+
+@app.websocket("/cameras/{camera_id}/live")
+async def camera_live_stream(websocket: WebSocket, camera_id: str):
+    """
+    Binary WebSocket stream of annotated JPEG frames for one camera.
+
+    Each message is raw JPEG bytes — display in a browser with:
+
+        const ws = new WebSocket("ws://host/cameras/cam1/live");
+        ws.binaryType = "arraybuffer";
+        ws.onmessage = e => {
+            img.src = URL.createObjectURL(new Blob([e.data], {type:"image/jpeg"}));
+        };
+        ws.onclose = () => setTimeout(() => connect("cam1"), 2000);  // must reconnect manually
+
+    Frames are dropped (never queued) when the client is slower than
+    WS_SEND_TIMEOUT_MS (default 50 ms) — this prevents memory growth on
+    slow or hidden browser tabs.
+
+    Requires Redis (REDIS_URL). FrameBus publishes frames at REDIS_LIVE_FPS
+    (default 13 fps) to keep bandwidth reasonable without visible quality loss.
+    """
+    await live_frames_ws(websocket, camera_id)
+
+
+@app.websocket("/cameras/{camera_id}/events")
+async def camera_events_stream(websocket: WebSocket, camera_id: str):
+    """
+    JSON WebSocket stream of detection events for one camera.
+
+    Each message is a JSON string with the same shape as GET /detection/stream
+    SSE events (eventType, taskId, timestamp, etc.).
+
+    ws.onmessage = e => console.log(JSON.parse(e.data));
+    ws.onclose   = () => setTimeout(() => connect("cam1"), 2000);
+    """
+    await live_events_ws(websocket, camera_id)
+
 
 # ─────────────────────────────────────────────
 # ReID routes

@@ -8,6 +8,15 @@
 
 services:
 
+  # ── Redis (live-stream pub/sub broker) ──────
+  redis:
+    container_name: redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --save "" --appendonly no   # memory-only, no disk persistence needed
+
   # ── Qdrant vector DB (ReID identity store) ──
   qdrant:
     container_name: qdrant
@@ -32,6 +41,7 @@ services:
 
     depends_on:
       - qdrant
+      - redis
 
     env_file:
       - .env

@@ -57,7 +57,8 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         qdrant-client \
         gdown \
         python-multipart \ 
-        open_clip_torch
+        open_clip_torch \
+        redis
 
 # ── Create directories ───────────────────────
 RUN mkdir -p /app/models /app/videos /app/outputs

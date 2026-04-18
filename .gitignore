@@ -35,6 +35,15 @@ pytest.ini
 curl_smoke.sh 
 # Project Specific
 outputs/
+# mediamtx binary & local config (download separately)
+bin/
+mediamtx.yml
+mediamtx*.yml
+# Runtime storage (created by FrameBus / task workers)
+store/
+# Test / QA artifacts
+test_logs/
+BUG_REPORT.md
 # Local export trees (e.g. batch image+json dumps; not under outputs/)
 output*/
 models/

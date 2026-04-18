@@ -54,12 +54,34 @@ _evidence_dir  = Path(os.getenv("CASHIER_EVIDENCE_DIR", "./evidence/cashier"))
 # ─────────────────────────────────────────────
 class _SSEPublisher:
     """
-    Thread-safe SSE broadcaster.  The event loop is captured lazily the
-    first time a client subscribes (which happens in an async context).
+    Thread-safe SSE broadcaster with dual delivery:
+
+    Path 1 — asyncio queues (in-process):
+        The worker thread calls publish() which schedules onto the event loop.
+        Works in a single uvicorn worker. Always active.
+
+    Path 2 — Redis Pub/Sub (multi-worker):
+        publish() also does redis.publish() synchronously on the worker thread.
+        stream() subscribes to Redis so any uvicorn worker can serve cashier SSE.
+        Active only when REDIS_URL is set and Redis is reachable.
     """
     def __init__(self) -> None:
         self._queues: Dict[str, Set[asyncio.Queue]] = defaultdict(set)
         self._loop  : Optional[asyncio.AbstractEventLoop] = None
+
+        # Sync Redis client — used from worker threads in publish()
+        self._redis_sync: Optional[Any] = None
+        _redis_url = os.getenv("REDIS_URL", "")
+        if _redis_url:
+            try:
+                import redis as _redis_lib
+                self._redis_sync = _redis_lib.Redis.from_url(
+                    _redis_url, socket_connect_timeout=2
+                )
+                self._redis_sync.ping()
+            except Exception as exc:
+                print(f"[cashier/_SSEPublisher] Redis unavailable: {exc}")
+                self._redis_sync = None
 
     def _ensure_loop(self) -> None:
         """Capture the running loop — must be called from async context."""
@@ -71,15 +93,26 @@ class _SSEPublisher:
 
     def publish(self, camera_id: str, event_type: str, payload: Dict[str, Any]) -> None:
         """Called from background worker threads."""
-        if not self._loop:
-            return
         msg = {"event": event_type, "camera_id": camera_id,
                "ts": time.time(), "data": payload}
-        for q in list(self._queues.get(camera_id, set())):
+
+        # Path 1: in-process asyncio queues
+        if self._loop:
+            for q in list(self._queues.get(camera_id, set())):
+                try:
+                    self._loop.call_soon_threadsafe(q.put_nowait, msg)
+                except asyncio.QueueFull:
+                    pass
+
+        # Path 2: Redis Pub/Sub (enables multi-worker SSE serving)
+        if self._redis_sync is not None:
             try:
-                self._loop.call_soon_threadsafe(q.put_nowait, msg)
-            except asyncio.QueueFull:
-                pass
+                import json as _json
+                self._redis_sync.publish(
+                    f"live:event:{camera_id}", _json.dumps(msg)
+                )
+            except Exception:
+                pass  # never block inference on Redis errors
 
     def _subscribe(self, camera_id: str) -> "asyncio.Queue[Any]":
         self._ensure_loop()
@@ -91,7 +124,22 @@ class _SSEPublisher:
         self._queues[camera_id].discard(q)
 
     async def stream(self, camera_id: str, alert_only: bool = False) -> AsyncGenerator[str, None]:
+        """
+        Yields SSE strings.  Delivers from both the in-process asyncio queue
+        and (when available) a Redis Pub/Sub subscription so that this method
+        works across multiple uvicorn workers.
+        """
+        self._ensure_loop()
         q = self._subscribe(camera_id)
+
+        # Start Redis subscriber coroutine that feeds into the same asyncio queue
+        redis_task: Optional[asyncio.Task] = None
+        redis_url = os.getenv("REDIS_URL", "")
+        if redis_url:
+            redis_task = asyncio.create_task(
+                self._redis_to_queue(camera_id, q), name=f"cashier_redis_{camera_id}"
+            )
+
         try:
             yield _sse("connected", {"camera_id": camera_id, "alert_only": alert_only})
             while True:
@@ -107,6 +155,52 @@ class _SSEPublisher:
             pass
         finally:
             self._unsubscribe(camera_id, q)
+            if redis_task is not None:
+                redis_task.cancel()
+                try:
+                    await redis_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _redis_to_queue(
+        self, camera_id: str, q: "asyncio.Queue[Any]"
+    ) -> None:
+        """Subscribe to Redis live:event:{camera_id} and forward into *q*."""
+        redis_url = os.getenv("REDIS_URL", "")
+        try:
+            import redis.asyncio as aioredis
+            import json as _json
+        except ImportError:
+            return
+
+        client = None
+        try:
+            client = aioredis.from_url(redis_url, socket_connect_timeout=2)
+            await client.ping()
+            async with client.pubsub() as ps:
+                await ps.subscribe(f"live:event:{camera_id}")
+                async for raw_msg in ps.listen():
+                    if raw_msg["type"] != "message":
+                        continue
+                    raw = raw_msg["data"]
+                    try:
+                        msg = _json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+                    except Exception:
+                        continue
+                    try:
+                        q.put_nowait(msg)
+                    except asyncio.QueueFull:
+                        pass
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        finally:
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
 
 def _sse(event: str, data: Any) -> str:

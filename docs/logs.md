@@ -13,9 +13,10 @@ This page summarizes **where outputs go**, how to **run the test suite**, **curl
 3. [Cashier `data` envelope & sample JSONL](#cashier-data-envelope--integration-env)
 4. [cURL — global detection SSE](#curl--global-detection-sse-all-task-types)
 5. [cURL — cashier HTTP + per-camera SSE](#curl--cashier-http--per-camera-sse)
-6. [Tail task JSONL](#tail-task-jsonl-on-a-server)
-7. [Endpoints quick list](#endpoints-quick-list)
-8. [**End-to-end curl test (start to finish)**](#end-to-end-curl-test-start-to-finish)
+6. [Live stream WebSocket](#live-stream-websocket)
+7. [Tail task JSONL](#tail-task-jsonl-on-a-server)
+8. [Endpoints quick list](#endpoints-quick-list)
+9. [**End-to-end curl test (start to finish)**](#end-to-end-curl-test-start-to-finish)
 
 ---
 
@@ -191,6 +192,45 @@ curl -s "$BASE/cashier/media/1/drawer_count"
 
 ---
 
+## Live stream WebSocket
+
+Binary WebSocket stream of annotated JPEG frames. Requires Redis (`REDIS_URL`).
+
+```bash
+export BASE=http://localhost:9000
+export WS_BASE=ws://localhost:9000
+
+# Verify WebSocket handshake (expects HTTP 101 Switching Protocols)
+curl -i -N \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  -H "Sec-WebSocket-Version: 13" \
+  "$BASE/cameras/1/live"
+
+# Connect with websocat CLI and print binary frame sizes
+websocat --binary "$WS_BASE/cameras/1/live" | while IFS= read -r -d '' chunk; do
+    echo "frame: ${#chunk} bytes"
+done
+
+# Connect to the event WebSocket and print JSON events
+websocat "$WS_BASE/cameras/1/events"
+
+# Verify Redis is publishing frames (inside the redis container)
+docker exec -it redis redis-cli SUBSCRIBE live:frame:1
+# Should see: message  live:frame:1  <binary JPEG data>  every ~80ms
+
+# Check FrameBus connected
+docker compose logs yolo-detect | grep "FrameBus: Redis"
+# Expect: [1] FrameBus: Redis connected (redis://redis:6379/0)
+```
+
+**What you see on the stream:** YOLO bounding boxes + BoT-SORT track IDs drawn on every frame by FrameBus. For service-level overlays (cashier zones, line drawings) those are drawn by each task worker on their service-specific annotated copy.
+
+See [API_USAGE.md §11](./API_USAGE.md#11-live-stream-websocket-camerasidlive) for the complete browser HTML example and all configuration env vars.
+
+---
+
 ## Tail task JSONL on a server
 
 ```bash
@@ -214,8 +254,10 @@ tail -f /local/storage/events/task_101.jsonl
 | GET | `/cashier/status` | Latest structured event per camera |
 | GET/DELETE | `/cashier/events` | Paginated in-memory event history |
 | GET | `/cashier/evidence`, `/cashier/evidence/{path}` | Evidence files |
-| GET | `/cashier/stream/{camera_id}`, `.../only` | Per-camera SSE |
+| GET | `/cashier/stream/{camera_id}`, `.../only` | Per-camera SSE (JSON events) |
 | GET | `/cashier/media/...` | Latest/event media, `drawer_count` |
+| **WebSocket** | **`/cameras/{camera_id}/live`** | **Binary JPEG frame stream — live annotated video** |
+| **WebSocket** | **`/cameras/{camera_id}/events`** | **JSON detection event stream per camera** |
 
 ---
 
@@ -417,7 +459,37 @@ echo 'data: {"eventType":"CASHIER_BOX_OPEN","case_id":"N1","data":{...}}' | sed 
 echo 'data: {"eventType":"CASHIER_BOX_OPEN","data":{"personStructural":"{\"a\":1}"}}' | sed 's/^data: //' | jq -r '.data.personStructural | fromjson'
 ```
 
-### Step 7 — SSE (short capture; press Ctrl+C if you omit `max-time`)
+### Step 7 — Live WebSocket stream (annotated frames)
+
+Open in a browser after starting detection (save as `stream.html`):
+
+```html
+<!DOCTYPE html><html><body style="background:#111;color:#0f0;text-align:center">
+<h3>Live Stream — Camera 1</h3>
+<div id="s">Connecting…</div><img id="img" style="max-width:100%">
+<script>
+function c(id){
+  const ws=new WebSocket(`ws://localhost:9000/cameras/${id}/live`);
+  ws.binaryType="arraybuffer";
+  ws.onopen=()=>document.getElementById("s").textContent="Connected";
+  ws.onclose=()=>{document.getElementById("s").textContent="Reconnecting…";setTimeout(()=>c(id),2000)};
+  ws.onmessage=e=>{
+    const img=document.getElementById("img");
+    URL.revokeObjectURL(img.src);
+    img.src=URL.createObjectURL(new Blob([e.data],{type:"image/jpeg"}));
+  };
+}c("1");
+</script></body></html>
+```
+
+Verify Redis is publishing:
+
+```bash
+docker exec -it redis redis-cli SUBSCRIBE live:frame:1
+# Should see messages arriving every ~80ms
+```
+
+### Step 7c — SSE (short capture; press Ctrl+C if you omit `max-time`)
 
 **All task types:**
 

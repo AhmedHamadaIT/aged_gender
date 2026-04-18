@@ -15,3 +15,6 @@ onnxruntime
 #ReID
 torchreid==0.2.5
 qdrant-client>=1.7.0
+
+# Live streaming
+redis>=5.0.0
