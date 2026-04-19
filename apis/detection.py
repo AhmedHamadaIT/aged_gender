@@ -19,6 +19,15 @@ Routes registered in app.py:
 """
 
 import multiprocessing
+
+# Parent process loads CUDA-backed models (e.g. ReID/OSNet) before workers start.
+# Linux default start method is "fork"; forked children cannot re-init CUDA.
+# "spawn" starts a fresh interpreter per worker (see PyTorch / Ultralytics docs).
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 from collections import defaultdict
 from typing import Dict, Optional
 
