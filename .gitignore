@@ -66,11 +66,14 @@ runs/
 wandb/
 *.engine
 
-# YOLOv8n weights (often large; use models/ or env YOLO_MODEL)
+# YOLO / ONNX weights at repo root (if copied outside models/)
 yolov8n.pt
 yolov8n.onnx
 yolov8n.yaml
-!models/yolov8n.pt
+
+# models/ — ship weights to each host / edge separately (not in git)
+models/*
+!models/.gitkeep
 
 # Ad-hoc test scripts at repo root only (tracked pytest lives under tests/)
 /test_*.py
