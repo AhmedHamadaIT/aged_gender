@@ -49,6 +49,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
+      # Default for in-compose Redis (avoids localhost:6379 inside the container)
+      - REDIS_URL=redis://redis:6379/0
 
     volumes:
       - .:/app                  # mount entire project directory
