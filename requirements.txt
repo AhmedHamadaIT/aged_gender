@@ -19,3 +19,9 @@ qdrant-client>=1.7.0
 
 # Live streaming
 redis>=5.0.0
+
+# BoT-SORT / Ultralytics tracker (native LAPJV; falls back to lap/ shim + SciPy if missing)
+lap>=0.5.12
+
+# Optional: download weights from Google Drive (tools/download_models.py)
+gdown>=5.0.0

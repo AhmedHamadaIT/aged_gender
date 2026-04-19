@@ -51,17 +51,24 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         seaborn \
         matplotlib \
         py-cpuinfo \
-        fastapi \   
-        onnxruntime \     
-        "uvicorn[standard]"\
+        fastapi \
+        onnxruntime \
+        "uvicorn[standard]" \
         qdrant-client \
         gdown \
-        python-multipart \ 
+        python-multipart \
         open_clip_torch \
-        redis
+        redis \
+        "lap>=0.5.12"
+
+# RTSP stability for OpenCV/FFmpeg inside the container
+ENV OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|timeout;5000000|reconnect;1|reconnect_delay_max;5"
+ENV PYTHONUNBUFFERED=1
 
 # ── Create directories ───────────────────────
 RUN mkdir -p /app/models /app/videos /app/outputs
+
+EXPOSE 9000
 
 # ── Default command ──────────────────────────
 CMD ["sleep", "infinity"]

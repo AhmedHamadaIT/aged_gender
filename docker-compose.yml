@@ -50,6 +50,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Default for in-compose Redis (avoids localhost:6379 inside the container)
       - REDIS_URL=redis://redis:6379/0
 
