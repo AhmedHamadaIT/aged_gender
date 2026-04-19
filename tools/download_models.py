@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 import sys
 
@@ -40,7 +41,21 @@ def main() -> int:
 
     os.makedirs(args.output, exist_ok=True)
     print(f"Downloading folder into: {args.output}")
-    gdown.download_folder(url=args.url, output=args.output, quiet=False, remaining_ok=True)
+    kwargs = {"url": args.url, "output": args.output, "quiet": False}
+    if "remaining_ok" in inspect.signature(gdown.download_folder).parameters:
+        kwargs["remaining_ok"] = True
+    try:
+        gdown.download_folder(**kwargs)
+    except RuntimeError as exc:
+        print(
+            "gdown could not read the Drive folder (permissions, quota, or link type).\n"
+            "Fix: set the Drive folder to “Anyone with the link” (Viewer), or pass a direct\n"
+            "file URL / service-account flow. Original error:",
+            exc,
+            file=sys.stderr,
+            sep="\n",
+        )
+        return 1
     print("Done. Verify files (examples): osnet_x1_0.pt, image_encoder.onnx, text_encoder.onnx, yolov8n.pt")
     return 0
 

@@ -15,6 +15,14 @@ so task workers never need to run their own detector or tracker.
 """
 
 import os
+import sys
+
+# Ensure repo root is on sys.path in worker processes (multiprocessing / some uvicorn setups
+# omit PYTHONPATH). Ultralytics BoT-SORT imports `lap`; we ship a compatible `lap/` package.
+_repo_root = os.path.dirname(os.path.abspath(__file__))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 import time
 import base64
 import hashlib
