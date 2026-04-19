@@ -11,6 +11,7 @@ Pillow>=9.0.0
 PyYAML>=6.0
 tqdm>=4.64.0
 onnxruntime
+scipy>=1.10.0
 
 #ReID
 torchreid==0.2.5

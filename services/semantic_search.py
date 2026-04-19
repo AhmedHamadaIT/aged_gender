@@ -28,10 +28,19 @@ class SemanticSearchService:
 
     def __init__(self):
         self._ready = False
+        self.identity_manager = None
         try:
-            import open_clip
-            import onnxruntime as ort
+            image_onnx_path = os.getenv("IMAGE_ENCODER_ONNX", "./models/image_encoder.onnx")
+            text_onnx_path  = os.getenv("TEXT_ENCODER_ONNX", "./models/text_encoder.onnx")
+            missing_paths = [p for p in (image_onnx_path, text_onnx_path) if not os.path.exists(p)]
+            if missing_paths:
+                raise FileNotFoundError(
+                    f"Missing ONNX model(s): {', '.join(missing_paths)}"
+                )
+
             import gc
+            import onnxruntime as ort
+            import open_clip
 
             # ── MobileCLIP Model + Transforms Setup ──────────────────────────
             model_name = os.getenv("MOBILECLIP_MODEL", "MobileCLIP2-S0")
@@ -39,7 +48,7 @@ class SemanticSearchService:
 
             log.info(f"[SemanticSearchService] Loading transforms for {model_name}...")
 
-            # Load PyTorch model temporarily JUST to get the correct preprocess and tokenizer
+            # Load PyTorch model temporarily JUST to get the correct preprocess and tokenizer.
             base_model, _, self.preprocess = open_clip.create_model_and_transforms(
                 model_name, pretrained=pretrained, device="cpu"
             )
@@ -48,25 +57,36 @@ class SemanticSearchService:
             del base_model
             gc.collect()
 
-            image_onnx_path = os.getenv("IMAGE_ENCODER_ONNX", "./models/image_encoder.onnx")
-            text_onnx_path  = os.getenv("TEXT_ENCODER_ONNX", "./models/text_encoder.onnx")
-
             providers = [
-                ('TensorrtExecutionProvider', {
-                    'device_id': 0,
-                    'trt_max_workspace_size': 2147483648,
-                    'trt_fp16_enable': True,
-                    'trt_engine_cache_enable': True,
-                    'trt_engine_cache_path': './trt_cache',
+                ("TensorrtExecutionProvider", {
+                    "device_id": 0,
+                    "trt_max_workspace_size": 2147483648,
+                    "trt_fp16_enable": True,
+                    "trt_engine_cache_enable": True,
+                    "trt_engine_cache_path": "./trt_cache",
                 }),
-                'CUDAExecutionProvider',
-                'CPUExecutionProvider',
+                "CUDAExecutionProvider",
+                "CPUExecutionProvider",
             ]
+            available_providers = set(ort.get_available_providers())
+            selected_providers = []
 
-            os.makedirs('./trt_cache', exist_ok=True)
+            for provider in providers:
+                provider_name = provider[0] if isinstance(provider, tuple) else provider
+                if provider_name in available_providers:
+                    selected_providers.append(provider)
 
-            self.image_session = ort.InferenceSession(image_onnx_path, providers=providers)
-            self.text_session  = ort.InferenceSession(text_onnx_path, providers=providers)
+            if any(
+                isinstance(provider, tuple) and provider[0] == "TensorrtExecutionProvider"
+                for provider in selected_providers
+            ):
+                os.makedirs("./trt_cache", exist_ok=True)
+
+            if not selected_providers:
+                selected_providers = ["CPUExecutionProvider"]
+
+            self.image_session = ort.InferenceSession(image_onnx_path, providers=selected_providers)
+            self.text_session  = ort.InferenceSession(text_onnx_path, providers=selected_providers)
 
             self.image_input_name = self.image_session.get_inputs()[0].name
             self.text_input_name  = self.text_session.get_inputs()[0].name

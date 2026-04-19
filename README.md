@@ -48,10 +48,13 @@ The repo includes [`docker-compose.yml`](docker-compose.yml): NVIDIA runtime, pr
 
 ```bash
 docker compose up -d --build
-docker compose logs -f
+docker compose logs -f yolo-detect
 # shell inside container:
 docker compose exec yolo-detect bash
 ```
+
+If your host only supports Compose v1, run the same commands with `docker-compose`
+from the directory that contains `docker-compose.yml`.
 
 **Default base URL:** `http://localhost:9000` — use `http://<host>:9000` on a Jetson or remote machine. Interactive OpenAPI: `/docs`, `/redoc`.
 

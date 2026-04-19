@@ -2,8 +2,9 @@
 # Docker Compose — YOLO Object Detection
 # ============================================
 # Start:  docker compose up -d --build
-# Logs:   docker compose logs -f
+# Logs:   docker compose logs -f yolo-detect
 # Shell:  docker compose exec yolo-detect bash
+# Older Docker hosts may require: docker-compose ...
 # ============================================
 
 services:
