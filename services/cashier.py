@@ -442,15 +442,6 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
     """
     meta = result.task_meta if isinstance(result.task_meta, dict) else {}
 
-    def _pick_int(*keys: str, default: int = 0) -> int:
-        for k in keys:
-            if k in meta and meta[k] is not None:
-                try:
-                    return int(meta[k])
-                except (TypeError, ValueError):
-                    return default
-        return default
-
     def _pick_str(*keys: str, default: str = "") -> str:
         for k in keys:
             v = meta.get(k)
@@ -458,7 +449,15 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
                 return str(v)
         return default
 
-    channel_id = _pick_int("channelId", "channel_id")
+    def _channel_id_str() -> str:
+        for k in ("channelId", "channel_id"):
+            if k in meta and meta[k] is not None:
+                s = str(meta[k]).strip()
+                if s != "":
+                    return s
+        return ""
+
+    ch_str = _channel_id_str()
     task_id = meta.get("taskId", meta.get("task_id"))
     task_id_out: Any
     if task_id is None or task_id == "":
@@ -471,11 +470,13 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
 
     channel_name = _pick_str("channelName", "channel_name")
     if not channel_name:
-        if channel_id:
+        if ch_str.isdigit():
             channel_name = os.getenv(
                 "CASHIER_CHANNEL_NAME",
-                f"CAM-{channel_id:02d}-MAIN",
+                f"CAM-{int(ch_str):02d}-MAIN",
             )
+        elif ch_str:
+            channel_name = os.getenv("CASHIER_CHANNEL_NAME", ch_str)
         else:
             channel_name = os.getenv("CASHIER_CHANNEL_NAME", "CAM-UNKNOWN")
 
@@ -556,7 +557,7 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
         "algorithmType": algo,
         "captureId": capture_id,
         "sceneId": scene_id,
-        "channelId": channel_id,
+        "channelId": ch_str,
         "channelName": channel_name,
         "deviceSN": device_sn,
         "id": correlation_id,
@@ -608,12 +609,10 @@ def build_cashier_structured_event(
     except (TypeError, ValueError):
         task_id_out = None
 
-    ch = data.get("channelId")
-    if ch is None and task_config.get("channelId") is not None:
-        try:
-            ch = int(task_config["channelId"])
-        except (TypeError, ValueError):
-            ch = None
+    ch_raw = data.get("channelId")
+    if ch_raw is None and task_config.get("channelId") is not None:
+        ch_raw = task_config["channelId"]
+    ch_str = str(ch_raw).strip() if ch_raw is not None and str(ch_raw).strip() != "" else ""
 
     event: Dict[str, Any] = {
         "eventId"     : event_id,
@@ -622,7 +621,7 @@ def build_cashier_structured_event(
         "timestampUTC": ts_utc,
         "taskId"      : task_id_out,
         "taskName"    : str(task_config.get("taskName", "") or ""),
-        "channelId"   : ch,
+        "channelId"   : ch_str,
         "camera_id"   : camera_id,
         "case_id"     : case_id,
         "severity"    : severity,
@@ -639,6 +638,22 @@ def build_cashier_structured_event(
     txn = bool(summary.get("transaction", False))
     if txn:
         event["transaction"] = True
+
+    # Prefer real camera id string for SSE / filters (BUG-006).
+    cam = str(camera_id or "").strip()
+    task_ch = task_config.get("channelId")
+    task_ch_s = (
+        str(task_ch).strip()
+        if task_ch is not None and str(task_ch).strip() != ""
+        else ""
+    )
+    resolved = cam or event.get("channelId") or task_ch_s
+    if resolved:
+        event["channelId"] = str(resolved)
+        event["camera_id"] = cam or str(resolved)
+        dd = event.get("data")
+        if isinstance(dd, dict):
+            dd["channelId"] = str(resolved)
 
     return event
 

@@ -18,7 +18,8 @@ Base URL for all examples: `http://localhost:9000`
 8. [Common Errors](#8-common-errors)
 9. [Full Walkthrough Example](#9-full-walkthrough-example)
 10. [Cashier monitor API (`/cashier/*`)](#10-cashier-monitor-api-cashier)
-11. [Live Stream WebSocket (`/cameras/{id}/live`)](#11-live-stream-websocket-camerasidlive)
+11. [Live stream & annotated frames (`/cameras/{id}/live`)](#11-live-stream-websocket-camerasidlive)
+12. [Task-name live stream alias (`/tasks/{task_name}/live`)](#12-task-name-live-stream-alias-taskstask_namelive)
 
 ---
 
@@ -931,21 +932,46 @@ Polygon needs at least 3 points. Persons whose centroid falls outside all zones 
 
 ## 11. Live Stream WebSocket (`/cameras/{id}/live`)
 
-Real-time annotated video stream for any running camera. FrameBus draws YOLO bounding boxes and BoT-SORT track IDs on each frame and publishes them to Redis; the WebSocket endpoint subscribes from Redis and pushes raw JPEG bytes to connected browser clients.
+**Stream annotation** here means **visually annotated JPEG frames**: FrameBus runs YOLO + BoT-SORT on each RTSP frame, draws bounding boxes and track IDs, encodes JPEG, and publishes to Redis. Clients consume that stream only via **`WS /cameras/{camera_id}/live`** (binary JPEG messages). Task workers may draw extra overlays (lines, cashier zones) on their own copies for evidence; the live WebSocket feed is the FrameBus-annotated frame.
 
-**Transport design:**
+**Related (not the painted live video):** JSON **detection events** (crossings, PPE alerts, cashier payloads) are available on **`GET /detection/stream`** (SSE, all cameras, optional filters) and **`WS /cameras/{camera_id}/events`** (one camera, same JSON shape as SSE). Those carry metadata and evidence paths — not a full-motion annotated video stream.
+
+**Transport design (annotated frame WebSocket):**
 - Messages are **binary** (raw JPEG bytes) — no Base64 encoding, no JSON wrapper
 - Frames are **dropped** (never queued) when a client cannot receive within 50 ms (`WS_SEND_TIMEOUT_MS`) — prevents memory growth on slow or hidden browser tabs
 - Requires Redis (configure `REDIS_URL`; the Docker Compose stack starts Redis automatically)
 - FrameBus publishes at `REDIS_LIVE_FPS` (default 13 fps); cadence auto-adjusts to measured camera FPS
 - WebSocket does **not** auto-reconnect — implement a 2-second retry loop (see examples below)
 
-### Endpoints
+### All endpoints: annotated stream vs detection JSON
+
+| What you get | HTTP | Path | When to use |
+|---|---|---|---|
+| **Annotated JPEG frames** (live video) | `WebSocket` | `/cameras/{camera_id}/live` | Dashboard tile, MJPEG-style preview, one connection **per camera** |
+| **Annotated JPEG frames** (live video, by name) | `WebSocket` | `/tasks/{task_name}/live` | Same frames as above; use when you know the task name but not the camera id — see [section 12](#12-task-name-live-stream-alias-taskstask_namelive) |
+| **Detection events** (JSON, one camera) | `WebSocket` | `/cameras/{camera_id}/events` | Same event objects as SSE; filter by opening one socket per `camera_id` |
+| **Detection events** (JSON, all cameras) | `GET` (SSE) | `/detection/stream` | Single connection; optional query filters (`taskId`, `channelId`, …) — see [section 5](#5-stream-results-sse) |
+
+**Redis channels (for operators / debugging):** FrameBus publishes JPEG bytes to `live:frame:{camera_id}`. Task workers publish JSON to `live:event:{camera_id}`. The FastAPI app bridges Redis → WebSockets; you do not subscribe to Redis directly from a browser.
+
+### How to get the annotated frame stream
+
+1. **`POST /cameras`** — Register each stream; note each camera **`id`** (string, e.g. `"1"`, `"2"`). This `id` must match the WebSocket path and the Redis channel suffix.
+2. **`POST /api/tasks`** — For each camera, create tasks with **`channelId`** equal to the numeric channel for that camera (same value as your camera id when it is numeric — e.g. camera `"1"` → `channelId: 1`).
+3. **`POST /detection/start`** — Starts FrameBus and workers. Without this, no frames are published.
+4. **Redis** — `REDIS_URL` must point at a reachable Redis instance; WebSocket `/live` closes with an error if Redis is unavailable.
+5. **`GET /detection/status`** — Confirm each camera shows `"running": true` before expecting frames.
+6. **`WebSocket` `ws://<host>:<port>/cameras/<camera_id>/live`** — Use the **same** `camera_id` string you registered (e.g. `1` or `cam-a` if you used that id).
+
+There is **no** single WebSocket that multiplexes all cameras; open **one** `/live` connection per camera you want to display.
+
+### Endpoints (quick reference)
 
 | Endpoint | Protocol | Content | Description |
 |---|---|---|---|
 | `/cameras/{camera_id}/live` | WebSocket binary | JPEG bytes | Annotated frame stream for one camera |
 | `/cameras/{camera_id}/events` | WebSocket text | JSON string | Detection event stream for one camera |
+| `/tasks/{task_name}/live` | WebSocket binary | JPEG bytes | Same frames as the task's camera — alias resolved by `taskName` |
 
 ### Live annotated frame stream
 
@@ -957,6 +983,21 @@ curl -i -N \
   -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
   -H "Sec-WebSocket-Version: 13" \
   http://localhost:9000/cameras/1/live
+
+# Same check for other registered camera ids (must match POST /cameras "id" values)
+curl -i -N \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  -H "Sec-WebSocket-Version: 13" \
+  http://localhost:9000/cameras/2/live
+
+curl -i -N \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  -H "Sec-WebSocket-Version: 13" \
+  http://localhost:9000/cameras/3/live
 ```
 
 **Browser (minimal HTML — save as `stream.html` and open in browser):**
@@ -1002,6 +1043,12 @@ curl -i -N \
 ```bash
 # Connect and print received JSON events (requires websocat or similar CLI tool)
 websocat ws://localhost:9000/cameras/1/events
+
+# One process per camera — same host, different path (after POST /cameras for 1, 2, 3)
+websocat ws://localhost:9000/cameras/1/events &
+websocat ws://localhost:9000/cameras/2/events &
+websocat ws://localhost:9000/cameras/3/events &
+wait
 ```
 
 **Browser:**
@@ -1018,25 +1065,162 @@ function connectEvents(cameraId) {
 connectEvents("1");
 ```
 
-### Serving multiple cameras simultaneously
+### Multiple cameras — annotated `/live` at once
 
-Each camera has its own WebSocket channel:
+Each camera uses its **own** WebSocket URL: `…/cameras/{id}/live`. There is no server-side fan-in: your dashboard opens **N** sockets for **N** cameras.
+
+#### Python — save the first JPEG from three streams in parallel
+
+Requires `pip install websockets` (or your project venv). Adjust ids to match your registered cameras.
+
+```python
+import asyncio
+from pathlib import Path
+
+import websockets
+
+HOST = "localhost:9000"
+CAMERA_IDS = ("1", "2", "north_gate")  # string ids from POST /cameras
+
+async def first_jpeg(camera_id: str) -> None:
+    uri = f"ws://{HOST}/cameras/{camera_id}/live"
+    async with websockets.connect(uri, max_size=None) as ws:
+        jpeg = await ws.recv()
+        if isinstance(jpeg, str):
+            raise SystemExit(f"{camera_id}: expected binary JPEG")
+        out = Path(f"first_frame_{camera_id}.jpg")
+        out.write_bytes(jpeg)
+        print(f"{camera_id}: wrote {out} ({len(jpeg)} bytes)")
+
+async def main() -> None:
+    await asyncio.gather(*(first_jpeg(cid) for cid in CAMERA_IDS))
+
+asyncio.run(main())
+```
+
+#### Python — continuous multi-camera viewer loop (logging FPS)
+
+```python
+import asyncio
+import time
+
+import websockets
+
+HOST = "localhost:9000"
+CAMERA_IDS = ("1", "2", "3")
+
+async def watch(camera_id: str) -> None:
+    uri = f"ws://{HOST}/cameras/{camera_id}/live"
+    n = 0
+    t0 = time.monotonic()
+    while True:
+        try:
+            async with websockets.connect(uri, max_size=None) as ws:
+                while True:
+                    await ws.recv()
+                    n += 1
+                    if n % 30 == 0:
+                        dt = time.monotonic() - t0
+                        print(f"cam {camera_id}: {n} frames, {n/dt:.1f} fps avg")
+        except Exception as exc:
+            print(f"cam {camera_id}: {exc!r}, reconnect in 2s")
+            await asyncio.sleep(2)
+
+async def main() -> None:
+    await asyncio.gather(*(watch(cid) for cid in CAMERA_IDS))
+
+asyncio.run(main())
+```
+
+#### Browser — labeled grid (three annotated tiles)
+
+Save as `multi_stream.html` and open while detection is running. Change `HOST` if not on `localhost:9000`.
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Multi-camera annotated streams</title>
+  <style>
+    body { margin:0; background:#111; color:#ccc; font-family: system-ui, sans-serif; }
+    h1 { text-align:center; font-size:1.1rem; margin:12px 0; }
+    #grid {
+      display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap:12px; padding:12px; max-width:1400px; margin:0 auto;
+    }
+    figure { margin:0; background:#1a1a1a; border-radius:8px; overflow:hidden;
+             border:1px solid #333; }
+    figcaption { padding:8px 10px; font-size:0.85rem; color:#9cf; }
+    img { display:block; width:100%; height:auto; min-height:120px; background:#000; }
+    .err { color:#f66; font-size:0.8rem; padding:8px 10px; }
+  </style>
+</head>
+<body>
+  <h1>Live annotated streams (one WebSocket per camera)</h1>
+  <div id="grid"></div>
+  <script>
+    const HOST = "localhost:9000";
+    const CAMERAS = [
+      { id: "1", label: "Camera 1 — entrance" },
+      { id: "2", label: "Camera 2 — kitchen" },
+      { id: "3", label: "Camera 3 — parking" },
+    ];
+
+    function tile(cam) {
+      const fig = document.createElement("figure");
+      const cap = document.createElement("figcaption");
+      cap.textContent = cam.label + " (`" + cam.id + "`)";
+      const st = document.createElement("div");
+      st.className = "err";
+      st.textContent = "Connecting…";
+      const img = document.createElement("img");
+      img.alt = cam.label;
+      fig.append(cap, st, img);
+      document.getElementById("grid").appendChild(fig);
+
+      function connect() {
+        const ws = new WebSocket(`ws://${HOST}/cameras/${cam.id}/live`);
+        ws.binaryType = "arraybuffer";
+        ws.onopen = () => { st.textContent = "Live"; };
+        ws.onerror = () => { st.textContent = "WebSocket error"; ws.close(); };
+        ws.onclose = () => {
+          st.textContent = "Reconnecting in 2s…";
+          setTimeout(connect, 2000);
+        };
+        ws.onmessage = (e) => {
+          URL.revokeObjectURL(img.src);
+          img.src = URL.createObjectURL(new Blob([e.data], { type: "image/jpeg" }));
+        };
+      }
+      connect();
+    }
+    CAMERAS.forEach(tile);
+  </script>
+</body>
+</html>
+```
+
+#### JavaScript — minimal dynamic tiles (append one `<img>` per id)
 
 ```javascript
-["1", "2", "3"].forEach(id => {
-    const img = document.createElement("img");
-    document.body.appendChild(img);
+["1", "2", "3"].forEach((id) => {
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `<p>Camera ${id}</p>`;
+  const img = document.createElement("img");
+  wrap.appendChild(img);
+  document.body.appendChild(wrap);
 
-    function connect() {
-        const ws = new WebSocket(`ws://localhost:9000/cameras/${id}/live`);
-        ws.binaryType = "arraybuffer";
-        ws.onmessage = e => {
-            URL.revokeObjectURL(img.src);
-            img.src = URL.createObjectURL(new Blob([e.data], { type: "image/jpeg" }));
-        };
-        ws.onclose = () => setTimeout(connect, 2000);
-    }
-    connect();
+  function connect() {
+    const ws = new WebSocket(`ws://localhost:9000/cameras/${id}/live`);
+    ws.binaryType = "arraybuffer";
+    ws.onmessage = (e) => {
+      URL.revokeObjectURL(img.src);
+      img.src = URL.createObjectURL(new Blob([e.data], { type: "image/jpeg" }));
+    };
+    ws.onclose = () => setTimeout(connect, 2000);
+  }
+  connect();
 });
 ```
 
@@ -1062,6 +1246,10 @@ docker compose logs yolo-detect | grep "FrameBus: Redis"
 # Verify frames are being published (redis-cli inside the redis container)
 docker exec -it redis redis-cli SUBSCRIBE live:frame:1
 # Messages arrive every ~80ms (13fps)
+
+# Other cameras use the same pattern (id must match POST /cameras)
+docker exec -it redis redis-cli SUBSCRIBE live:frame:2
+docker exec -it redis redis-cli SUBSCRIBE live:frame:3
 ```
 
 ### Troubleshooting
@@ -1072,6 +1260,149 @@ docker exec -it redis redis-cli SUBSCRIBE live:frame:1
 | Stream connects but shows nothing | Detection not started | Run `POST /detection/start` first |
 | Very laggy / old frames | `WS_SEND_TIMEOUT_MS` too high | Lower it (e.g. `WS_SEND_TIMEOUT_MS=30`) or check client CPU |
 | WebSocket closes after ~30s idle | Normal — client should reconnect | Implement `ws.onclose = () => setTimeout(connect, 2000)` |
+
+---
+
+## 12. Task-Name Live Stream Alias (`/tasks/{task_name}/live`)
+
+`WS /tasks/{task_name}/live` is a **convenience alias** for the camera live stream. The server looks up the task by its exact `taskName`, resolves the `channelId`, and serves the same annotated JPEG frames that `WS /cameras/{channelId}/live` would deliver. No new stream is created — this is a routing shortcut.
+
+### When to use this vs `/cameras/{camera_id}/live`
+
+| Situation | Recommended endpoint |
+|---|---|
+| You know the camera `id` string | `/cameras/{camera_id}/live` |
+| You know the `taskName` but not the camera `id` | `/tasks/{task_name}/live` |
+| Multiple tasks share the same camera | Use `/cameras/{camera_id}/live`; the task alias will fail if names collide |
+
+### Prerequisites
+
+Same as section 11: detection must be started (`POST /detection/start`) and `REDIS_URL` must be configured.
+
+### Error close codes
+
+| Code | Meaning |
+|---|---|
+| `4004` | No task found with that exact `taskName` |
+| `4009` | More than one task shares the same `taskName`; use `/cameras/{camera_id}/live` instead |
+| `1011` | Redis is unavailable |
+
+### Quick start
+
+```bash
+# 1. Register a camera
+curl -X POST http://localhost:9000/cameras \
+  -H "Content-Type: application/json" \
+  -d '{"cameras": [{"id": "cam1", "url": "rtsp://192.168.1.10/stream"}]}'
+
+# 2. Register a task with a descriptive taskName
+curl -X POST http://localhost:9000/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskId": 10,
+    "taskName": "mainentrance1",
+    "algorithmType": "CROSS_LINE",
+    "channelId": "cam1",
+    "enable": true,
+    "threshold": 60,
+    "areaPosition": "[]"
+  }'
+
+# 3. Start detection
+curl -X POST http://localhost:9000/detection/start
+
+# 4. Verify the WebSocket upgrade (expects HTTP 101)
+curl -i -N \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  -H "Sec-WebSocket-Version: 13" \
+  http://localhost:9000/tasks/mainentrance1/live
+```
+
+### Browser example
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { background:#111; color:#0f0; font-family:monospace; text-align:center; }
+    img  { max-width:100%; border:2px solid #0f0; margin-top:16px; }
+  </style>
+</head>
+<body>
+  <h2>mainentrance1 — Live Annotated Stream</h2>
+  <div id="status">Connecting…</div>
+  <img id="stream" alt="stream" />
+  <script>
+    function connect(taskName) {
+      const ws = new WebSocket(`ws://localhost:9000/tasks/${taskName}/live`);
+      ws.binaryType = "arraybuffer";
+      ws.onopen  = () => document.getElementById("status").textContent = "Connected";
+      ws.onclose = e => {
+        const reason = e.code === 4004 ? "Task not found"
+                     : e.code === 4009 ? "Ambiguous task name"
+                     : "Reconnecting…";
+        document.getElementById("status").textContent = reason;
+        if (e.code !== 4004 && e.code !== 4009) {
+          setTimeout(() => connect(taskName), 2000);
+        }
+      };
+      ws.onerror = () => ws.close();
+      ws.onmessage = e => {
+        const blob = new Blob([e.data], { type: "image/jpeg" });
+        const img  = document.getElementById("stream");
+        URL.revokeObjectURL(img.src);
+        img.src = URL.createObjectURL(blob);
+      };
+    }
+    connect("mainentrance1");
+  </script>
+</body>
+</html>
+```
+
+### Multiple named tasks on different cameras
+
+```javascript
+// Each task name maps to exactly one camera.
+// Open one connection per task name you want to display.
+["mainentrance1", "kitchenppe", "cashierzone2"].forEach(name => {
+  const ws = new WebSocket(`ws://localhost:9000/tasks/${name}/live`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = e => displayFrame(name, e.data);
+  ws.onclose   = () => setTimeout(() => connect(name), 2000);
+});
+```
+
+### Python example — save first frame by task name
+
+```python
+import asyncio
+from pathlib import Path
+import websockets
+
+HOST = "localhost:9000"
+
+async def first_frame_by_task(task_name: str) -> None:
+    uri = f"ws://{HOST}/tasks/{task_name}/live"
+    async with websockets.connect(uri, max_size=None) as ws:
+        jpeg = await ws.recv()
+        if isinstance(jpeg, str):
+            raise SystemExit(f"{task_name}: expected binary JPEG, got text")
+        out = Path(f"first_frame_{task_name}.jpg")
+        out.write_bytes(jpeg)
+        print(f"{task_name}: saved {out} ({len(jpeg)} bytes)")
+
+asyncio.run(first_frame_by_task("mainentrance1"))
+```
+
+### Notes
+
+- The route resolves `taskName` with an **exact string match** (case-sensitive). `mainentrance1` and `MainEntrance1` are different names.
+- If two tasks are registered with the same `taskName`, the endpoint closes immediately with code `4009`. Use unique `taskName` values or connect via `/cameras/{camera_id}/live`.
+- Reconnect logic is the same as for `/cameras/{camera_id}/live`: the WebSocket does **not** auto-reconnect; implement a 2-second retry in `ws.onclose`.
 
 ---
 

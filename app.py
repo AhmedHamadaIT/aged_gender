@@ -33,6 +33,10 @@ Run with:
     uvicorn app:app --host 0.0.0.0 --port 9000
 """
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import asyncio
 import json
 from contextlib import asynccontextmanager
@@ -56,6 +60,21 @@ from apis.person_search import person_search_api
 from apis.semantic_search import semantic_search_api
 
 
+_API_DESCRIPTION = """
+## WebSocket streams
+
+These endpoints use the WebSocket protocol and do not appear as separate operations in the OpenAPI path list.
+
+| URL | Messages |
+|-----|----------|
+| `WS /cameras/{camera_id}/live` | Binary: one annotated JPEG frame per message. |
+| `WS /cameras/{camera_id}/events` | Text: JSON objects with the same shape as `GET /detection/stream` payloads. |
+| `WS /tasks/{task_name}/live` | Binary: same annotated JPEG frames as the task's camera live feed (alias for `/cameras/{channelId}/live`). |
+
+Requires `REDIS_URL` for live fan-out. Clients should reconnect after disconnect.
+
+""".strip()
+
 
 
 @asynccontextmanager
@@ -75,6 +94,7 @@ app = FastAPI(
     title="Vision Pipeline API",
     version="2.0.0",
     lifespan=lifespan,
+    description=_API_DESCRIPTION,
 )
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
 
@@ -145,6 +165,12 @@ def detection_start(camera_id: str = None):
 def detection_stop(camera_id: str = None):
     action = "stop_all" if not camera_id else "stop"
     return detection.on_post(DetectionRequest(action=action, camera_id=camera_id))
+
+
+@app.post("/detection/stop/all")
+def detection_stop_all():
+    """Alias for stopping all cameras (same as ``POST /detection/stop`` with no ``camera_id``)."""
+    return detection.on_post(DetectionRequest(action="stop_all", camera_id=None))
 
 
 @app.get("/detection/status", response_model=DetectionStatus)
@@ -264,6 +290,44 @@ async def camera_events_stream(websocket: WebSocket, camera_id: str):
     await live_events_ws(websocket, camera_id)
 
 
+@app.websocket("/tasks/{task_name}/live")
+async def task_live_stream(websocket: WebSocket, task_name: str):
+    """
+    Binary WebSocket stream of annotated JPEG frames, addressed by task name.
+
+    This is a convenience alias for ``WS /cameras/{channelId}/live``. The server
+    looks up the task by its exact ``taskName``, extracts the ``channelId``, and
+    serves the same annotated frame stream that FrameBus publishes for that camera.
+
+    Close codes returned before streaming begins:
+      - 4004 — task name not found in the registry
+      - 4009 — task name is ambiguous (shared by multiple tasks)
+      - 1011 — Redis is unavailable
+
+    Clients must implement a reconnect loop — the WebSocket does not
+    auto-reconnect:
+
+        const ws = new WebSocket("ws://host/tasks/mainentrance1/live");
+        ws.binaryType = "arraybuffer";
+        ws.onmessage = e => {
+            img.src = URL.createObjectURL(new Blob([e.data], {type:"image/jpeg"}));
+        };
+        ws.onclose = () => setTimeout(() => connect(), 2000);
+    """
+    from fastapi import HTTPException as _HTTPException
+
+    try:
+        task = task_registry.require_by_name(task_name)
+    except _HTTPException as exc:
+        await websocket.accept()
+        code = 4009 if exc.status_code == 409 else 4004
+        await websocket.close(code=code, reason=exc.detail)
+        return
+
+    camera_id = str(task["channelId"])
+    await live_frames_ws(websocket, camera_id)
+
+
 # ─────────────────────────────────────────────
 # ReID routes
 # ─────────────────────────────────────────────
@@ -271,9 +335,26 @@ async def camera_events_stream(websocket: WebSocket, camera_id: str):
 async def person_search(file: UploadFile = File(...), top_k: int = Form(10)):
     return await person_search_api.search(file, top_k)
 
+
+@app.get("/person_search/health")
+def person_search_health():
+    ready = getattr(person_search_api.person_search_service, "model", None) is not None
+    return {"model_loaded": ready, "status": "ok" if ready else "unavailable"}
+
+
 # ─────────────────────────────────────────────
 # Semantic Search routes
 # ─────────────────────────────────────────────
 @app.post("/semantic_search/search")
-async def semantic_search(text_query: str = Form(...), top_k: int = Form(10)):
-    return await semantic_search_api.search_text(text_query, top_k)
+async def semantic_search(
+    text_query: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    top_k: int = Form(10),
+):
+    return await semantic_search_api.search(text_query=text_query, file=file, top_k=top_k)
+
+
+@app.get("/semantic_search/health")
+def semantic_search_health():
+    ready = bool(getattr(semantic_search_api.semantic_search_service, "_ready", False))
+    return {"model_loaded": ready, "status": "ok" if ready else "unavailable"}
