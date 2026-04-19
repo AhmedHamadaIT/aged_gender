@@ -214,4 +214,11 @@ def _run_embedding_worker(embedding_queue, stop_event):
 
 
 # ── Singleton ─────────────────────────────────
-detection = DetectionResource()
+# Spawned FrameBus / task_worker processes re-import this module. Creating
+# ``Manager()`` at import time in a child triggers:
+#   RuntimeError: ... start a new process before ... bootstrapping phase
+# Only the uvicorn process (MainProcess) owns the shared manager and queues.
+if multiprocessing.current_process().name == "MainProcess":
+    detection = DetectionResource()
+else:
+    detection = None  # workers only need picklable targets above, not this API handle
