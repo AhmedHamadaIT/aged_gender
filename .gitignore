@@ -45,7 +45,6 @@ store/
 test_logs/
 # Local export trees (e.g. batch image+json dumps; not under outputs/)
 output*/
-models/
 videos/
 logger/app.log
 evidence/
@@ -71,6 +70,7 @@ wandb/
 yolov8n.pt
 yolov8n.onnx
 yolov8n.yaml
+!models/yolov8n.pt
 
 # Ad-hoc test scripts at repo root only (tracked pytest lives under tests/)
 /test_*.py
