@@ -1852,14 +1852,16 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # This file (complete documentation)
 ├── .gitignore                  # Git ignore rules (models/, outputs/, local QA *.md, root test.py)
-├── models/                     # ML models (not tracked in git)
-│   ├── yolov8n.pt             # YOLO v8 Nano (~25 MB)
-│   ├── best_ppe.onnx           # PPE ONNX (~38 MB)
-│   ├── best_aged_gender_6.onnx # Age/Gender ONNX (~85 MB)
-│   ├── best_mood.onnx          # Mood/Emotion ONNX (~15 MB)
-│   ├── os_net.pt               #Person search
-│   ├── text_encoder.onnx       #semantic search
-│   └── image_encoder.onnx      #semantic search
+├── models/                     # Weight files: zero-byte placeholders in git; copy real blobs on edge (see models/README.md)
+│   ├── README.md               # Expected filenames + Drive / download_models.py
+│   ├── yolov8n.pt              # YOLO (replace on device)
+│   ├── best_ppe.onnx
+│   ├── best_aged_gender_6.onnx
+│   ├── best_mood.onnx
+│   ├── best_cashier.onnx       # Cashier ONNX
+│   ├── osnet_x1_0.pt           # Person search (ReID)
+│   ├── text_encoder.onnx       # Semantic search
+│   └── image_encoder.onnx
 ├── services/                   # Service modules
 │   ├── detector.py             # YOLO detection service (REGISTRY / pipeline)
 │   ├── age_gender.py           # Age/Gender classification
