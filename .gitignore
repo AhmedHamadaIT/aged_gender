@@ -78,6 +78,15 @@ models/*
 # Ad-hoc test scripts at repo root only (tracked pytest lives under tests/)
 /test_*.py
 /*_test.py
+/test.py
 test_results/
 test_results.log
 README_CASHIER_TESTING.md
+
+# Local QA / scratch markdown (keep API & architecture docs in git)
+BUG_REPORT.md
+docs/cashier_demo_curl_and_logs.md
+docs/cashier_framing_test_results.md
+docs/logs.md
+docs/SERVICE_TEST.md
+docs/test-on-edge.md

@@ -73,7 +73,7 @@ curl -si "http://<jetson-ip>:9000/cashier/evidence/missing.jpg"
 
 ## Event-level media (GIF vs JPEG)
 
-The multiplexed stream (`GET /detection/stream`) carries **per-frame** cashier task events with `eventType: "CASHIER_BOX_OPEN"` (Eyego payload under top-level **`data`**; filter with `?eventType=CASHIER_BOX_OPEN`). Batch / legacy JSONL may still embed results under `data.use_case.cashier.summary`. **JPEG evidence** and **GIF clips** are produced by different mechanisms in [`services/cashier.py`](services/cashier.py). See also [`docs/logs.md`](docs/logs.md).
+The multiplexed stream (`GET /detection/stream`) carries **per-frame** cashier task events with `eventType: "CASHIER_BOX_OPEN"` (Eyego payload under top-level **`data`**; filter with `?eventType=CASHIER_BOX_OPEN`). Batch / legacy JSONL may still embed results under `data.use_case.cashier.summary`. **JPEG evidence** and **GIF clips** are produced by different mechanisms in [`services/cashier.py`](services/cashier.py). See also [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (operations and paths) and [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md).
 
 ### Where each artifact appears
 

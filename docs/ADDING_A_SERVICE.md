@@ -2,7 +2,7 @@
 
 This guide walks through every file you need to touch to add a brand new task (e.g. `CROWD_DENSITY`, `LOITERING`, `UNIFORM_CHECK`) to the ML server.
 
-**See also:** [logs.md](./logs.md) — pytest command, `EVENTS_DIR` JSONL paths, curl for `/detection/stream` and `/cashier/*`. [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — tests, cURL/SSH, and cashier **`data`** / cases. [SERVICE_TEST.md](./SERVICE_TEST.md) redirects there.
+**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — pytest command, `EVENTS_DIR` JSONL paths, cURL/SSH for `/detection/stream` and `/cashier/*`, and cashier **`data`** / cases.
 
 ---
 
@@ -13,7 +13,7 @@ This guide walks through every file you need to touch to add a brand new task (e
 - **`__call__`** returns a **list of one event dict per frame** (or `[]` if disabled). Each dict includes top-level **`eventType`**, **`taskId`**, **`taskName`**, **`channelId`**, plus a nested **`data`** object for integration (Eyego §4 for cashier).
 - **Disk:** append JSON lines to **`$EVENTS_DIR/task_<taskId>.jsonl`** (same layout as `CrossLineTask`).
 - **HTTP:** optional hooks such as [`push_structured_cashier_event`](../apis/cashier.py) update **`GET /cashier/status`** and **`GET /cashier/events`** (see [API_USAGE.md](./API_USAGE.md) §10).
-- **Cashier-only integration:** nested **`data`** is built by `build_cashier_spec_data` ([`services/cashier.py`](../services/cashier.py)) — URL bases (`CASHIER_CLOUD_IMAGE_BASE`, per-side bases, `CASHIER_FORCE_LOCAL_URLS`), **`deviceSN`** fallback chain (including `HOSTNAME`), and **`personStructural`** formatting (**pretty** default; `CASHIER_COMPACT_PERSON_STRUCTURAL` for one line). See [logs.md](./logs.md).
+- **Cashier-only integration:** nested **`data`** is built by `build_cashier_spec_data` ([`services/cashier.py`](../services/cashier.py)) — URL bases (`CASHIER_CLOUD_IMAGE_BASE`, per-side bases, `CASHIER_FORCE_LOCAL_URLS`), **`deviceSN`** fallback chain (including `HOSTNAME`), and **`personStructural`** formatting (**pretty** default; `CASHIER_COMPACT_PERSON_STRUCTURAL` for one line). See [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md) and [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md).
 
 When adding a new algorithm, mirror this shape if consumers need **`GET /detection/stream`** filters (`eventType`, `taskId`, `channelId`) and durable JSONL.
 

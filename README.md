@@ -1851,7 +1851,7 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 │   └── cashier_zones.yaml
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # This file (complete documentation)
-├── .gitignore                  # Git ignore rules (e.g. models/, outputs/, output*/)
+├── .gitignore                  # Git ignore rules (models/, outputs/, local QA *.md, root test.py)
 ├── models/                     # ML models (not tracked in git)
 │   ├── yolov8n.pt             # YOLO v8 Nano (~25 MB)
 │   ├── best_ppe.onnx           # PPE ONNX (~38 MB)
@@ -1994,7 +1994,7 @@ After starting the server (`uvicorn` on port **9000** by default):
 - Swagger UI: `http://localhost:9000/docs`
 - ReDoc: `http://localhost:9000/redoc`
 
-Supplementary docs: [`docs/logs.md`](docs/logs.md) (tests, log paths, SSE + WebSocket curl cheat sheet), [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including **§11 Live Stream WebSocket**), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest + cURL + SSH + cashier `data`/cases/evidence), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`sse_cashier.md`](sse_cashier.md).
+Supplementary docs (in git): [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including live WebSocket), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest, cURL, SSH, cashier `data`/cases/evidence), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`sse_cashier.md`](sse_cashier.md). Ad-hoc run notes (`docs/logs.md`, edge/framing/service test write-ups, `BUG_REPORT.md`) are listed in `.gitignore` so they stay local-only.
 
 ## Models file
 https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link

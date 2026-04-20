@@ -2,7 +2,7 @@
 
 Base URL for all examples: `http://localhost:9000`
 
-**See also:** [logs.md](./logs.md) — test command, log/JSONL paths, SSE + cashier curl cheat sheet. [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — combined pytest, cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence (replaces `SERVICE_TEST.md` + `cases-and-repo.md`). Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md). [SERVICE_TEST.md](./SERVICE_TEST.md) redirects there.
+**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — pytest, log/JSONL paths (`EVENTS_DIR`), cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence. Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md).
 
 ---
 
@@ -420,7 +420,7 @@ data: {"eventId":"c9e04f2b1a7d35cc","eventType":"MASK_HAIRNET_CHEF_HAT","timesta
 
 One event **per processed frame** while the task worker is running. Top-level fields support SSE filters; the Eyego §4 payload is under **`data`**. **`data.personStructural`** is a **string** containing JSON. By default it is **pretty-printed** (`indent=2`, newlines appear as `\n` inside the SSE/JSONL line). Set **`CASHIER_COMPACT_PERSON_STRUCTURAL=1`** for a single-line minified string. Parse with `jq -r '.data.personStructural | fromjson'` (or the top-level event’s `.data.personStructural` when you hold the full object).
 
-**`data` field notes:** `id` is the **same** UUID as in `captureId`, as 32 hex characters without dashes. `sceneId` uses a **separate** UUID. **`deviceSN`** resolves from task / zone config, then `CASHIER_DEVICE_SN`, `DEVICE_SN`, `HOSTNAME`, else `"UNKNOWN"`. **`captureUrl` / `sceneUrl`:** `CASHIER_CLOUD_IMAGE_BASE` applies to both sides; if unset, use `CASHIER_CAPTURE_URL_BASE` and `CASHIER_SCENE_URL_BASE` independently. If still empty, set **`CASHIER_FORCE_LOCAL_URLS=1`** to use `file:///local/storage/images` per missing side; otherwise URLs are `""` and a **warning** is logged. Details: [logs.md](./logs.md).
+**`data` field notes:** `id` is the **same** UUID as in `captureId`, as 32 hex characters without dashes. `sceneId` uses a **separate** UUID. **`deviceSN`** resolves from task / zone config, then `CASHIER_DEVICE_SN`, `DEVICE_SN`, `HOSTNAME`, else `"UNKNOWN"`. **`captureUrl` / `sceneUrl`:** `CASHIER_CLOUD_IMAGE_BASE` applies to both sides; if unset, use `CASHIER_CAPTURE_URL_BASE` and `CASHIER_SCENE_URL_BASE` independently. If still empty, set **`CASHIER_FORCE_LOCAL_URLS=1`** to use `file:///local/storage/images` per missing side; otherwise URLs are `""` and a **warning** is logged. Details: [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) and [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md).
 
 SSE sends **one** `data:` line per event (minified outer JSON). Equivalent structure (pretty outer JSON for readability; UUIDs are examples):
 
