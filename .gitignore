@@ -71,9 +71,18 @@ yolov8n.pt
 yolov8n.onnx
 yolov8n.yaml
 
-# models/ — ship weights to each host / edge separately (not in git)
+# models/ — binaries not in git; README + zero-byte placeholders define expected paths on edge
 models/*
 !models/.gitkeep
+!models/README.md
+!models/yolov8n.pt
+!models/best_aged_gender_6.onnx
+!models/best_mood.onnx
+!models/best_ppe.onnx
+!models/best_cashier.onnx
+!models/osnet_x1_0.pt
+!models/image_encoder.onnx
+!models/text_encoder.onnx
 
 # Ad-hoc test scripts at repo root only (tracked pytest lives under tests/)
 /test_*.py
