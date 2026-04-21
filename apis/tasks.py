@@ -20,6 +20,9 @@ from typing import List, Optional
 from fastapi import HTTPException
 from pydantic import BaseModel
 
+# Sentinel returned when a taskName lookup is ambiguous (multiple tasks share the same name).
+_AMBIGUOUS = object()
+
 
 # ─────────────────────────────────────────────
 # Schemas
@@ -41,7 +44,7 @@ class TaskConfig(BaseModel):
     taskId        : int
     taskName      : str
     algorithmType : str
-    channelId     : int
+    channelId     : str
     enable        : bool        = True
     threshold     : int         = 50
     areaPosition  : str         = "[]"
@@ -95,6 +98,38 @@ class TaskRegistry:
     def get_enabled(self) -> list:
         return [t for t in self._tasks.values() if t.get("enable", True)]
 
+    def get_by_name(self, task_name: str) -> Optional[dict]:
+        """Return the task config for *task_name* (exact match).
+
+        Returns ``None`` when no task matches.
+        Raises :class:`fastapi.HTTPException` 409 when more than one task
+        shares the same ``taskName`` — the caller cannot know which camera to
+        use in that case.
+        """
+        matches = [t for t in self._tasks.values() if t.get("taskName") == task_name]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"taskName '{task_name}' is shared by {len(matches)} tasks "
+                    f"(ids: {[m['taskId'] for m in matches]}). "
+                    "Use a unique taskName or connect via /cameras/{camera_id}/live instead."
+                ),
+            )
+        return matches[0]
+
+    def require_by_name(self, task_name: str) -> dict:
+        """Like ``get_by_name`` but raises 404 when the task does not exist."""
+        task = self.get_by_name(task_name)
+        if task is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No task with taskName '{task_name}' found.",
+            )
+        return task
+
     # ── API handlers ───────────────────────────
 
     def on_post(self, config: TaskConfig):
@@ -113,6 +148,7 @@ class TaskRegistry:
                 status_code=400,
                 detail="taskId in body must match the URL parameter."
             )
+        self.require(task_id)
         task = self.upsert(config)
         return {"status": "updated", "task": task}
 

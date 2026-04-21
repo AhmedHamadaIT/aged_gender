@@ -1068,7 +1068,7 @@ The following sections (§6–§11) supplement §§1–4 above: quick ml-server 
 
 **Offline QA:** fake detection counts map to **`personStructural`** (JSON string); automated checks: **`tests/test_cashier_api.py`**, **`tests/test_cashier_structured_events.py`** (and any standalone scripts under `scripts/`).
 
-**Backend envelope** wraps these fields under `data`: `algorithmType`, `captureId`, `sceneId`, `id`, `channelId`, …, `personStructural`, `captureUrl`, `sceneUrl`. Built in [`services/cashier.py`](../services/cashier.py) (`build_cashier_spec_data`); URL bases and formatting are controlled by env vars (see table in §3 and [logs.md](./logs.md)).
+**Backend envelope** wraps these fields under `data`: `algorithmType`, `captureId`, `sceneId`, `id`, `channelId`, …, `personStructural`, `captureUrl`, `sceneUrl`. Built in [`services/cashier.py`](../services/cashier.py) (`build_cashier_spec_data`); URL bases and formatting are controlled by env vars (see table in §3 and [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) Part I).
 
 ---
 

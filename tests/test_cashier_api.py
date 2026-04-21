@@ -61,6 +61,7 @@ def test_cashier_router_registers_expected_paths(app_cashier: FastAPI):
 def _reset_cashier_state() -> None:
     cashier_api._last_result.clear()
     cashier_api._event_log.clear()
+    cashier_api.clear_cashier_redis_backing()
     yield
 
 
@@ -382,7 +383,7 @@ def test_sse_stream_first_event_alerts_only_flag():
 def test_media_latest_jpg_404(client: TestClient, evidence_dir):
     r = client.get("/cashier/media/1/latest/jpg")
     assert r.status_code == 404
-    assert r.json()["status"] == "error"
+    assert "detail" in r.json()
 
 
 def test_media_latest_jpg_skips_thumb(client: TestClient, evidence_dir):

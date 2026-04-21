@@ -2,14 +2,14 @@
 
 Single reference that merges:
 
-- **Service testing** — cURL, SSH, and optional **pytest** under `tests/` for **v2** (`TASK_REGISTRY`, `/cashier/*`). Older notes lived in [`SERVICE_TEST.md`](./SERVICE_TEST.md) (pointer only).
+- **Service testing** — cURL, SSH, and optional **pytest** under `tests/` for **v2** (`TASK_REGISTRY`, `/cashier/*`). Part I below is the canonical place for commands and paths.
 - **CASHIER_BOX_OPEN / cashier integration** — where frame **`data`** lives, schema, GIF/evidence (summary in Part II below); **Eyego cURL, Part III (Vision Pipeline cashier cURL / thresholds / stream), mock `personStructural`, appendix JSON:** [`CASHIER_BOX_OPEN.md`](./CASHIER_BOX_OPEN.md). Former **`cases-and-repo.md`** material is summarized here.
 
 **API version:** `2.0.0` (`GET /`).
 
 | More detail | Doc |
 |-------------|-----|
-| Tests, log paths, curl cheat sheet | [logs.md](./logs.md) |
+| Tests, log paths, curl cheat sheet | Part I of this file; [API_USAGE.md](./API_USAGE.md) for HTTP walkthrough |
 | Add a FrameBus task | [ADDING_A_SERVICE.md](./ADDING_A_SERVICE.md) |
 | API walkthrough | [API_USAGE.md](./API_USAGE.md) |
 | Cashier (Eyego, `/cashier` cURL Part III, mocks, appendix JSON) | [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md) |
@@ -253,7 +253,7 @@ curl -s -X POST "$BASE/api/tasks" \
 
 ## Part I — 5. Tasks — `CASHIER_BOX_OPEN` (cashier monitor)
 
-Set **`YOLO_MODEL`** to cashier weights so FrameBus emits person/drawer/cash on that channel. Use **`/cashier/*`** for zones, status, and per-camera SSE; use **`GET /detection/stream?eventType=CASHIER_BOX_OPEN`** for multiplexed structured frames and **`$EVENTS_DIR/task_<taskId>.jsonl`** for durable JSONL (see [logs.md](./logs.md)). Each cashier line matches the **task-event** pattern used by `CROSS_LINE` (one JSON object per line, shared top-level keys) but carries nested Eyego **`data`** (`personStructural` as a string, **pretty JSON by default**; **`id`** ties to **`captureId`** UUID; URL bases via **`CASHIER_CLOUD_IMAGE_BASE`** / per-side bases / optional **`CASHIER_FORCE_LOCAL_URLS`**).
+Set **`YOLO_MODEL`** to cashier weights so FrameBus emits person/drawer/cash on that channel. Use **`/cashier/*`** for zones, status, and per-camera SSE; use **`GET /detection/stream?eventType=CASHIER_BOX_OPEN`** for multiplexed structured frames and **`$EVENTS_DIR/task_<taskId>.jsonl`** for durable JSONL (see [Run automated tests](#part-i--run-automated-tests-all-services) above). Each cashier line matches the **task-event** pattern used by `CROSS_LINE` (one JSON object per line, shared top-level keys) but carries nested Eyego **`data`** (`personStructural` as a string, **pretty JSON by default**; **`id`** ties to **`captureId`** UUID; URL bases via **`CASHIER_CLOUD_IMAGE_BASE`** / per-side bases / optional **`CASHIER_FORCE_LOCAL_URLS`**).
 
 ```bash
 curl -s -X POST "$BASE/api/tasks" \

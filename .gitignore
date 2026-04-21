@@ -35,9 +35,16 @@ pytest.ini
 curl_smoke.sh 
 # Project Specific
 outputs/
+# mediamtx binary & local config (download separately)
+bin/
+mediamtx.yml
+mediamtx*.yml
+# Runtime storage (created by FrameBus / task workers)
+store/
+# Test / QA artifacts
+test_logs/
 # Local export trees (e.g. batch image+json dumps; not under outputs/)
 output*/
-models/
 videos/
 logger/app.log
 evidence/
@@ -59,14 +66,36 @@ runs/
 wandb/
 *.engine
 
-# YOLOv8n weights (often large; use models/ or env YOLO_MODEL)
+# YOLO / ONNX weights at repo root (if copied outside models/)
 yolov8n.pt
 yolov8n.onnx
 yolov8n.yaml
 
+# models/ — binaries not in git; README + zero-byte placeholders define expected paths on edge
+models/*
+!models/.gitkeep
+!models/README.md
+!models/yolov8n.pt
+!models/best_aged_gender_6.onnx
+!models/best_mood.onnx
+!models/best_ppe.onnx
+!models/best_cashier.onnx
+!models/osnet_x1_0.pt
+!models/image_encoder.onnx
+!models/text_encoder.onnx
+
 # Ad-hoc test scripts at repo root only (tracked pytest lives under tests/)
 /test_*.py
 /*_test.py
+/test.py
 test_results/
 test_results.log
 README_CASHIER_TESTING.md
+
+# Local QA / scratch markdown (keep API & architecture docs in git)
+BUG_REPORT.md
+docs/cashier_demo_curl_and_logs.md
+docs/cashier_framing_test_results.md
+docs/logs.md
+docs/SERVICE_TEST.md
+docs/test-on-edge.md

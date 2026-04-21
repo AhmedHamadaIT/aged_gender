@@ -2,11 +2,22 @@
 # Docker Compose — YOLO Object Detection
 # ============================================
 # Start:  docker compose up -d --build
-# Logs:   docker compose logs -f
+# Logs:   docker compose logs -f yolo-detect   (Compose v2 plugin)
+#         If `docker compose` errors on `-f`, use: docker-compose logs -f yolo-detect
 # Shell:  docker compose exec yolo-detect bash
+# Older Docker hosts may require: docker-compose ...
 # ============================================
 
 services:
+
+  # ── Redis (live-stream pub/sub broker) ──────
+  redis:
+    container_name: redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --save "" --appendonly no   # memory-only, no disk persistence needed
 
   # ── Qdrant vector DB (ReID identity store) ──
   qdrant:
@@ -32,6 +43,7 @@ services:
 
     depends_on:
       - qdrant
+      - redis
 
     env_file:
       - .env
@@ -39,6 +51,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Default for in-compose Redis (avoids localhost:6379 inside the container)
+      - REDIS_URL=redis://redis:6379/0
 
     volumes:
       - .:/app                  # mount entire project directory

@@ -2,7 +2,7 @@
 
 **Version 2.0.0** — FastAPI server for multi-camera computer vision.
 
-The runtime path is **task-based**: you register RTSP cameras (`POST /cameras`), define **tasks** per channel (`POST /api/tasks` with an `algorithmType` such as `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, or `CASHIER_BOX_OPEN`), then start workers (`POST /detection/start`). **FrameBus** captures each stream once, runs a shared YOLO+tracker, and fans frames to **task workers** (`task_worker.py`). Task results (for example line-crossing events) are merged onto **`GET /detection/stream`** (SSE).
+The runtime path is **task-based**: you register RTSP cameras (`POST /cameras`), define **tasks** per channel (`POST /api/tasks` with an `algorithmType` such as `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, or `CASHIER_BOX_OPEN`), then start workers (`POST /detection/start`). **FrameBus** captures each stream once, runs a shared YOLO+tracker, fans frames to **task workers** (`task_worker.py`), and publishes annotated JPEG frames to **Redis** for the live WebSocket stream. Task results (line crossings, PPE violations, cashier alerts) are broadcast on **`GET /detection/stream`** (SSE). **Live annotated video** streams via **`WS /cameras/{id}/live`** (binary JPEG over WebSocket — no Base64, 50 ms backpressure drop).
 
 **Cashier** is integrated as API task type **`CASHIER_BOX_OPEN`** — implemented by class **`CashierDrawerTask`** in [`services/cashier.py`](services/cashier.py) (same module as **`CashierService`**), registered in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`. Each processed frame emits one structured task event on **`GET /detection/stream`** (`eventType`: **`CASHIER_BOX_OPEN`**, Eyego-style payload under **`data`**), is appended to **`EVENTS_DIR/task_<taskId>.jsonl`** (same pattern as `CROSS_LINE`), and updates **`/cashier/status`** and **`/cashier/events`**. Zones, evidence JPEGs/GIFs, and optional **`/cashier/stream/{camera_id}`** remain under **`/cashier/*`**. Configure **`YOLO_MODEL`** so FrameBus outputs person / drawer / cash on that channel; see [Cashier + FrameBus model](#cashier--framebus-model).
 
@@ -48,10 +48,13 @@ The repo includes [`docker-compose.yml`](docker-compose.yml): NVIDIA runtime, pr
 
 ```bash
 docker compose up -d --build
-docker compose logs -f
+docker compose logs -f yolo-detect
 # shell inside container:
 docker compose exec yolo-detect bash
 ```
+
+If your host only supports Compose v1, run the same commands with `docker-compose`
+from the directory that contains `docker-compose.yml`.
 
 **Default base URL:** `http://localhost:9000` — use `http://<host>:9000` on a Jetson or remote machine. Interactive OpenAPI: `/docs`, `/redoc`.
 
@@ -60,9 +63,10 @@ docker compose exec yolo-detect bash
 ## Features (complete inventory)
 
 ### Architecture (v2 runtime)
-- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, then fan-out of `{frame + tracks}` to each task queue. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`.
-- **Task workers** ([`task_worker.py`](task_worker.py)) — One worker process per enabled task; looks up `algorithmType` in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY` and emits events to the shared result queue.
-- **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` so `GET /detection/stream` subscribers receive multiprocessing queue events on the asyncio loop (use **one** uvicorn worker for a single in-process broadcast; scale-out needs a broker).
+- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`.
+- **Task workers** ([`task_worker.py`](task_worker.py)) — One worker process per enabled task; looks up `algorithmType` in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`, emits events to the shared result queue **and** publishes them to Redis `live:event:{camera_id}`.
+- **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` (subscribes from both the multiprocessing queue and Redis `live:event:*` so multiple uvicorn workers can all serve SSE). Serves **WebSocket** live frame stream at `WS /cameras/{id}/live` via [`apis/ws_live.py`](apis/ws_live.py).
+- **Redis** ([`docker-compose.yml`](docker-compose.yml) `redis:7-alpine`) — Fire-and-forget Pub/Sub broker. FrameBus publishes binary JPEG frames; FastAPI WebSocket handlers subscribe. No persistence needed (`--appendonly no`).
 
 ### Cameras
 - **Multi-camera RTSP** — `POST /cameras`, `GET /cameras`, `DELETE /cameras/{cam_id}`. Many responses use the standardized envelope pattern (`error_codes/response.py`).
@@ -84,9 +88,11 @@ docker compose exec yolo-detect bash
 - **MASK_HAIRNET_CHEF_HAT:** `alarmType` (list of violation keys)
 - **CASHIER_BOX_OPEN:** `drawerOpenLimit`, `serviceWaitLimit`, `enableStaffList`, `staffIds`
 
-### Detection control & global SSE
+### Detection control, SSE events & live WebSocket stream
 - **Runtime** — `POST /detection/start` / `POST /detection/stop` (optional query `camera_id`); `GET /detection/status` (FPS, frame counts, errors per camera).
-- **`GET /detection/stream`** — Server-Sent Events: one JSON **task event** per message (crossings, PPE violations, etc.). Optional filters (AND): `taskId`, `taskName`, `eventType`, `channelId`. Idle `: ping` keepalives; interval overridable with **`DETECTION_SSE_KEEPALIVE_SEC`** ([`apis/detection_stream.py`](apis/detection_stream.py)). CORS header `Access-Control-Allow-Origin: *` on the stream response.
+- **`GET /detection/stream`** — Server-Sent Events: one JSON **task event** per message (crossings, PPE violations, etc.). Optional filters (AND): `taskId`, `taskName`, `eventType`, `channelId`. Idle `: ping` keepalives; overridable with **`DETECTION_SSE_KEEPALIVE_SEC`**. With `REDIS_URL` set, the bridge also reads from Redis `live:event:*` enabling multi-worker SSE.
+- **`WS /cameras/{camera_id}/live`** — Binary WebSocket stream of **annotated JPEG frames** (YOLO boxes + track IDs drawn by FrameBus). Raw bytes per message — no Base64 overhead. Frames dropped with 50 ms timeout when clients are slow (`WS_SEND_TIMEOUT_MS`). Published at `REDIS_LIVE_FPS` (default 13 fps). See [`apis/ws_live.py`](apis/ws_live.py).
+- **`WS /cameras/{camera_id}/events`** — JSON WebSocket stream of detection events per camera (same shape as SSE events).
 
 ### Cashier monitor (`/cashier/*`)
 - Enable with **`POST /api/tasks`** using `algorithmType: "CASHIER_BOX_OPEN"` and matching `channelId`.
@@ -224,9 +230,72 @@ curl -s -X POST "$BASE/detection/stop"
 
 curl -s "$BASE/detection/status"
 
-# SSE: task events (e.g. crossings), not per-frame pipeline JSON
+# SSE: task events (e.g. crossings, PPE violations, cashier frames)
 curl -N "$BASE/detection/stream"
+# Filtered SSE
+curl -N "$BASE/detection/stream?eventType=CROSS_LINE&channelId=1"
 ```
+
+### Live annotated frame stream — WebSocket
+
+Binary WebSocket stream of JPEG frames with YOLO bounding boxes drawn by FrameBus.
+Requires Redis (`REDIS_URL`). One channel per camera.
+
+```bash
+# Verify WebSocket handshake (expect HTTP 101 Switching Protocols)
+curl -i -N \
+  -H "Connection: Upgrade" \
+  -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  -H "Sec-WebSocket-Version: 13" \
+  "$BASE/cameras/cam1/live"
+
+# Connect with websocat CLI and see frame sizes
+websocat --binary "ws://localhost:9000/cameras/cam1/live" \
+  | while IFS= read -r -d '' chunk; do echo "frame ${#chunk} bytes"; done
+
+# JSON event stream over WebSocket
+websocat "ws://localhost:9000/cameras/cam1/events"
+
+# Verify Redis is publishing frames
+docker exec -it redis redis-cli SUBSCRIBE live:frame:cam1
+
+# Check FrameBus connected
+docker compose logs yolo-detect | grep "FrameBus: Redis"
+```
+
+**Browser quickstart** (save as `stream.html`, open in any browser):
+
+```html
+<!DOCTYPE html><html><body style="background:#111;color:#0f0;text-align:center">
+<h3>Live Annotated Stream</h3>
+<div id="st">Connecting…</div>
+<img id="img" style="max-width:95%;border:2px solid #0f0">
+<script>
+function connect(id) {
+  const ws = new WebSocket(`ws://localhost:9000/cameras/${id}/live`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen  = () => document.getElementById("st").textContent = "Connected ✓";
+  ws.onclose = () => { document.getElementById("st").textContent = "Reconnecting…";
+                       setTimeout(() => connect(id), 2000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => {
+    const img = document.getElementById("img");
+    URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(new Blob([e.data], {type:"image/jpeg"}));
+  };
+}
+connect("cam1");   // change to your camera id
+</script></body></html>
+```
+
+**Live stream environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
+| `REDIS_LIVE_FPS` | `13` | Target publish rate (fps); FrameBus auto-adjusts per measured camera FPS |
+| `WS_SEND_TIMEOUT_MS` | `50` | Drop frame if client cannot receive within this many ms |
 
 ### Cashier — zones (`GET` / `POST` / `POST …/reset`)
 
@@ -1782,15 +1851,17 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 │   └── cashier_zones.yaml
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # This file (complete documentation)
-├── .gitignore                  # Git ignore rules (e.g. models/, outputs/, output*/)
-├── models/                     # ML models (not tracked in git)
-│   ├── yolov8n.pt             # YOLO v8 Nano (~25 MB)
-│   ├── best_ppe.onnx           # PPE ONNX (~38 MB)
-│   ├── best_aged_gender_6.onnx # Age/Gender ONNX (~85 MB)
-│   ├── best_mood.onnx          # Mood/Emotion ONNX (~15 MB)
-│   ├── os_net.pt               #Person search
-│   ├── text_encoder.onnx       #semantic search
-│   └── image_encoder.onnx      #semantic search
+├── .gitignore                  # Git ignore rules (models/, outputs/, local QA *.md, root test.py)
+├── models/                     # Weight files: zero-byte placeholders in git; copy real blobs on edge (see models/README.md)
+│   ├── README.md               # Expected filenames + Drive / download_models.py
+│   ├── yolov8n.pt              # YOLO (replace on device)
+│   ├── best_ppe.onnx
+│   ├── best_aged_gender_6.onnx
+│   ├── best_mood.onnx
+│   ├── best_cashier.onnx       # Cashier ONNX
+│   ├── osnet_x1_0.pt           # Person search (ReID)
+│   ├── text_encoder.onnx       # Semantic search
+│   └── image_encoder.onnx
 ├── services/                   # Service modules
 │   ├── detector.py             # YOLO detection service (REGISTRY / pipeline)
 │   ├── age_gender.py           # Age/Gender classification
@@ -1894,6 +1965,8 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/detection/stop` | POST | Stop processing (optional `camera_id`; omit = all) |
 | `/detection/status` | GET | Operational status per camera |
 | `/detection/stream` | GET | SSE: task events (e.g. crossings, PPE); optional `taskId`, `taskName`, `eventType`, `channelId` |
+| **`/cameras/{camera_id}/live`** | **WebSocket** | **Binary JPEG frame stream — live annotated video with bounding boxes** |
+| **`/cameras/{camera_id}/events`** | **WebSocket** | **JSON detection event stream per camera** |
 | `/cashier/status` | GET | Latest cashier summary per camera |
 | `/cashier/events` | GET | Paginated structured cashier event log (`severity`, `case_id`, `camera_id`, `limit`, `offset`) |
 | `/cashier/events` | DELETE | Clear in-memory event log |
@@ -1902,7 +1975,7 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/cashier/zones` | GET | Read `CASHIER_CONFIG` |
 | `/cashier/zones` | POST | Update zones and/or thresholds |
 | `/cashier/zones/reset` | POST | Restore default zones to config file |
-| `/cashier/stream/{camera_id}` | GET | Per-camera SSE (all events) |
+| `/cashier/stream/{camera_id}` | GET | Per-camera SSE (JSON events only — for live video use WebSocket above) |
 | `/cashier/stream/{camera_id}/only` | GET | Per-camera SSE (alerts-oriented) |
 | `/cashier/media/{camera_id}/latest/jpg` | GET | Latest evidence JPG |
 | `/cashier/media/{camera_id}/latest/gif` | GET | Latest evidence GIF |
@@ -1923,7 +1996,7 @@ After starting the server (`uvicorn` on port **9000** by default):
 - Swagger UI: `http://localhost:9000/docs`
 - ReDoc: `http://localhost:9000/redoc`
 
-Supplementary docs: [`docs/logs.md`](docs/logs.md) (tests, log paths, curl reference), [`docs/API_USAGE.md`](docs/API_USAGE.md) (API walkthrough including SSE), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest + cURL + SSH + cashier **`data`/cases/evidence — single combined README), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL Part III + mocks + JSON), [`sse_cashier.md`](sse_cashier.md).
+Supplementary docs (in git): [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including live WebSocket), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest, cURL, SSH, cashier `data`/cases/evidence), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`sse_cashier.md`](sse_cashier.md). Ad-hoc run notes (`docs/logs.md`, edge/framing/service test write-ups, `BUG_REPORT.md`) are listed in `.gitignore` so they stay local-only.
 
 ## Models file
 https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link

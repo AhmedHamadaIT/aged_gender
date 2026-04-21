@@ -38,7 +38,9 @@ def test_build_cashier_structured_event_shape():
 
     assert ev["eventType"] == "CASHIER_BOX_OPEN"
     assert ev["taskId"] == 101
-    assert ev["channelId"] == 2
+    assert ev["channelId"] == "cam-1"
+    assert ev["camera_id"] == "cam-1"
+    assert ev["data"]["channelId"] == "cam-1"
     assert ev["case_id"] == "N3"
     assert ev["severity"] == "NORMAL"
     assert ev["transaction"] is True

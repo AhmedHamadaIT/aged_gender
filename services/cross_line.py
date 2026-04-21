@@ -148,7 +148,14 @@ class CrossLineTask:
                     continue
 
                 attrs = self._get_attributes(frame, det)
-                event = self._build_event(det, line, crossing_dir, attrs, payload["timestamp"])
+                event = self._build_event(
+                    det,
+                    line,
+                    crossing_dir,
+                    attrs,
+                    payload["timestamp"],
+                    str(payload.get("camera_id") or ""),
+                )
                 self._persist(event, frame, det)
                 events.append(event)
 
@@ -205,7 +212,15 @@ class CrossLineTask:
 
     # ── Event construction ────────────────────────────────────────────────────
 
-    def _build_event(self, det, line: dict, crossing_dir: int, attrs: dict, timestamp: str) -> dict:
+    def _build_event(
+        self,
+        det,
+        line: dict,
+        crossing_dir: int,
+        attrs: dict,
+        timestamp: str,
+        camera_id: str,
+    ) -> dict:
         now_ms   = int(time.time() * 1000)
         event_id = hashlib.md5(
             f"{self.task_id}_{det.track_id}_{now_ms}".encode()
@@ -226,7 +241,8 @@ class CrossLineTask:
             ).isoformat().replace("+00:00", "Z"),
             "taskId"      : self.task_id,
             "taskName"    : self.task_name,
-            "channelId"   : self.channel_id,
+            "channelId"   : str(camera_id or self.channel_id),
+            "camera_id"   : camera_id,
             "line": {
                 "id"       : line["line_id"],
                 "name"     : line.get("line_name", ""),

@@ -174,7 +174,14 @@ class MaskHairnetChefHatTask:
                     # Use threshold as fallback confidence when class absent
                     conf_pct = int(ppe_conf_map.get(required_class, self.threshold) * 100)
                     zone     = self.zones[0] if self.zones else None
-                    event    = self._build_event(det, alarm_type, conf_pct, zone, payload["timestamp"])
+                    event = self._build_event(
+                        det,
+                        alarm_type,
+                        conf_pct,
+                        zone,
+                        payload["timestamp"],
+                        str(payload.get("camera_id") or ""),
+                    )
                     self._persist(event, frame, det)
                     events.append(event)
 
@@ -191,7 +198,15 @@ class MaskHairnetChefHatTask:
 
     # ── Event construction ────────────────────────────────────────────────────
 
-    def _build_event(self, det, alarm_type: str, conf_pct: int, zone: Optional[dict], timestamp: str) -> dict:
+    def _build_event(
+        self,
+        det,
+        alarm_type: str,
+        conf_pct: int,
+        zone: Optional[dict],
+        timestamp: str,
+        camera_id: str,
+    ) -> dict:
         now_ms   = int(time.time() * 1000)
         event_id = hashlib.md5(
             f"{self.task_id}_{det.track_id}_{alarm_type}_{now_ms}".encode()
@@ -213,7 +228,8 @@ class MaskHairnetChefHatTask:
             ).isoformat().replace("+00:00", "Z"),
             "taskId"      : self.task_id,
             "taskName"    : self.task_name,
-            "channelId"   : self.channel_id,
+            "channelId"   : str(camera_id or self.channel_id),
+            "camera_id"   : camera_id,
             "alert": {
                 "type"       : alarm_type,
                 "description": _ALERT_DESCRIPTIONS.get(alarm_type, alarm_type),

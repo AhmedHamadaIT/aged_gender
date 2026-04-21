@@ -14,7 +14,7 @@ Endpoints (registered in app.py):
 
 from typing import Dict, Optional
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ─────────────────────────────────────────────
@@ -26,7 +26,7 @@ class CameraConfig(BaseModel):
 
 
 class CameraSetupRequest(BaseModel):
-    cameras: list[CameraConfig]
+    cameras: list[CameraConfig] = Field(..., min_length=1)
 
 
 # ─────────────────────────────────────────────

@@ -17,9 +17,6 @@ import numpy as np
 from PIL import Image
 from dotenv import load_dotenv
 
-import open_clip
-import onnxruntime as ort
-
 from logger.logger_config import Logger
 from store.identity_manager import IdentityManager
 
@@ -30,49 +27,75 @@ log = Logger.get_logger(__name__)
 class SemanticSearchService:
 
     def __init__(self):
-        # ── MobileCLIP Model + Transforms Setup ──────────────────────────
-        model_name = os.getenv("MOBILECLIP_MODEL", "MobileCLIP2-S0")
-        pretrained = os.getenv("MOBILECLIP_PRETRAINED", "dfndr2b")
+        self._ready = False
+        self.identity_manager = None
+        try:
+            image_onnx_path = os.getenv("IMAGE_ENCODER_ONNX", "./models/image_encoder.onnx")
+            text_onnx_path  = os.getenv("TEXT_ENCODER_ONNX", "./models/text_encoder.onnx")
+            missing_paths = [p for p in (image_onnx_path, text_onnx_path) if not os.path.exists(p)]
+            if missing_paths:
+                raise FileNotFoundError(
+                    f"Missing ONNX model(s): {', '.join(missing_paths)}"
+                )
 
-        log.info(f"[SemanticSearchService] Loading transforms for {model_name}...")
+            import gc
+            import onnxruntime as ort
+            import open_clip
 
-        # Load PyTorch model temporarily JUST to get the correct preprocess and tokenizer
-        base_model, _, self.preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained, device="cpu"
-        )
-        self.tokenizer = open_clip.get_tokenizer(model_name)
+            # ── MobileCLIP Model + Transforms Setup ──────────────────────────
+            model_name = os.getenv("MOBILECLIP_MODEL", "MobileCLIP2-S0")
+            pretrained = os.getenv("MOBILECLIP_PRETRAINED", "dfndr2b")
 
-        # Free memory: we don't need the PyTorch model anymore
-        del base_model
-        import gc; gc.collect()
+            log.info(f"[SemanticSearchService] Loading transforms for {model_name}...")
 
-        image_onnx_path = os.getenv("IMAGE_ENCODER_ONNX", "./models/image_encoder.onnx")
-        text_onnx_path  = os.getenv("TEXT_ENCODER_ONNX", "./models/text_encoder.onnx")
+            # Load PyTorch model temporarily JUST to get the correct preprocess and tokenizer.
+            base_model, _, self.preprocess = open_clip.create_model_and_transforms(
+                model_name, pretrained=pretrained, device="cpu"
+            )
+            self.tokenizer = open_clip.get_tokenizer(model_name)
 
-        providers = [
-            ('TensorrtExecutionProvider', {
-                'device_id': 0,
-                'trt_max_workspace_size': 2147483648,
-                'trt_fp16_enable': True,
-                'trt_engine_cache_enable': True,
-                'trt_engine_cache_path': './trt_cache',
-            }),
-            'CUDAExecutionProvider',
-            'CPUExecutionProvider',
-        ]
+            del base_model
+            gc.collect()
 
-        if 'TensorrtExecutionProvider' in str(providers):
-            os.makedirs('./trt_cache', exist_ok=True)
+            providers = [
+                ("TensorrtExecutionProvider", {
+                    "device_id": 0,
+                    "trt_max_workspace_size": 2147483648,
+                    "trt_fp16_enable": True,
+                    "trt_engine_cache_enable": True,
+                    "trt_engine_cache_path": "./trt_cache",
+                }),
+                "CUDAExecutionProvider",
+                "CPUExecutionProvider",
+            ]
+            available_providers = set(ort.get_available_providers())
+            selected_providers = []
 
-        self.image_session = ort.InferenceSession(image_onnx_path, providers=providers)
-        self.text_session  = ort.InferenceSession(text_onnx_path, providers=providers)
+            for provider in providers:
+                provider_name = provider[0] if isinstance(provider, tuple) else provider
+                if provider_name in available_providers:
+                    selected_providers.append(provider)
 
-        self.image_input_name = self.image_session.get_inputs()[0].name
-        self.text_input_name  = self.text_session.get_inputs()[0].name
+            if any(
+                isinstance(provider, tuple) and provider[0] == "TensorrtExecutionProvider"
+                for provider in selected_providers
+            ):
+                os.makedirs("./trt_cache", exist_ok=True)
 
-        self.identity_manager = IdentityManager()
+            if not selected_providers:
+                selected_providers = ["CPUExecutionProvider"]
 
-        log.info("[SemanticSearchService] Ready — ONNX loaded")
+            self.image_session = ort.InferenceSession(image_onnx_path, providers=selected_providers)
+            self.text_session  = ort.InferenceSession(text_onnx_path, providers=selected_providers)
+
+            self.image_input_name = self.image_session.get_inputs()[0].name
+            self.text_input_name  = self.text_session.get_inputs()[0].name
+
+            self.identity_manager = IdentityManager()
+            self._ready = True
+            log.info("[SemanticSearchService] Ready — ONNX loaded")
+        except Exception as e:
+            log.warning(f"[SemanticSearchService] Not loaded — {e}. Search endpoints will return 503.")
 
     # ── Embedding Extraction ──────────────────────────────────────────────
 
@@ -81,6 +104,8 @@ class SemanticSearchService:
         Extract a normalized CLIP image embedding from a BGR crop.
         Returns a float list suitable for Qdrant, or None on failure.
         """
+        if not self._ready:
+            raise RuntimeError("SemanticSearchService not loaded — ONNX models missing or open_clip unavailable.")
         try:
             img_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(img_rgb)
@@ -101,6 +126,8 @@ class SemanticSearchService:
 
     def search_by_image(self, image_bytes: bytes, top_k: int = 10) -> list[dict]:
         """Decode image bytes, extract CLIP embedding, and search Qdrant."""
+        if not self._ready:
+            raise RuntimeError("SemanticSearchService not loaded — ONNX models missing or open_clip unavailable.")
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
@@ -116,6 +143,8 @@ class SemanticSearchService:
 
     def search_by_text(self, text_query: str, top_k: int = 10) -> list[dict]:
         """Tokenize text, extract CLIP text embedding, and search Qdrant."""
+        if not self._ready:
+            raise RuntimeError("SemanticSearchService not loaded — ONNX models missing or open_clip unavailable.")
         try:
             tokens = self.tokenizer([text_query])
             np_input = tokens.cpu().numpy().astype(np.int64)

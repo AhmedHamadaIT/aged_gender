@@ -30,19 +30,26 @@ class PersonSearchService:
 
     def __init__(self):
         # ── OSNet Model Setup ─────────────────────────────────────────────
-        model_path  = os.getenv("REID_MODEL_PATH", "models/osnet_x1_0.pt")
-        self.device = torch.device(os.getenv("DEVICE", "cpu"))
-        self.model  = torch.jit.load(model_path, map_location=str(self.device))
-        self.model.eval()
+        try:
+            model_path = os.getenv("REID_MODEL_PATH", "models/osnet_x1_0.pt")
+            if not os.path.exists(model_path):
+                raise ValueError(f"The provided filename {model_path} does not exist")
+            self.device = torch.device(os.getenv("DEVICE", "cpu"))
+            self.model  = torch.jit.load(model_path, map_location=str(self.device))
+            self.model.eval()
 
-        self.transform = T.Compose([
-            T.Resize((256, 128)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
+            self.transform = T.Compose([
+                T.Resize((256, 128)),
+                T.ToTensor(),
+                T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
 
-        self.identity_manager = IdentityManager()
-        log.info("[PersonSearchService] Ready — OSNet loaded")
+            self.identity_manager = IdentityManager()
+            log.info("[PersonSearchService] Ready — OSNet loaded")
+        except Exception as e:
+            log.warning(f"[PersonSearchService] Model not loaded — {e}. Search endpoint will return 503.")
+            self.model = None
+            self.identity_manager = None
 
     # ── Embedding Extraction ──────────────────────────────────────────────
 
@@ -70,6 +77,9 @@ class PersonSearchService:
         Decode image bytes, extract embedding, and search Qdrant.
         Used by the API endpoint for querying.
         """
+        if self.model is None:
+            raise RuntimeError("OSNet model not loaded — REID_MODEL_PATH missing or invalid.")
+
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 

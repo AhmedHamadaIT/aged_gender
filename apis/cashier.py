@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -48,14 +48,93 @@ _last_result  : Dict[str, Any] = {}   # camera_id → latest result
 _event_log    : deque          = deque(maxlen=int(os.getenv("CASHIER_LOG_MAX", "5000")))
 _evidence_dir  = Path(os.getenv("CASHIER_EVIDENCE_DIR", "./evidence/cashier"))
 
+# Redis keys — shared across forked task workers and the API process (BUG-001/002/005/011).
+_CASHIER_SSE_CHANNEL = "cashier:sse:{camera_id}"  # not live:event:* (detection stream)
+_CASHIER_STATUS_HASH = "cashier:status"
+_CASHIER_EVENTS_LIST = "cashier:events"
+
+_redis_sync_lock = threading.Lock()
+_redis_sync_client: Optional[Any] = None
+
+
+def get_redis_sync() -> Optional[Any]:
+    """
+    Lazy sync Redis client for cashier IPC.
+    Initialized on first use so ``REDIS_URL`` is visible after ``load_dotenv()`` (BUG-011).
+    """
+    global _redis_sync_client
+    url = (os.getenv("REDIS_URL") or "").strip()
+    if not url:
+        return None
+    with _redis_sync_lock:
+        if _redis_sync_client is not None:
+            try:
+                _redis_sync_client.ping()
+                return _redis_sync_client
+            except Exception:
+                _redis_sync_client = None
+        try:
+            import redis as _redis_lib
+
+            c = _redis_lib.Redis.from_url(
+                url, socket_connect_timeout=2, decode_responses=True
+            )
+            c.ping()
+            _redis_sync_client = c
+            return c
+        except Exception as exc:
+            print(f"[cashier] Redis lazy connect failed: {exc}")
+            return None
+
+
+def clear_cashier_redis_backing() -> None:
+    """Clear Redis-backed cashier state (tests / admin). In-process deque is separate."""
+    r = get_redis_sync()
+    if r is None:
+        return
+    try:
+        r.delete(_CASHIER_EVENTS_LIST)
+        r.delete(_CASHIER_STATUS_HASH)
+    except Exception:
+        pass
+
+
+def _redis_write_cashier_row(
+    camera_id: str,
+    status_snapshot: Dict[str, Any],
+    log_row: Optional[Dict[str, Any]],
+) -> None:
+    """Persist latest status + optional log row for cross-process reads."""
+    r = get_redis_sync()
+    if r is None:
+        return
+    try:
+        maxlen = int(os.getenv("CASHIER_LOG_MAX", "5000"))
+        pipe = r.pipeline()
+        pipe.hset(_CASHIER_STATUS_HASH, camera_id, json.dumps(status_snapshot, default=str))
+        if log_row is not None:
+            pipe.lpush(_CASHIER_EVENTS_LIST, json.dumps(log_row, default=str))
+            pipe.ltrim(_CASHIER_EVENTS_LIST, 0, max(0, maxlen - 1))
+        pipe.execute()
+    except Exception:
+        pass
+
 
 # ─────────────────────────────────────────────
 # SSE Publisher — embedded, no extra file needed
 # ─────────────────────────────────────────────
 class _SSEPublisher:
     """
-    Thread-safe SSE broadcaster.  The event loop is captured lazily the
-    first time a client subscribes (which happens in an async context).
+    Thread-safe SSE broadcaster with dual delivery:
+
+    Path 1 — asyncio queues (in-process):
+        The worker thread calls publish() which schedules onto the event loop.
+        Works in a single uvicorn worker. Always active.
+
+    Path 2 — Redis Pub/Sub (multi-worker):
+        publish() also does redis.publish() synchronously on the worker thread.
+        stream() subscribes to Redis so any uvicorn worker can serve cashier SSE.
+        Active only when REDIS_URL is set and Redis is reachable.
     """
     def __init__(self) -> None:
         self._queues: Dict[str, Set[asyncio.Queue]] = defaultdict(set)
@@ -71,15 +150,26 @@ class _SSEPublisher:
 
     def publish(self, camera_id: str, event_type: str, payload: Dict[str, Any]) -> None:
         """Called from background worker threads."""
-        if not self._loop:
-            return
         msg = {"event": event_type, "camera_id": camera_id,
                "ts": time.time(), "data": payload}
-        for q in list(self._queues.get(camera_id, set())):
+
+        # Path 1: in-process asyncio queues
+        if self._loop:
+            for q in list(self._queues.get(camera_id, set())):
+                try:
+                    self._loop.call_soon_threadsafe(q.put_nowait, msg)
+                except asyncio.QueueFull:
+                    pass
+
+        # Path 2: Redis pub/sub on dedicated channel (fork-safe; not live:event:*)
+        r = get_redis_sync()
+        if r is not None:
             try:
-                self._loop.call_soon_threadsafe(q.put_nowait, msg)
-            except asyncio.QueueFull:
-                pass
+                import json as _json
+
+                r.publish(_CASHIER_SSE_CHANNEL.format(camera_id=camera_id), _json.dumps(msg))
+            except Exception:
+                pass  # never block inference on Redis errors
 
     def _subscribe(self, camera_id: str) -> "asyncio.Queue[Any]":
         self._ensure_loop()
@@ -91,7 +181,22 @@ class _SSEPublisher:
         self._queues[camera_id].discard(q)
 
     async def stream(self, camera_id: str, alert_only: bool = False) -> AsyncGenerator[str, None]:
+        """
+        Yields SSE strings.  Delivers from both the in-process asyncio queue
+        and (when available) a Redis Pub/Sub subscription so that this method
+        works across multiple uvicorn workers.
+        """
+        self._ensure_loop()
         q = self._subscribe(camera_id)
+
+        # Start Redis subscriber coroutine that feeds into the same asyncio queue
+        redis_task: Optional[asyncio.Task] = None
+        redis_url = os.getenv("REDIS_URL", "")
+        if redis_url:
+            redis_task = asyncio.create_task(
+                self._redis_to_queue(camera_id, q), name=f"cashier_redis_{camera_id}"
+            )
+
         try:
             yield _sse("connected", {"camera_id": camera_id, "alert_only": alert_only})
             while True:
@@ -107,6 +212,52 @@ class _SSEPublisher:
             pass
         finally:
             self._unsubscribe(camera_id, q)
+            if redis_task is not None:
+                redis_task.cancel()
+                try:
+                    await redis_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _redis_to_queue(
+        self, camera_id: str, q: "asyncio.Queue[Any]"
+    ) -> None:
+        """Subscribe to Redis cashier:sse:{camera_id} and forward into *q*."""
+        redis_url = os.getenv("REDIS_URL", "")
+        try:
+            import redis.asyncio as aioredis
+            import json as _json
+        except ImportError:
+            return
+
+        client = None
+        try:
+            client = aioredis.from_url(redis_url, socket_connect_timeout=2)
+            await client.ping()
+            async with client.pubsub() as ps:
+                await ps.subscribe(_CASHIER_SSE_CHANNEL.format(camera_id=camera_id))
+                async for raw_msg in ps.listen():
+                    if raw_msg["type"] != "message":
+                        continue
+                    raw = raw_msg["data"]
+                    try:
+                        msg = _json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+                    except Exception:
+                        continue
+                    try:
+                        q.put_nowait(msg)
+                    except asyncio.QueueFull:
+                        pass
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        finally:
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
 
 
 def _sse(event: str, data: Any) -> str:
@@ -135,16 +286,18 @@ def push_structured_cashier_event(camera_id: str, event: Dict[str, Any]) -> None
     """
     Canonical cashier output: one structured event per processed frame.
     Updates live status and appends to the in-memory event log (newest-first).
+    When Redis is configured, mirrors to ``cashier:status`` / ``cashier:events`` for forked workers.
     """
+    logged = {
+        **event,
+        "camera_id": camera_id,
+        "logged_at": datetime.now(timezone.utc).isoformat(),
+    }
+    snap = {**event, "camera_id": camera_id}
     with _lock:
-        _last_result[camera_id] = {**event, "camera_id": camera_id}
-        _event_log.appendleft(
-            {
-                **event,
-                "camera_id": camera_id,
-                "logged_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        _last_result[camera_id] = snap
+        _event_log.appendleft(logged)
+    _redis_write_cashier_row(camera_id, snap, logged)
 
 
 def _legacy_hybrid_to_structured(camera_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,7 +348,7 @@ def _legacy_hybrid_to_structured(camera_id: str, result: Dict[str, Any]) -> Dict
         "algorithmType": _CASHIER_EVENT_TYPE,
         "captureId": f"{_CASHIER_EVENT_TYPE}_{uuid.uuid4()}.jpg",
         "sceneId": f"{_CASHIER_EVENT_TYPE}_{uuid.uuid4()}.jpg",
-        "channelId": None,
+        "channelId": str(camera_id) if camera_id else "",
         "channelName": "",
         "deviceSN": "UNKNOWN",
         "id": uuid.uuid4().hex,
@@ -217,7 +370,7 @@ def _legacy_hybrid_to_structured(camera_id: str, result: Dict[str, Any]) -> Dict
         "timestampUTC": date_utc,
         "taskId": None,
         "taskName": "",
-        "channelId": None,
+        "channelId": str(camera_id) if camera_id else "",
         "camera_id": camera_id,
         "case_id": case_id,
         "severity": severity,
@@ -243,16 +396,19 @@ def push_result(camera_id: str, result: Dict[str, Any]) -> None:
     alerts = summ.get("alerts") or result.get("alerts") or []
     txn = bool(summ.get("transaction", result.get("transaction", False)))
     event = _legacy_hybrid_to_structured(camera_id, result)
+    snap = {**event, "camera_id": camera_id}
     with _lock:
-        _last_result[camera_id] = {**event, "camera_id": camera_id}
+        _last_result[camera_id] = snap
         if alerts or txn:
-            _event_log.appendleft(
-                {
-                    **event,
-                    "camera_id": camera_id,
-                    "logged_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
+            logged = {
+                **event,
+                "camera_id": camera_id,
+                "logged_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _event_log.appendleft(logged)
+            _redis_write_cashier_row(camera_id, snap, logged)
+        else:
+            _redis_write_cashier_row(camera_id, snap, None)
 
 
 # ─────────────────────────────────────────────
@@ -316,6 +472,21 @@ def get_status():
           }
         }
     """
+    r = get_redis_sync()
+    if r is not None:
+        try:
+            raw = r.hgetall(_CASHIER_STATUS_HASH)
+            if raw:
+                out: Dict[str, Any] = {}
+                for k, v in raw.items():
+                    try:
+                        out[k] = json.loads(v)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                if out:
+                    return out
+        except Exception:
+            pass
     with _lock:
         return dict(_last_result)
 
@@ -334,8 +505,21 @@ def get_events(
     only on alerts/transaction.
     Use ``offset`` + ``limit`` for pagination.
     """
-    with _lock:
-        events = list(_event_log)
+    events: List[Dict[str, Any]] = []
+    r = get_redis_sync()
+    if r is not None:
+        try:
+            if int(r.llen(_CASHIER_EVENTS_LIST) or 0) > 0:
+                for row in r.lrange(_CASHIER_EVENTS_LIST, 0, -1):
+                    try:
+                        events.append(json.loads(row))
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+        except Exception:
+            events = []
+    if not events:
+        with _lock:
+            events = list(_event_log)
 
     if severity:
         events = [e for e in events if e.get("severity") == severity.upper()]
@@ -353,6 +537,7 @@ def clear_events():
     with _lock:
         count = len(_event_log)
         _event_log.clear()
+    clear_cashier_redis_backing()
     return {"cleared": count}
 
 
@@ -397,20 +582,21 @@ def list_evidence(
 )
 def download_evidence(file_path: str):
     """Download a single evidence JPEG by its relative path (from ``GET /cashier/evidence``)."""
-    full_path = _evidence_dir / file_path
-    if not full_path.exists() or not full_path.is_file():
-        return JSONResponse(
-            status_code=404,
-            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=file_path),
-        )
     try:
-        full_path.resolve().relative_to(_evidence_dir.resolve())
-    except ValueError:
+        base = _evidence_dir.resolve()
+        target = (base / file_path).resolve()
+        target.relative_to(base)
+    except (ValueError, OSError):
         return JSONResponse(
             status_code=403,
             content=error(ErrorCode.CASHIER_PATH_TRAVERSAL, detail=file_path),
         )
-    return FileResponse(str(full_path), media_type="image/jpeg", filename=full_path.name)
+    if not target.is_file():
+        return JSONResponse(
+            status_code=404,
+            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=file_path),
+        )
+    return FileResponse(str(target), media_type="image/jpeg", filename=target.name)
 
 
 @router.get("/zones", summary="Return current zone configuration")
@@ -569,9 +755,9 @@ async def latest_jpg(camera_id: str):
     files = [f for f in sorted(_evidence_dir.rglob(f"{camera_id}_*.jpg"))
              if "_thumb" not in f.name]
     if not files:
-        return JSONResponse(
+        raise HTTPException(
             status_code=404,
-            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=camera_id),
+            detail=f"Cashier evidence not found for camera {camera_id!r}.",
         )
     return FileResponse(str(files[-1]), media_type="image/jpeg")
 
@@ -580,9 +766,9 @@ async def latest_jpg(camera_id: str):
 async def latest_gif(camera_id: str):
     files = sorted(_evidence_dir.rglob(f"{camera_id}_*.gif"))
     if not files:
-        return JSONResponse(
+        raise HTTPException(
             status_code=404,
-            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=camera_id),
+            detail=f"Cashier evidence GIF not found for camera {camera_id!r}.",
         )
     return FileResponse(str(files[-1]), media_type="image/gif")
 
@@ -593,9 +779,9 @@ async def event_jpg(camera_id: str, event_id: str):
     ts    = "_".join(parts[1:4]) if len(parts) >= 4 else event_id
     f     = _find_evidence(f"{camera_id}_{ts}*.jpg")
     if not f or "_thumb" in f.name:
-        return JSONResponse(
+        raise HTTPException(
             status_code=404,
-            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=event_id),
+            detail=f"Cashier evidence JPEG not found for event {event_id!r}.",
         )
     return FileResponse(str(f), media_type="image/jpeg")
 
@@ -606,9 +792,9 @@ async def event_gif(camera_id: str, event_id: str):
     ts    = "_".join(parts[1:4]) if len(parts) >= 4 else event_id
     f     = _find_evidence(f"{camera_id}_{ts}*.gif")
     if not f:
-        return JSONResponse(
+        raise HTTPException(
             status_code=404,
-            content=error(ErrorCode.CASHIER_EVIDENCE_NOT_FOUND, detail=event_id),
+            detail=f"Cashier evidence GIF not found for event {event_id!r}.",
         )
     return FileResponse(str(f), media_type="image/gif")
 

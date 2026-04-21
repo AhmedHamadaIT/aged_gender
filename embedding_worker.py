@@ -41,6 +41,20 @@ def run_embedding_worker(embedding_queue, stop_event):
     person_search = PersonSearchService()
     semantic_search = SemanticSearchService()
 
+    person_search_ready = (
+        getattr(person_search, "model", None) is not None
+        and getattr(person_search, "identity_manager", None) is not None
+    )
+    semantic_search_ready = (
+        getattr(semantic_search, "_ready", False)
+        and getattr(semantic_search, "identity_manager", None) is not None
+    )
+
+    if not person_search_ready:
+        log.info("[EmbeddingWorker] Person search disabled — REID model unavailable.")
+    if not semantic_search_ready:
+        log.info("[EmbeddingWorker] Semantic search disabled — ONNX models unavailable.")
+
     log.info("[EmbeddingWorker] Ready — waiting for crops.\n")
 
     # ── Main Loop ─────────────────────────────────────────────────────────
@@ -66,7 +80,7 @@ def run_embedding_worker(embedding_queue, stop_event):
             continue
 
         # ── 1. Person Search (ReID) Embedding ─────────────────────────────
-        reid_embedding = person_search.extract_embedding(crop)
+        reid_embedding = person_search.extract_embedding(crop) if person_search_ready else None
         if reid_embedding is not None:
             point_id = hashlib.md5(f"reid_{camera_id}_{track_id}".encode()).hexdigest()
             metadata = {
@@ -86,7 +100,7 @@ def run_embedding_worker(embedding_queue, stop_event):
                 log.warning(f"[EmbeddingWorker] ReID upsert failed: {e}")
 
         # ── 2. Semantic Search (CLIP) Embedding ───────────────────────────
-        clip_embedding = semantic_search.extract_embedding(crop)
+        clip_embedding = semantic_search.extract_embedding(crop) if semantic_search_ready else None
         if clip_embedding is not None:
             point_id = hashlib.md5(f"semantic_{camera_id}_{track_id}".encode()).hexdigest()
             metadata = {

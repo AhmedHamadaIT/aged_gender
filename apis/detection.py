@@ -19,6 +19,15 @@ Routes registered in app.py:
 """
 
 import multiprocessing
+
+# Parent process loads CUDA-backed models (e.g. ReID/OSNet) before workers start.
+# Linux default start method is "fork"; forked children cannot re-init CUDA.
+# "spawn" starts a fresh interpreter per worker (see PyTorch / Ultralytics docs).
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except RuntimeError:
+    pass
+
 from collections import defaultdict
 from typing import Dict, Optional
 
@@ -205,4 +214,11 @@ def _run_embedding_worker(embedding_queue, stop_event):
 
 
 # ── Singleton ─────────────────────────────────
-detection = DetectionResource()
+# Spawned FrameBus / task_worker processes re-import this module. Creating
+# ``Manager()`` at import time in a child triggers:
+#   RuntimeError: ... start a new process before ... bootstrapping phase
+# Only the uvicorn process (MainProcess) owns the shared manager and queues.
+if multiprocessing.current_process().name == "MainProcess":
+    detection = DetectionResource()
+else:
+    detection = None  # workers only need picklable targets above, not this API handle
