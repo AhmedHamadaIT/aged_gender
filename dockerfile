@@ -14,10 +14,15 @@ FROM dustynv/l4t-pytorch:r36.4.0
 # Runtime libs only (wheels via pip). Avoid *-dev FFmpeg/GStreamer stacks here;
 # they often pull conflicting deps on L4T images and make apt exit 100.
 ENV DEBIAN_FRONTEND=noninteractive
-# L4T/Jetson images use ports.ubuntu.com; mirror/GPG issues can make strict apt fail during build.
-RUN apt-get update -o Acquire::AllowInsecureRepositories=true \
-    -o Acquire::AllowDowngradeToInsecureRepositories=true \
-    || true && \
+# L4T uses ports.ubuntu.com. "invalid signature" / "not signed" during build is often:
+# - corrupt apt lists or low disk on the Docker host (prune images, free space),
+# - Docker engine too old for Ubuntu 22.04 gpgv inside the container (upgrade to 20.10+).
+# We clear lists, retry, then fall back to insecure index fetch only if needed.
+RUN set -eux; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+    apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=120 \
+    || apt-get update -o Acquire::Retries=5 --allow-insecure-repositories; \
     apt-get install -y --no-install-recommends --allow-unauthenticated \
         libglib2.0-0 \
         libsm6 \
@@ -25,8 +30,8 @@ RUN apt-get update -o Acquire::AllowInsecureRepositories=true \
         libxrender1 \
         libgomp1 \
         libgl1 \
-        ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+        ffmpeg; \
+    rm -rf /var/lib/apt/lists/*
 
 # ── Working directory ────────────────────────
 WORKDIR /app
