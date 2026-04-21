@@ -107,6 +107,18 @@ def root():
     return {"service": "Vision Pipeline API", "version": "2.0.0"}
 
 
+@app.get("/health")
+def health():
+    """Liveness probe — process is up; does not check Redis, Qdrant, or model files."""
+    return {"status": "ok", "service": "Vision Pipeline API", "version": "2.0.0"}
+
+
+@app.get("/status", response_model=DetectionStatus)
+def api_status():
+    """Same payload as ``GET /detection/status`` (cameras / pipeline state)."""
+    return detection.on_get()
+
+
 # ─────────────────────────────────────────────
 # Camera routes
 # ─────────────────────────────────────────────
