@@ -829,8 +829,9 @@ class CashierService:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"[CASHIER] Model not found: {model_path}")
 
-        import onnxruntime as ort
-        self._sess     = ort.InferenceSession(model_path)
+        from utils.onnx_runtime import create_inference_session
+
+        self._sess = create_inference_session(model_path)
         self._inp_name = self._sess.get_inputs()[0].name
         inp            = self._sess.get_inputs()[0].shape
         self._img_size = (int(inp[3]), int(inp[2]))

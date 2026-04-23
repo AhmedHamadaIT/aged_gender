@@ -18,40 +18,54 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from logger.logger_config import Logger
-import os
-from dotenv import load_dotenv
-load_dotenv()
+from utils.rtsp_ffmpeg import apply_rtsp_ffmpeg_env, open_rtsp_videocapture
+
 log = Logger.get_logger(__name__)
 
 USE_STREAM  = os.getenv("USE_STREAM",   "True").lower() in ("true", "1", "yes")
 RTSP_URL    = os.getenv("CAMERA_1_URL", "")
 INPUT_VIDEO = os.getenv("INPUT_VIDEO",  "./videos/sample.mp4")
 
+# Reconnect + decode health
+RTSP_MAX_CONSECUTIVE_FAILS = max(1, int(os.getenv("RTSP_MAX_CONSECUTIVE_READ_FAILS", "10")))
+STREAM_RECONNECT_BASE_SEC  = max(0.1, float(os.getenv("STREAM_RECONNECT_BASE_SEC", "2")))
+STREAM_RECONNECT_MAX_SEC   = max(STREAM_RECONNECT_BASE_SEC, float(os.getenv("STREAM_RECONNECT_MAX_SEC", "30")))
+
 
 class _RTSPReader:
     def __init__(self, url: str):
         self.url = url
         self.cap = None
+        self._connect_count = 0
 
-    def connect(self):
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-        log.info(f"[STREAM] Connecting: {self.url}")
-        self.cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    def connect(self) -> None:
+        self._connect_count += 1
+        opts = apply_rtsp_ffmpeg_env()
+        log.info(
+            "[STREAM] Connecting (attempt %d): %s | ffmpeg_opts=%r",
+            self._connect_count,
+            self.url,
+            opts,
+        )
+        self.release()
+        self.cap = open_rtsp_videocapture(self.url)
         if not self.cap.isOpened():
             raise RuntimeError(f"[STREAM] Cannot open: {self.url}")
         w   = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h   = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = self.cap.get(cv2.CAP_PROP_FPS)
-        log.info(f"[STREAM] Connected — {w}x{h} @ {fps:.1f}fps")
+        fps = self.cap.get(cv2.CAP_PROP_FPS) or 0.0
+        log.info("[STREAM] Connected — %dx%d @ %.1ffps", w, h, fps)
 
     def read_frame(self):
+        if self.cap is None:
+            return None
         ret, frame = self.cap.read()
         return frame if ret else None
 
-    def release(self):
-        if self.cap:
+    def release(self) -> None:
+        if self.cap is not None:
             self.cap.release()
+            self.cap = None
 
 
 class _VideoReader:
@@ -59,19 +73,29 @@ class _VideoReader:
         self.path = path
         self.cap  = None
 
-    def connect(self):
+    def connect(self) -> None:
         log.info(f"[VIDEO] Opening: {self.path}")
         self.cap = cv2.VideoCapture(self.path)
         if not self.cap.isOpened():
             raise RuntimeError(f"[VIDEO] Cannot open: {self.path}")
 
     def read_frame(self):
+        if self.cap is None:
+            return None
         ret, frame = self.cap.read()
         return frame if ret else None
 
-    def release(self):
-        if self.cap:
+    def release(self) -> None:
+        if self.cap is not None:
             self.cap.release()
+            self.cap = None
+
+
+def _reconnect_delay_seconds(attempt_index: int) -> float:
+    # attempt_index: 0 after first failure batch, then increases
+    exp = min(attempt_index, 8)
+    delay = STREAM_RECONNECT_BASE_SEC * (2**exp)
+    return min(STREAM_RECONNECT_MAX_SEC, delay)
 
 
 def frames(source: str = None):
@@ -88,7 +112,7 @@ def frames(source: str = None):
     reader  = _RTSPReader(source) if is_rtsp else _VideoReader(source)
 
     consecutive_fails = 0
-    max_fails         = 10
+    reconnect_streak  = 0
 
     reader.connect()
     try:
@@ -96,17 +120,30 @@ def frames(source: str = None):
             frame = reader.read_frame()
             if frame is None:
                 consecutive_fails += 1
-                if consecutive_fails >= max_fails:
+                if consecutive_fails >= RTSP_MAX_CONSECUTIVE_FAILS:
                     if is_rtsp:
-                        log.info(f"[STREAM] Reconnecting...")
+                        wait = _reconnect_delay_seconds(reconnect_streak)
+                        log.info(
+                            "[STREAM] %d consecutive read failures — reconnecting in %.1fs (streak=%d)",
+                            consecutive_fails,
+                            wait,
+                            reconnect_streak,
+                        )
                         reader.release()
-                        time.sleep(2)
-                        reader.connect()
+                        time.sleep(wait)
+                        try:
+                            reader.connect()
+                        except Exception as exc:  # noqa: BLE001
+                            log.warning(
+                                "[STREAM] Reconnect failed: %s — will retry with backoff", exc
+                            )
+                        reconnect_streak += 1
                         consecutive_fails = 0
                     else:
                         break  # end of video file
                 continue
             consecutive_fails = 0
+            reconnect_streak  = 0
             yield frame
     finally:
         reader.release()

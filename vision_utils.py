@@ -1,6 +1,6 @@
 """
-utils.py
---------
+vision_utils.py
+----------------
 Drawing, resizing, and frame saving utilities.
 ML Image Contract V2 helpers (get_base_url, build_image, make_evidence_paths).
 """

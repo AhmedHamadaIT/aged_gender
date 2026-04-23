@@ -49,8 +49,9 @@ class MoodService:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"[MOOD] Model not found: {model_path}")
 
-        import onnxruntime as ort
-        self.sess     = ort.InferenceSession(model_path)
+        from utils.onnx_runtime import create_inference_session
+
+        self.sess = create_inference_session(model_path)
         self.inp_name = self.sess.get_inputs()[0].name
         inp_shape     = self.sess.get_inputs()[0].shape   # e.g. [1,3,128,128]
         self.img_size = (int(inp_shape[3]), int(inp_shape[2]))   # (W, H)

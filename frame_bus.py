@@ -78,6 +78,12 @@ class FrameBus:
         self._classes = classes
         self._names   = self._model.names
 
+        from utils.ml_backend import require_gpu_device_if_configured, resolve_ultralytics_device
+
+        require_gpu_device_if_configured(
+            resolve_ultralytics_device(), "FrameBus"
+        )
+
         # ── Best-crop-per-track state ─────────────────────────────────────
         # { track_id: {"best_area": int, "last_frame": int} }
         self._track_state: Dict[int, Dict] = {}

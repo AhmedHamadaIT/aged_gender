@@ -105,6 +105,12 @@ class DetectorService:
         self.model = YOLO(model_path, task="detect")
         self.names = self.model.names
 
+        from utils.ml_backend import require_gpu_device_if_configured, resolve_ultralytics_device
+
+        require_gpu_device_if_configured(
+            resolve_ultralytics_device(), "DetectorService"
+        )
+
         log.info(f"[DETECTOR] Ready — {len(self.names)} classes\n")
 
     def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
