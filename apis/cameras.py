@@ -12,9 +12,18 @@ Endpoints (registered in app.py):
     DELETE /cameras/{cam_id} → remove a camera
 """
 
-from typing import Dict, Optional
+import os
+import re
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple
+
+import cv2
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
+
+from utils.rtsp_ffmpeg import open_rtsp_videocapture
 
 
 # ─────────────────────────────────────────────
@@ -35,6 +44,18 @@ class CameraSetupRequest(BaseModel):
 class CameraRegistry:
     def __init__(self):
         self._cameras: Dict[str, str] = {}  # {cam_id: rtsp_url}
+        self._snapshot_lock = threading.Lock()
+        # Last good snapshot path + monotonic time when it was taken
+        self._snapshot_cache: Dict[str, Tuple[Optional[str], float]] = {}
+        self._snapshot_frame_index = max(1, int(os.getenv("CAMERA_SNAPSHOT_FRAME_INDEX", "5")))
+        self._snapshot_jpeg_quality = min(
+            100,
+            max(1, int(os.getenv("CAMERA_SNAPSHOT_JPEG_QUALITY", "75"))),
+        )
+        self._snapshot_max_reads = max(self._snapshot_frame_index + 2, int(os.getenv("CAMERA_SNAPSHOT_MAX_READS", "15")))
+        self._snapshot_cache_ttl = max(0.0, float(os.getenv("CAMERA_SNAPSHOT_CACHE_TTL_SEC", "5")))
+        self._snapshot_dir = os.path.abspath(os.getenv("CAMERA_SNAPSHOT_DIR", "./outputs/camera_snapshots"))
+        os.makedirs(self._snapshot_dir, exist_ok=True)
 
     def add(self, cam_id: str, url: str):
         self._cameras[cam_id] = url
@@ -43,6 +64,8 @@ class CameraRegistry:
         if cam_id not in self._cameras:
             raise HTTPException(status_code=404, detail=f"Camera '{cam_id}' not found.")
         del self._cameras[cam_id]
+        with self._snapshot_lock:
+            self._snapshot_cache.pop(cam_id, None)
 
     def get(self, cam_id: str) -> Optional[str]:
         return self._cameras.get(cam_id)
@@ -62,10 +85,93 @@ class CameraRegistry:
         }
 
     def on_get(self):
+        cameras = []
+        for cam_id, url in self._cameras.items():
+            cameras.append(
+                {
+                    "id": cam_id,
+                    "url": url,
+                    "snapshot": self._capture_snapshot(cam_id, url),
+                }
+            )
         return {
             "count"  : len(self._cameras),
-            "cameras": [{"id": k, "url": v} for k, v in self._cameras.items()],
+            "cameras": cameras,
         }
+
+    def _capture_snapshot(self, cam_id: str, url: str) -> Optional[str]:
+        """
+        Return a JPEG path for this camera, using a short-lived cache to avoid
+        opening a fresh RTSP session on every poll. On transient failure, returns
+        the last successful snapshot path if any.
+        """
+        now = time.monotonic()
+        with self._snapshot_lock:
+            if cam_id in self._snapshot_cache and self._snapshot_cache_ttl > 0:
+                path, ts = self._snapshot_cache[cam_id]
+                if now - ts < self._snapshot_cache_ttl and path and os.path.isfile(path):
+                    return path
+
+        new_path: Optional[str] = None
+        try:
+            new_path = self._read_jpeg_from_source(cam_id, url)
+        except Exception:  # noqa: BLE001
+            new_path = None
+
+        with self._snapshot_lock:
+            if new_path:
+                self._snapshot_cache[cam_id] = (new_path, time.monotonic())
+                return new_path
+            stale = self._snapshot_cache.get(cam_id, (None, 0.0))[0]
+            if stale and os.path.isfile(stale):
+                return stale
+        return new_path
+
+    def _read_jpeg_from_source(self, cam_id: str, url: str) -> Optional[str]:
+        """
+        Read one stable frame, save as JPEG, return path or None.
+        """
+        cap = None
+        try:
+            if url.startswith("rtsp://"):
+                cap = open_rtsp_videocapture(url)
+            else:
+                cap = cv2.VideoCapture(url)
+
+            if not cap.isOpened():
+                return None
+
+            valid_frame = None
+            good_frames = 0
+            for _ in range(self._snapshot_max_reads):
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                good_frames += 1
+                if good_frames >= self._snapshot_frame_index:
+                    valid_frame = frame
+                    break
+
+            if valid_frame is None:
+                return None
+
+            safe_cam_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", cam_id).strip("_") or "camera"
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            file_name = f"{safe_cam_id}_{ts}.jpg"
+            file_path = os.path.join(self._snapshot_dir, file_name)
+
+            ok = cv2.imwrite(
+                file_path,
+                valid_frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self._snapshot_jpeg_quality],
+            )
+            if not ok:
+                return None
+
+            return file_path
+        finally:
+            if cap is not None:
+                cap.release()
 
     def on_delete(self, cam_id: str):
         self.remove(cam_id)

@@ -66,9 +66,10 @@ class AgeGenderService:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"[AGE_GENDER] Model not found: {model_path}")
 
-        import onnxruntime as ort
-        self.sess      = ort.InferenceSession(model_path)
-        self.inp_name  = self.sess.get_inputs()[0].name   # "input"
+        from utils.onnx_runtime import create_inference_session
+
+        self.sess = create_inference_session(model_path)
+        self.inp_name = self.sess.get_inputs()[0].name   # "input"
 
         print(f"[AGE_GENDER] Ready — gender: {GENDER_LABELS}, age: {AGE_LABELS}\n")
 

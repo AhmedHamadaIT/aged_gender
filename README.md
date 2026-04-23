@@ -1941,6 +1941,24 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `CASHIER_EVIDENCE_DIR` | `./evidence/cashier` | Evidence storage |
 | `CASHIER_LOG_MAX` | `5000` | Max in-memory cashier events |
 
+### RTSP stability (H.264 / H.265) and snapshots
+| Variable | Default | Role |
+|----------|---------|------|
+| `RTSP_FFMPEG_EXTRA_OPTIONS` | *(see `utils/rtsp_ffmpeg.py`)* | Extra OpenCV-FFmpeg options (pipe-separated `key;value` segments); `rtsp_transport;tcp` is always applied |
+| `RTSP_MAX_CONSECUTIVE_READ_FAILS` | `10` | Fails before stream reconnect in `stream.py` |
+| `STREAM_RECONNECT_BASE_SEC` / `STREAM_RECONNECT_MAX_SEC` | `2` / `30` | Exponential reconnect backoff (capped) |
+| `RTSP_OPENCV_BUFFER_SIZE` / `RTSP_OPEN_TIMEOUT_MSEC` / `RTSP_READ_TIMEOUT_MSEC` | `1` / `15000` / `0` | OpenCV capture tuning |
+| `CAMERA_SNAPSHOT_CACHE_TTL_SEC` | `5` | `GET /cameras` reuses a recent JPEG per camera instead of opening RTSP on every request |
+
+### ONNX Runtime and GPU policy
+| Variable | Default | Role |
+|----------|---------|------|
+| `ONNX_ALLOW_TENSORRT` | `1` | Allow TensorRT execution provider when installed |
+| `ONNX_TENSORRT_CACHE_PATH` | `./trt_cache` | TensorRT engine cache directory |
+| `ML_REQUIRE_INFERENCE_GPU` | *(unset)* | If `1`/`true`, YOLO/Ultralytics paths require `torch.cuda` when `DEVICE` is a CUDA index or `cuda` |
+| `ML_REQUIRE_ONNX_GPU` | *(unset)* | If `1`/`true`, `onnxruntime` sessions must use CUDA/TensorRT (fails on CPU-only) |
+| `REID_MODEL_ONNX` | *(unset)* | Optional OSNet-compatible ONNX for Re-ID (`PersonSearchService`); otherwise `REID_MODEL_PATH` (TorchScript) is used |
+
 ### Detection Thresholds
 - **YOLO Confidence**: 0.35 (configurable via `CONF_THRESHOLD`)
 - **Face Detection Minimum Size**: 10×10 pixels

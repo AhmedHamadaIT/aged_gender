@@ -1,6 +1,6 @@
 """
-utils.py
---------
+vision_utils.py
+----------------
 Drawing, resizing, and frame saving utilities.
 """
 
