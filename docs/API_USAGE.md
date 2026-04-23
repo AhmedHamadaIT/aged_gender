@@ -2,7 +2,7 @@
 
 Base URL for all examples: `http://localhost:9000`
 
-**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — pytest, log/JSONL paths (`EVENTS_DIR`), cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence. Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md).
+**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — pytest, log/JSONL paths (`EVENTS_DIR`), cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence. **ML Image Contract V2** (structured `evidence`, env, disk, SSH): [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md). Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md).
 
 ---
 
@@ -378,7 +378,7 @@ All parameters are optional and combine with **AND** logic:
 |---|---|---|
 | `taskId` | int | Only events from this task ID |
 | `taskName` | string | Only events whose `taskName` matches (note: not guaranteed unique across tasks) |
-| `eventType` | string | Only events of this type (`CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_BOX_OPEN`) |
+| `eventType` | string | Only events of this type (`CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `PHONE_USAGE`, `CASHIER_BOX_OPEN`) |
 | `channelId` | int | Only events from this camera channel |
 
 ```bash
@@ -398,23 +398,42 @@ curl -N "http://localhost:9000/detection/stream?taskId=10&channelId=1"
 curl -N "http://localhost:9000/detection/stream?eventType=CASHIER_BOX_OPEN"
 ```
 
-### CrossLine event example
-```
-data: {"eventId":"a3f92c1d8e4b56f7","eventType":"CROSS_LINE","timestamp":1774310401528,"timestampUTC":"2026-04-05T10:00:01.528Z","taskId":10,"taskName":"entrance_line","channelId":1,"line":{"id":"1","name":"Entrance","direction":1},"person":{"trackingId":"42","reidFeature":[],"boundingBox":{"x":120,"y":200,"width":65,"height":180},"attributes":{"gender":"Unknown","age":"Unknown"},"confidence":87},"evidence":{"captureImage":"/local/storage/captures/2026/04/05/a3f92c1d_crop.jpg","sceneImage":"/local/storage/scenes/2026/04/05/a3f92c1d_scene.jpg"}}
+### Task events — `evidence` (ML Image Contract V2)
 
+For **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, and **`PHONE_USAGE`**, `evidence.captureImage` and `evidence.sceneImage` are **structured objects** (`url`, `path`, `type`, `format`, `timestamp`), not bare filesystem strings. On-disk files live under `CAPTURE_DIR` / `SCENE_DIR` with paths like `YYYY-MM-DD/{camera_id}_{event_id}_{uuid8}.jpg` inside each root. Set **`PUBLIC_ML_BASE_URL`** for full `https://…/evidence/…` URLs. See [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
+
+**Debug on the server (SSH):**
+
+```bash
+tail -f /local/storage/events/task_10.jsonl | jq -c .evidence
+# or
+tail -f /local/storage/events/task_20.jsonl | jq -c .evidence
 ```
 
-### CrossLine event with age/gender (enableAttrDetect: true)
-```
-data: {"eventId":"b7d21a4c9f3e80ab","eventType":"CROSS_LINE","timestamp":1774310465000,"timestampUTC":"2026-04-05T10:01:05.000Z","taskId":11,"taskName":"exit_line_with_attrs","channelId":1,"line":{"id":"2","name":"Exit","direction":2},"person":{"trackingId":"38","reidFeature":[],"boundingBox":{"x":300,"y":180,"width":58,"height":172},"attributes":{"gender":"Male","age":"Adult"},"confidence":91},"evidence":{"captureImage":"/local/storage/captures/2026/04/05/b7d21a4c_crop.jpg","sceneImage":"/local/storage/scenes/2026/04/05/b7d21a4c_scene.jpg"}}
+SSE sends **one minified** `data:` line per event. Illustrative **pretty** `evidence` only:
 
+```json
+"evidence": {
+  "captureImage": {
+    "url": "https://ml.example.com/evidence/2026-04-22/cam-1_abc_01a2b3c4.jpg",
+    "path": "2026-04-22/cam-1_abc_01a2b3c4.jpg",
+    "type": "capture",
+    "format": "image/jpeg",
+    "timestamp": "2026-04-22T10:00:01.528Z"
+  },
+  "sceneImage": {
+    "url": "https://ml.example.com/evidence/2026-04-22/cam-1_abc_9f8e7d6c.jpg",
+    "path": "2026-04-22/cam-1_abc_9f8e7d6c.jpg",
+    "type": "scene",
+    "format": "image/jpeg",
+    "timestamp": "2026-04-22T10:00:01.528Z"
+  }
+}
 ```
 
-### PPE violation event
-```
-data: {"eventId":"c9e04f2b1a7d35cc","eventType":"MASK_HAIRNET_CHEF_HAT","timestamp":1774310512000,"timestampUTC":"2026-04-05T10:01:52.000Z","taskId":20,"taskName":"kitchen_ppe_check","channelId":2,"alert":{"type":"no_mask","description":"Face mask not detected","confidence":72},"person":{"trackingId":"15","boundingBox":{"x":88,"y":95,"width":70,"height":195},"areaPoints":[{"x":50,"y":50},{"x":600,"y":50},{"x":600,"y":500},{"x":50,"y":500}]},"evidence":{"captureImage":"/local/storage/captures/2026/04/05/c9e04f2b_crop.jpg","sceneImage":"/local/storage/scenes/2026/04/05/c9e04f2b_scene.jpg"}}
+### CrossLine / PPE / phone — same envelope
 
-```
+The outer fields (`eventType`, `taskId`, `line` or `alert` + `person`, etc.) are unchanged; only `evidence` values moved from string paths to V2 objects. Filter **`eventType=PHONE_USAGE`** the same way as other tasks once a phone task is registered.
 
 ### Cashier structured event (`CASHIER_BOX_OPEN`)
 
@@ -454,10 +473,28 @@ SSE sends **one** `data:` line per event (minified outer JSON). Equivalent struc
     "current_open_duration_ms": 3000,
     "personStructural": "{\n  \"case_matched\": \"N3\",\n  \"case_level\": \"INFO\",\n  \"alert_triggered\": false,\n  \"critical_triggered\": false\n}",
     "captureUrl": "https://storage.example.com/logs-data-images/CASHIER_BOX_OPEN_550e8400-e29b-41d4-a716-446655440000.jpg",
-    "sceneUrl": "https://storage.example.com/logs-data-images/CASHIER_BOX_OPEN_6ba7b810-9dad-11d1-80b4-00c04fd430c8.jpg"
+    "sceneUrl": "https://storage.example.com/logs-data-images/CASHIER_BOX_OPEN_6ba7b810-9dad-11d1-80b4-00c04fd430c8.jpg",
+    "evidence": {
+      "captureImage": {
+        "url": "https://ml.example.com/evidence/2026-04-22/CASHIER_BOX_OPEN_550e8400-e29b-41d4-a716-446655440000.jpg",
+        "path": "2026-04-22/CASHIER_BOX_OPEN_550e8400-e29b-41d4-a716-446655440000.jpg",
+        "type": "capture",
+        "format": "image/jpeg",
+        "timestamp": "2026-04-05T10:03:09.000Z"
+      },
+      "sceneImage": {
+        "url": "https://ml.example.com/evidence/2026-04-22/CASHIER_BOX_OPEN_6ba7b810-9dad-11d1-80b4-00c04fd430c8.jpg",
+        "path": "2026-04-22/CASHIER_BOX_OPEN_6ba7b810-9dad-11d1-80b4-00c04fd430c8.jpg",
+        "type": "scene",
+        "format": "image/jpeg",
+        "timestamp": "2026-04-05T10:03:09.000Z"
+      }
+    }
   }
 }
 ```
+
+When a frame is saved, **top-level** `evidence` may also be present (same V2 `captureImage`; `sceneImage` may be `{ "url": null, "type": "scene", "status": "not_available" }` if there is no separate scene file). See [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
 
 Persisted to disk as one JSON line per frame: **`$EVENTS_DIR/task_<taskId>.jsonl`** (default `EVENTS_DIR=/local/storage/events`).
 
@@ -468,14 +505,16 @@ Persisted to disk as one JSON line per frame: **`$EVENTS_DIR/task_<taskId>.jsonl
 | Field | Type | Description |
 |---|---|---|
 | `eventId` | string | MD5 hash — unique per event |
-| `eventType` | string | `"CROSS_LINE"`, `"MASK_HAIRNET_CHEF_HAT"`, or `"CASHIER_BOX_OPEN"` |
+| `eventType` | string | `"CROSS_LINE"`, `"MASK_HAIRNET_CHEF_HAT"`, `"PHONE_USAGE"`, or `"CASHIER_BOX_OPEN"` |
 | `timestamp` | int | Unix timestamp in milliseconds |
 | `timestampUTC` | string | ISO 8601 UTC string |
 | `taskId` | int | ID of the task that fired the event |
 | `taskName` | string | Human-readable name from task config |
 | `channelId` | int | Camera that produced the frame |
 
-**`CASHIER_BOX_OPEN` also sets (top-level):** `camera_id` (string), `case_id`, `severity` (`NORMAL` \| `ALERT` \| `CRITICAL`), optional `transaction`, optional `evidence` when a JPEG was saved this frame.
+**`CASHIER_BOX_OPEN` also sets (top-level):** `camera_id` (string), `case_id`, `severity` (`NORMAL` \| `ALERT` \| `CRITICAL`), optional `transaction`, optional **`evidence`** (V2 **`captureImage`** / **`sceneImage`**) when a JPEG was saved this frame.
+
+**Evidence (V2) on all crossing / PPE / phone events:** `evidence.captureImage` and `evidence.sceneImage` are always the structured image objects for those task types. See [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
 
 **CrossLine specific:**
 
@@ -659,7 +698,7 @@ curl -X POST http://localhost:9000/detection/start
 ### 400 — Unsupported algorithmType
 ```json
 {
-  "detail": "Unsupported algorithmType 'UNKNOWN_TASK'. Supported: ['CROSS_LINE', 'MASK_HAIRNET_CHEF_HAT', 'CASHIER_BOX_OPEN']"
+  "detail": "Unsupported algorithmType 'UNKNOWN_TASK'. Supported: ['CASHIER_BOX_OPEN', 'CROSS_LINE', 'MASK_HAIRNET_CHEF_HAT', 'PHONE_USAGE']"
 }
 ```
 
@@ -934,7 +973,7 @@ Polygon needs at least 3 points. Persons whose centroid falls outside all zones 
 
 **Stream annotation** here means **visually annotated JPEG frames**: FrameBus runs YOLO + BoT-SORT on each RTSP frame, draws bounding boxes and track IDs, encodes JPEG, and publishes to Redis. Clients consume that stream only via **`WS /cameras/{camera_id}/live`** (binary JPEG messages). Task workers may draw extra overlays (lines, cashier zones) on their own copies for evidence; the live WebSocket feed is the FrameBus-annotated frame.
 
-**Related (not the painted live video):** JSON **detection events** (crossings, PPE alerts, cashier payloads) are available on **`GET /detection/stream`** (SSE, all cameras, optional filters) and **`WS /cameras/{camera_id}/events`** (one camera, same JSON shape as SSE). Those carry metadata and evidence paths — not a full-motion annotated video stream.
+**Related (not the painted live video):** JSON **detection events** (crossings, PPE alerts, phone usage, cashier payloads) are available on **`GET /detection/stream`** (SSE, all cameras, optional filters) and **`WS /cameras/{camera_id}/events`** (one camera, same JSON shape as SSE). Those carry metadata and V2 **evidence** objects (`captureImage` / `sceneImage`) — not a full-motion annotated video stream. Evidence contract: [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
 
 **Transport design (annotated frame WebSocket):**
 - Messages are **binary** (raw JPEG bytes) — no Base64 encoding, no JSON wrapper

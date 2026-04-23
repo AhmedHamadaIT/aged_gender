@@ -33,6 +33,8 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
+from utils import build_image, make_evidence_paths
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _WEEKDAY_MAP = {
@@ -132,7 +134,14 @@ class PhoneUsageTask:
                 best_item = max(phone_results[0].items, key=lambda x: x["confidence"])
                 conf_pct  = int(best_item["confidence"] * 100)
                 zone      = self.zones[0] if self.zones else None
-                event     = self._build_event(det, conf_pct, best_item, zone, payload["timestamp"])
+                event     = self._build_event(
+                    det,
+                    conf_pct,
+                    best_item,
+                    zone,
+                    payload["timestamp"],
+                    str(payload.get("camera_id") or ""),
+                )
                 self._persist(event, frame, det)
                 events.append(event)
 
@@ -149,15 +158,22 @@ class PhoneUsageTask:
 
     # ── Event construction ────────────────────────────────────────────────────
 
-    def _build_event(self, det, conf_pct: int, phone_item: dict, zone: Optional[dict], timestamp: str) -> dict:
+    def _build_event(
+        self,
+        det,
+        conf_pct: int,
+        phone_item: dict,
+        zone: Optional[dict],
+        timestamp: str,
+        camera_id: str,
+    ) -> dict:
         now_ms   = int(time.time() * 1000)
         event_id = hashlib.md5(
             f"{self.task_id}_{det.track_id}_{now_ms}".encode()
         ).hexdigest()
 
-        date_str     = datetime.now().strftime("%Y/%m/%d")
-        capture_path = os.path.join(self._capture_dir, date_str, f"{event_id}_crop.jpg")
-        scene_path   = os.path.join(self._scene_dir,   date_str, f"{event_id}_scene.jpg")
+        cam_key = str(camera_id or self.channel_id or "unknown")
+        cap_rel, scene_rel = make_evidence_paths(cam_key, event_id)
 
         x1, y1, x2, y2 = det.bbox
         area_points     = zone.get("point", []) if zone else []
@@ -192,8 +208,8 @@ class PhoneUsageTask:
                 "confidence": conf_pct,
             },
             "evidence": {
-                "captureImage": capture_path,
-                "sceneImage"  : scene_path,
+                "captureImage": build_image(cap_rel, "capture"),
+                "sceneImage"  : build_image(scene_rel, "scene"),
             },
         }
 
@@ -207,8 +223,10 @@ class PhoneUsageTask:
             max(0, y1 - PAD): min(h, y2 + PAD),
             max(0, x1 - PAD): min(w, x2 + PAD),
         ]
-        capture_path = event["evidence"]["captureImage"]
-        scene_path   = event["evidence"]["sceneImage"]
+        rel_cap = event["evidence"]["captureImage"]["path"]
+        rel_sce = event["evidence"]["sceneImage"]["path"]
+        capture_path = os.path.join(self._capture_dir, *rel_cap.split("/"))
+        scene_path   = os.path.join(self._scene_dir,   *rel_sce.split("/"))
         os.makedirs(os.path.dirname(capture_path), exist_ok=True)
         os.makedirs(os.path.dirname(scene_path),   exist_ok=True)
         if crop.size > 0:

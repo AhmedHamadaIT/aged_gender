@@ -26,7 +26,7 @@ SSE stream events (one per crossing, per task):
     "channelId"   : 4,
     "line"        : {"id": "1", "name": "Entrance", "direction": 1},
     "person"      : {"trackingId", "reidFeature", "boundingBox", "attributes", "confidence"},
-    "evidence"    : {"captureImage": "...", "sceneImage": "..."}
+    "evidence"    : {"captureImage": {url, path, type, ...}, "sceneImage": {…}}
 }
 
 Run with:
