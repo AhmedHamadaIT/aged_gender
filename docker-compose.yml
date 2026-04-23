@@ -55,6 +55,26 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Default for in-compose Redis (avoids localhost:6379 inside the container)
       - REDIS_URL=redis://redis:6379/0
+      # Camera is now stable H.264 — run performance profile.
+      - RTSP_PROFILE=performance
+      - FORCE_TRANSCODE=false
+      - RTSP_DISCARD_CORRUPT=false
+      - RTSP_LOW_DELAY=true
+      - RTSP_FFMPEG_OPTIONS=
+      # Hardware decode (fallback to CPU automatically if unavailable)
+      - RTSP_ENABLE_GPU_DECODE=true
+      - RTSP_HWACCEL=cuda
+      - RTSP_HWDECODER=h264_nvv4l2dec
+      - QUALITY_LADDER=1920x1080x10,1280x720x10,854x480x8
+      - STREAM_DOWNGRADE_AFTER=20
+      - STREAM_DOWNGRADE_COOLDOWN=30
+      - FRAME_MIN_VARIANCE=8.0
+      - STREAM_MAX_FAILS=15
+      - STREAM_RECONNECT_DELAY=2.0
+      - EMBED_CONF_THRESHOLD=0.45
+      - EMBED_BATCH_SIZE=8
+      - EMBED_FLUSH_TIMEOUT=3.0
+      - REDIS_LIVE_FPS=10
 
     volumes:
       - .:/app                  # mount entire project directory

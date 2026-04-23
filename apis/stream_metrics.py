@@ -1,0 +1,120 @@
+"""
+Stream health and quality endpoints.
+
+GET  /stream/metrics          — per-camera stats from detection shared_state
+GET  /stream/quality-events   — SSE: Redis stream:quality_events
+GET  /stream/live/{camera_id} — SSE: Redis live:frame:{camera_id} as base64 JSON
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64 as _b64
+import json
+import os
+import time
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
+
+router = APIRouter(prefix="/stream", tags=["stream"])
+
+
+def _redis_url() -> str:
+    return os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+
+@router.get("/metrics")
+async def stream_metrics(request: Request):
+    """Per-camera pipeline stats (fps, stream_quality, frames_dropped, embed_skip_rate, …)."""
+    detection = getattr(request.app.state, "detection", None)
+    if detection is None:
+        return []
+    shared = detection._shared_state
+    return [dict(v) for v in shared.values()]
+
+
+@router.get("/quality-events")
+async def quality_events_sse(request: Request):
+    """SSE — quality ladder change events (JSON on stream:quality_events)."""
+
+    async def _generator():
+        try:
+            import redis.asyncio as aioredis
+
+            client = aioredis.from_url(
+                _redis_url(), socket_connect_timeout=2, decode_responses=True
+            )
+            try:
+                async with client.pubsub() as ps:
+                    await ps.subscribe("stream:quality_events")
+                    async for msg in ps.listen():
+                        if await request.is_disconnected():
+                            break
+                        if msg["type"] != "message":
+                            continue
+                        data = msg["data"]
+                        if isinstance(data, bytes):
+                            data = data.decode("utf-8", errors="replace")
+                        yield f"data: {data}\n\n"
+            finally:
+                await client.aclose()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/live/{camera_id}")
+async def live_stream_sse(camera_id: str, request: Request):
+    """SSE — annotated JPEG frames as base64 in JSON (from Redis live:frame:{id})."""
+
+    async def _generator():
+        try:
+            import redis.asyncio as aioredis
+
+            client = aioredis.from_url(
+                _redis_url(), socket_connect_timeout=2, decode_responses=False
+            )
+            try:
+                async with client.pubsub() as ps:
+                    await ps.subscribe(f"live:frame:{camera_id}")
+                    async for msg in ps.listen():
+                        if await request.is_disconnected():
+                            break
+                        if msg["type"] != "message":
+                            continue
+                        raw_jpeg: Any = msg["data"]
+                        if not isinstance(raw_jpeg, (bytes, bytearray)):
+                            continue
+                        payload = json.dumps(
+                            {
+                                "camera_id": camera_id,
+                                "frame_b64": _b64.b64encode(raw_jpeg).decode("ascii"),
+                                "ts": time.time(),
+                            }
+                        )
+                        yield f"data: {payload}\n\n"
+            finally:
+                await client.aclose()
+        except asyncio.CancelledError:
+            raise
+
+    return StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

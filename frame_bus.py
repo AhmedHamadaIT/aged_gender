@@ -41,6 +41,10 @@ try:
 except ImportError:
     _REDIS_AVAILABLE = False
 
+# Minimum confidence / variance to emit crop to embedding worker
+_EMBED_CONF_THRESHOLD = float(os.getenv("EMBED_CONF_THRESHOLD", "0.45"))
+_EMBED_MIN_VARIANCE = float(os.getenv("FRAME_MIN_VARIANCE", "8.0"))
+
 
 class FrameBus:
     def __init__(
@@ -106,8 +110,13 @@ class FrameBus:
         self._publish_every = max(1, round(25.0 / _target_fps))  # assume 25 FPS until measured
         self._target_fps    = _target_fps
 
+        self._frames_dropped = 0
+        self._frames_passed  = 0
+        self._embed_skipped  = 0
+        self._embed_passed   = 0
+
     def run(self):
-        from stream import frames
+        from stream import QUALITY_LADDER, frames
 
         fps_counter      = 0
         fps_timer        = time.time()
@@ -118,6 +127,7 @@ class FrameBus:
 
         print(f"[{self.camera_id}] FrameBus started — tasks: {list(self.task_queues.keys())}")
 
+        _q0 = QUALITY_LADDER[0]["label"] if QUALITY_LADDER else "live"
         self.shared_state[self.camera_id] = {
             "camera_id"       : self.camera_id,
             "rtsp_url"        : self.rtsp_url,
@@ -128,18 +138,29 @@ class FrameBus:
             "total_detections": 0,
             "uptime_seconds"  : 0.0,
             "error"           : None,
+            "stream_quality"  : _q0,
+            "frames_dropped"  : 0,
+            "drop_rate"       : 0.0,
+            "decode_failures" : 0,
+            "decoder"         : "cpu",
+            "hw_decoder_requested": None,
+            "hw_decoder_active": False,
+            "profile"         : os.getenv("RTSP_PROFILE", "balanced").lower(),
+            "transport"       : os.getenv("RTSP_TRANSPORT", "tcp"),
+            "embed_skip_rate" : 0.0,
         }
 
         if self.save_output:
             os.makedirs(self.out_dir, exist_ok=True)
 
         try:
-            for frame in frames(self.rtsp_url):
+            for frame in frames(self.rtsp_url, camera_id=self.camera_id):
                 if self.stop_event.is_set():
                     break
 
                 frame_count += 1
                 fps_counter += 1
+                self._frames_passed += 1
 
                 elapsed = time.time() - fps_timer
                 if elapsed >= 1.0:
@@ -204,10 +225,48 @@ class FrameBus:
                     try:
                         q.put_nowait(payload)
                     except Exception:
-                        pass  # drop frame if task is backlogged — never block capture
+                        self._frames_dropped += 1
 
                 if self.save_output:
                     save_frame(annotated, self.out_dir, frame_count)
+
+                embed_total = self._embed_passed + self._embed_skipped
+                skip_rate = (
+                    round(self._embed_skipped / embed_total * 100, 1) if embed_total else 0.0
+                )
+                try:
+                    import stream as _stream_mod
+
+                    quality_label = getattr(
+                        _stream_mod, "_current_quality_label", _q0
+                    )
+                    decode_failures = int(
+                        getattr(_stream_mod, "_current_decode_failures", 0)
+                    )
+                    decoder = str(getattr(_stream_mod, "_current_decoder_type", "cpu"))
+                    hw_decoder_requested = getattr(
+                        _stream_mod, "_current_hw_decoder_requested", None
+                    )
+                    hw_decoder_active = bool(
+                        getattr(_stream_mod, "_current_hw_decoder_active", False)
+                    )
+                    profile = str(getattr(_stream_mod, "_current_profile", "balanced"))
+                    transport = str(getattr(_stream_mod, "_current_transport", "tcp"))
+                except Exception:
+                    quality_label = _q0
+                    decode_failures = 0
+                    decoder = "cpu"
+                    hw_decoder_requested = None
+                    hw_decoder_active = False
+                    profile = os.getenv("RTSP_PROFILE", "balanced").lower()
+                    transport = os.getenv("RTSP_TRANSPORT", "tcp")
+
+                routed_frames = self._frames_passed + self._frames_dropped
+                drop_rate = (
+                    round(self._frames_dropped / routed_frames * 100, 2)
+                    if routed_frames
+                    else 0.0
+                )
 
                 self.shared_state[self.camera_id] = {
                     **self.shared_state[self.camera_id],
@@ -216,6 +275,16 @@ class FrameBus:
                     "last_detections" : last_det,
                     "total_detections": total_detections,
                     "uptime_seconds"  : round(time.time() - started_at, 1),
+                    "stream_quality"  : quality_label,
+                    "frames_dropped"  : self._frames_dropped,
+                    "drop_rate"       : drop_rate,
+                    "decode_failures" : decode_failures,
+                    "decoder"         : decoder,
+                    "hw_decoder_requested": hw_decoder_requested,
+                    "hw_decoder_active": hw_decoder_active,
+                    "profile"         : profile,
+                    "transport"       : transport,
+                    "embed_skip_rate" : skip_rate,
                 }
 
         except Exception as e:
@@ -238,9 +307,9 @@ class FrameBus:
 
     def _save_best_crops(self, frame, detections, frame_id: int):
         """
-        For each tracked person, save the crop only when the bounding box area
-        exceeds the previous best by 20%. Emits a message to the embedding_queue
-        so the EmbeddingWorker can extract embeddings asynchronously.
+        For each tracked person, save the crop when bbox area exceeds previous best
+        by 20%, and only if confidence and crop variance pass thresholds.
+        Emits a message to the embedding_queue for EmbeddingWorker.
         """
         persons = [d for d in detections if d.class_name == "person" and d.track_id not in (None, -1)]
         current_track_ids = set()
@@ -263,11 +332,22 @@ class FrameBus:
                     self._track_state[tid] = state
                     continue
 
+                if det.confidence < _EMBED_CONF_THRESHOLD:
+                    self._embed_skipped += 1
+                    self._track_state[tid] = state
+                    continue
+
+                small = cv2.resize(crop, (80, 80), interpolation=cv2.INTER_AREA)
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                if float(gray.var()) < _EMBED_MIN_VARIANCE:
+                    self._embed_skipped += 1
+                    self._track_state[tid] = state
+                    continue
+
                 # Deterministic filename: 1 file per track per camera
                 crop_path = os.path.join(self._crop_dir, f"track_{tid}.jpg")
                 cv2.imwrite(crop_path, crop)
 
-                # Emit to embedding worker (non-blocking)
                 if self.embedding_queue is not None:
                     msg = {
                         "camera_id" : self.camera_id,
@@ -280,8 +360,9 @@ class FrameBus:
                     }
                     try:
                         self.embedding_queue.put_nowait(msg)
+                        self._embed_passed += 1
                     except Exception:
-                        pass  # drop if worker is backlogged — crop is on disk
+                        self._embed_skipped += 1
 
                 state["best_area"] = current_area
 

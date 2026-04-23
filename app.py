@@ -48,6 +48,7 @@ from fastapi.responses import StreamingResponse
 from apis.cameras   import camera_registry, CameraSetupRequest
 from apis.cashier   import router as cashier_router
 from apis.detection import detection
+from apis.stream_metrics import router as stream_metrics_router
 from apis.detection_stream import (
     DETECTION_SSE_KEEPALIVE_SEC,
     DetectionSSEBridge,
@@ -80,6 +81,7 @@ Requires `REDIS_URL` for live fan-out. Clients should reconnect after disconnect
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start one SSE bridge per process; stop on shutdown."""
+    app.state.detection = detection
     bridge = DetectionSSEBridge(detection.result_queue())
     await bridge.start()
     app.state.detection_sse_bridge = bridge
@@ -97,6 +99,7 @@ app = FastAPI(
     description=_API_DESCRIPTION,
 )
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
+app.include_router(stream_metrics_router)
 
 
 # ─────────────────────────────────────────────
