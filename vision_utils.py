@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 vision_utils.py
 ----------------
@@ -10,8 +12,10 @@ import uuid as _uuid
 import cv2
 import numpy as np
 from datetime import datetime, timezone
-from typing import List, Tuple
-from services.detector import Detection
+from typing import List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.detector import Detection
 
 
 # ─────────────────────────────────────────────
