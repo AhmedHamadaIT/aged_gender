@@ -1,34 +1,22 @@
 """
-services/mask_hairnet_chef_hat.py
----------------------------------
-MASK_HAIRNET_CHEF_HAT task — PPE compliance detection.
+services/phone_usage.py
+-----------------------
+PHONE_USAGE task — mobile phone usage detection.
 
 For every person in the frame that falls inside the configured detection zone,
-the task runs PPEService on their crop and checks which PPE items are missing.
-An event is emitted for each violation type that is listed in
-detailConfig.alarmType.
-
-Only violation (no_*) alarm types trigger events.
-Positive detections (mask, chef_hat, hat) are never alerted on.
-
-Alarm type → PPE model class mapping:
-    "no_mask"     → requires "mask"     detected by PPEService
-    "no_hat"      → requires "hairnet"  detected by PPEService
-    "no_chef_hat" → requires "hairnet"  detected by PPEService
-                    (chef_hat not a separate model class; hairnet is the proxy)
+the task runs PhoneService on their crop and checks if a phone is detected.
+An event is emitted for each person found using a phone.
 
 Task config shape (from POST /api/tasks):
 {
     "taskId"        : int,
     "taskName"      : str,
-    "algorithmType" : "MASK_HAIRNET_CHEF_HAT",
+    "algorithmType" : "PHONE_USAGE",
     "channelId"     : int,
     "enable"        : bool,
-    "threshold"     : int,        # 0-100 — min PPE detection confidence
+    "threshold"     : int,        # 0-100 — min phone detection confidence
     "areaPosition"  : str,        # JSON-encoded array of polygon zone definitions
-    "detailConfig"  : {
-        "alarmType": ["no_mask", "no_chef_hat", "no_hat"]
-    },
+    "detailConfig"  : {},
     "validWeekday"  : List[str],
     "validStartTime": int,
     "validEndTime"  : int
@@ -54,20 +42,6 @@ _WEEKDAY_MAP = {
     "FRIDAY": 4, "SATURDAY": 5, "SUNDAY": 6,
 }
 
-# Maps each alarm type to the PPE model class name that must be detected.
-# If the mapped class is absent from the crop inference → violation.
-_ALARM_TO_PPE_CLASS = {
-    "no_mask"    : "mask",
-    "no_hat"     : "hairnet",
-    "no_chef_hat": "hairnet",
-}
-
-_ALERT_DESCRIPTIONS = {
-    "no_mask"    : "Face mask not detected",
-    "no_chef_hat": "Chef hat not detected",
-    "no_hat"     : "Hairnet not detected",
-}
-
 
 # ── Polygon helpers ───────────────────────────────────────────────────────────
 
@@ -87,7 +61,7 @@ def _point_in_polygon(point: tuple, polygon: list) -> bool:
 
 # ── Task ──────────────────────────────────────────────────────────────────────
 
-class MaskHairnetChefHatTask:
+class PhoneUsageTask:
 
     def __init__(self, task_config: dict):
         self.task_id    = task_config["taskId"]
@@ -96,11 +70,6 @@ class MaskHairnetChefHatTask:
         self.threshold  = task_config.get("threshold", 50) / 100.0
         self.enable     = task_config.get("enable", True)
 
-        detail          = task_config.get("detailConfig", {})
-        raw_alarms      = detail.get("alarmType", list(_ALARM_TO_PPE_CLASS.keys()))
-        # Only keep alarm types this task can handle
-        self.alarm_types: List[str] = [a for a in raw_alarms if a in _ALARM_TO_PPE_CLASS]
-
         self.zones = self._parse_zones(task_config.get("areaPosition", "[]"))
 
         raw_days            = task_config.get("validWeekday", list(_WEEKDAY_MAP.keys()))
@@ -108,8 +77,8 @@ class MaskHairnetChefHatTask:
         self.valid_start_ms = task_config.get("validStartTime", 0)
         self.valid_end_ms   = task_config.get("validEndTime",   86400000)
 
-        from services.ppe import PPEService
-        self._ppe = PPEService()
+        from services.phone import PhoneService
+        self._phone = PhoneService()
 
         self._capture_dir = os.getenv("CAPTURE_DIR", "/local/storage/captures")
         self._scene_dir   = os.getenv("SCENE_DIR",   "/local/storage/scenes")
@@ -121,14 +90,14 @@ class MaskHairnetChefHatTask:
         self._jsonl_path = os.path.join(self._events_dir, f"task_{self.task_id}.jsonl")
 
         print(
-            f"[MaskHairnetChefHat/{self.task_id}] Ready — "
-            f"alarmTypes={self.alarm_types}, zones={len(self.zones)}"
+            f"[PhoneUsage/{self.task_id}] Ready — "
+            f"threshold={self.threshold}, zones={len(self.zones)}"
         )
 
     # ── Main entry point ──────────────────────────────────────────────────────
 
     def __call__(self, payload: dict) -> list:
-        if not self.enable or not self.alarm_types or not self._in_schedule():
+        if not self.enable or not self._in_schedule():
             return []
 
         frame     = payload["frame"]
@@ -148,7 +117,7 @@ class MaskHairnetChefHatTask:
             if self.zones and not self._in_any_zone(det.center):
                 continue
 
-            # Run PPE inference on this person crop
+            # Run phone inference on this person crop
             context = {
                 "data": {
                     "frame"    : frame,
@@ -156,36 +125,25 @@ class MaskHairnetChefHatTask:
                     "use_case" : {},
                 }
             }
-            context = self._ppe(context)
-            ppe_results = context["data"]["use_case"].get("ppe", [])
+            context = self._phone(context)
+            phone_results = context["data"]["use_case"].get("phone", [])
 
-            # Collect detected PPE class names for this person
-            detected_classes = set()
-            ppe_conf_map     = {}   # class_name → highest confidence
-            if ppe_results:
-                for item in ppe_results[0].items:
-                    name = item["class_name"]
-                    conf = item["confidence"]
-                    detected_classes.add(name)
-                    ppe_conf_map[name] = max(ppe_conf_map.get(name, 0.0), conf)
-
-            # Check each alarm type
-            for alarm_type in self.alarm_types:
-                required_class = _ALARM_TO_PPE_CLASS[alarm_type]
-                if required_class not in detected_classes:
-                    # Use threshold as fallback confidence when class absent
-                    conf_pct = int(ppe_conf_map.get(required_class, self.threshold) * 100)
-                    zone     = self.zones[0] if self.zones else None
-                    event = self._build_event(
-                        det,
-                        alarm_type,
-                        conf_pct,
-                        zone,
-                        payload["timestamp"],
-                        str(payload.get("camera_id") or ""),
-                    )
-                    self._persist(event, frame, det)
-                    events.append(event)
+            # Check if any phone was detected on this person
+            if phone_results and phone_results[0].phone_detected:
+                # Get the highest confidence phone detection
+                best_item = max(phone_results[0].items, key=lambda x: x["confidence"])
+                conf_pct  = int(best_item["confidence"] * 100)
+                zone      = self.zones[0] if self.zones else None
+                event     = self._build_event(
+                    det,
+                    conf_pct,
+                    best_item,
+                    zone,
+                    payload["timestamp"],
+                    str(payload.get("camera_id") or ""),
+                )
+                self._persist(event, frame, det)
+                events.append(event)
 
         return events
 
@@ -203,15 +161,15 @@ class MaskHairnetChefHatTask:
     def _build_event(
         self,
         det,
-        alarm_type: str,
         conf_pct: int,
+        phone_item: dict,
         zone: Optional[dict],
         timestamp: str,
         camera_id: str,
     ) -> dict:
         now_ms   = int(time.time() * 1000)
         event_id = hashlib.md5(
-            f"{self.task_id}_{det.track_id}_{alarm_type}_{now_ms}".encode()
+            f"{self.task_id}_{det.track_id}_{now_ms}".encode()
         ).hexdigest()
 
         cam_key = str(camera_id or self.channel_id or "unknown")
@@ -222,24 +180,32 @@ class MaskHairnetChefHatTask:
 
         return {
             "eventId"     : event_id,
-            "eventType"   : "MASK_HAIRNET_CHEF_HAT",
+            "eventType"   : "PHONE_USAGE",
             "timestamp"   : now_ms,
             "timestampUTC": datetime.fromtimestamp(
                 now_ms / 1000, tz=timezone.utc
             ).isoformat().replace("+00:00", "Z"),
             "taskId"      : self.task_id,
             "taskName"    : self.task_name,
-            "channelId"   : str(camera_id or self.channel_id),
-            "camera_id"   : camera_id,
+            "channelId"   : self.channel_id,
             "alert": {
-                "type"       : alarm_type,
-                "description": _ALERT_DESCRIPTIONS.get(alarm_type, alarm_type),
+                "type"       : "phone_usage",
+                "description": "Mobile phone usage detected",
                 "confidence" : conf_pct,
             },
             "person": {
                 "trackingId" : str(det.track_id),
                 "boundingBox": {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1},
                 "areaPoints" : area_points,
+            },
+            "phone": {
+                "boundingBox": {
+                    "x"     : phone_item["x1"],
+                    "y"     : phone_item["y1"],
+                    "width" : phone_item["x2"] - phone_item["x1"],
+                    "height": phone_item["y2"] - phone_item["y1"],
+                },
+                "confidence": conf_pct,
             },
             "evidence": {
                 "captureImage": build_image(cap_rel, "capture"),
@@ -286,5 +252,5 @@ class MaskHairnetChefHatTask:
         try:
             return json.loads(area_position) if area_position else []
         except Exception as e:
-            print(f"[MaskHairnetChefHat] Failed to parse areaPosition: {e}")
+            print(f"[PhoneUsage] Failed to parse areaPosition: {e}")
             return []

@@ -2,12 +2,15 @@
 vision_utils.py
 ----------------
 Drawing, resizing, and frame saving utilities.
+ML Image Contract V2 helpers (get_base_url, build_image, make_evidence_paths).
 """
 
 import os
+import uuid as _uuid
 import cv2
 import numpy as np
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Tuple
 from services.detector import Detection
 
 
@@ -116,3 +119,56 @@ def save_frame(frame: np.ndarray, output_dir: str, frame_count: int, prefix: str
     path     = os.path.join(output_dir, filename)
     cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
     return path
+
+
+# ─────────────────────────────────────────────
+# ML Image Contract V2
+# ─────────────────────────────────────────────
+def get_base_url() -> str:
+    """Read PUBLIC_ML_BASE_URL at call time (not at import) so runtime changes are picked up."""
+    return (os.getenv("PUBLIC_ML_BASE_URL") or "").rstrip("/")
+
+
+def _sanitize_rel_path(path: str) -> str:
+    """
+    Normalize an arbitrary path to a clean relative path suitable for URL embedding.
+    - Strips leading slashes
+    - Removes known absolute prefixes (app/evidence/, evidence/)
+    - Collapses double-slashes
+    """
+    path = path.lstrip("/")
+    for prefix in ("app/evidence/", "evidence/"):
+        if path.startswith(prefix):
+            path = path[len(prefix) :]
+            break
+    path = path.replace("//", "/")
+    return path
+
+
+def build_image(path: str, img_type: str) -> dict:
+    """Build a standard V2 image object. path is sanitized internally."""
+    rel = _sanitize_rel_path(path)
+    base = get_base_url()
+    url = f"{base}/evidence/{rel}" if base else f"/evidence/{rel}"
+    return {
+        "url": url,
+        "path": rel,
+        "type": img_type,
+        "format": "image/jpeg",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def make_evidence_paths(camera_id: str, event_id: str) -> Tuple[str, str]:
+    """
+    Return (capture_relative_path, scene_relative_path) using V2 naming convention:
+    {YYYY-MM-DD}/{camera_id}_{event_id}_{uuid8}.jpg
+    """
+    date = datetime.now().strftime("%Y-%m-%d")
+    cap_uuid = _uuid.uuid4().hex[:8]
+    scene_uuid = _uuid.uuid4().hex[:8]
+    safe_cam = camera_id.strip() or "unknown_camera"
+    return (
+        f"{date}/{safe_cam}_{event_id}_{cap_uuid}.jpg",
+        f"{date}/{safe_cam}_{event_id}_{scene_uuid}.jpg",
+    )

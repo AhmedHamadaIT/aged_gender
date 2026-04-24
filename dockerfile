@@ -18,12 +18,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 # - corrupt apt lists or low disk on the Docker host (prune images, free space),
 # - Docker engine too old for Ubuntu 22.04 gpgv inside the container (upgrade to 20.10+).
 # We clear lists, retry, then fall back to insecure index fetch only if needed.
+# Clear /var/cache/apt/archives/* (not only partial/): L4T bases can leave large .deb
+# caches; full archives + upgrades can exhaust the build FS ("not enough free space").
+# --no-upgrade avoids mass upgrades (glib/gcc toolchain) when only ffmpeg+runtime libs are needed.
 RUN set -eux; \
     apt-get clean; \
-    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* /var/cache/apt/archives/partial/*; \
     apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=120 \
     || apt-get update -o Acquire::Retries=5 --allow-insecure-repositories; \
-    apt-get install -y --no-install-recommends --allow-unauthenticated \
+    apt-get install -y --no-install-recommends --allow-unauthenticated --no-upgrade \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
@@ -31,7 +34,8 @@ RUN set -eux; \
         libgomp1 \
         libgl1 \
         ffmpeg; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # ── Working directory ────────────────────────
 WORKDIR /app

@@ -118,6 +118,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 from logger.logger_config import Logger
+from utils import build_image
 
 # Optional GIF support
 try:
@@ -149,6 +150,9 @@ ZONE_OUTSIDE  = "OUTSIDE"
 SEVERITY_NORMAL   = "NORMAL"
 SEVERITY_ALERT    = "ALERT"
 SEVERITY_CRITICAL = "CRITICAL"
+
+# ML Image Contract V2: single physical file used for both V1 image fields; V2 scene is explicit.
+CASHIER_SCENE_V2_NOT_AVAILABLE = {"url": None, "type": "scene", "status": "not_available"}
 
 # personStructural / integration case_level (distinct from internal SEVERITY_* strings)
 CASE_LEVEL_INFO     = "INFO"
@@ -553,6 +557,7 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
         compact_ps,
     )
 
+    date_folder = now.strftime("%Y-%m-%d")
     return {
         "algorithmType": algo,
         "captureId": capture_id,
@@ -571,6 +576,10 @@ def build_cashier_spec_data(result: CashierResult) -> Dict[str, Any]:
         "personStructural": ps,
         "captureUrl": capture_url,
         "sceneUrl": scene_url,
+        "evidence": {
+            "captureImage": build_image(f"{date_folder}/{capture_id}", "capture"),
+            "sceneImage": build_image(f"{date_folder}/{scene_id}", "scene"),
+        },
     }
 
 
@@ -631,8 +640,8 @@ def build_cashier_structured_event(
     ev_path = summary.get("evidence_path")
     if ev_path:
         event["evidence"] = {
-            "captureImage": ev_path,
-            "sceneImage"  : ev_path,
+            "captureImage": build_image(ev_path, "capture"),
+            "sceneImage"  : CASHIER_SCENE_V2_NOT_AVAILABLE,
         }
 
     txn = bool(summary.get("transaction", False))

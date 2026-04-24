@@ -21,6 +21,8 @@ from .mood       import MoodService
 from .cross_line            import CrossLineTask
 from .mask_hairnet_chef_hat import MaskHairnetChefHatTask
 from .cashier import CashierService, CashierDrawerTask
+from .phone       import PhoneService
+from .phone_usage import PhoneUsageTask
 
 # Simple per-frame services (used by FrameBus internals and legacy code)
 REGISTRY = {
@@ -29,6 +31,7 @@ REGISTRY = {
     "ppe"       : PPEService,
     "mood"      : MoodService,
     "cashier"   : CashierService,
+    "phone"     : PhoneService,
 }
 
 # Full task classes — keyed by algorithmType string from task config
@@ -36,4 +39,5 @@ TASK_REGISTRY = {
     "CROSS_LINE"           : CrossLineTask,
     "MASK_HAIRNET_CHEF_HAT": MaskHairnetChefHatTask,
     "CASHIER_BOX_OPEN"     : CashierDrawerTask,
+    "PHONE_USAGE"          : PhoneUsageTask,
 }

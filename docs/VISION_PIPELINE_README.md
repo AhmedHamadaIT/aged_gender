@@ -10,6 +10,7 @@ Single reference that merges:
 | More detail | Doc |
 |-------------|-----|
 | Tests, log paths, curl cheat sheet | Part I of this file; [API_USAGE.md](./API_USAGE.md) for HTTP walkthrough |
+| ML Image V2 — evidence, env, disk, SSH / JSONL | [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md) |
 | Add a FrameBus task | [ADDING_A_SERVICE.md](./ADDING_A_SERVICE.md) |
 | API walkthrough | [API_USAGE.md](./API_USAGE.md) |
 | Cashier (Eyego, `/cashier` cURL Part III, mocks, appendix JSON) | [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md) |
@@ -74,7 +75,7 @@ There is no bundled pytest tree in this checkout beyond what you add under `test
 | Kind | Where | HTTP? |
 |------|--------|--------|
 | **`REGISTRY`** | `services/__init__.py` | No direct routes — used by **`pipeline.py`** / `CameraPipeline` (batch or scripts): `detector`, `age_gender`, `ppe`, `mood`, `cashier` |
-| **`TASK_REGISTRY`** | Same file | Driven by **`POST /api/tasks`** + **`POST /detection/start`**: `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_BOX_OPEN` |
+| **`TASK_REGISTRY`** | Same file | Driven by **`POST /api/tasks`** + **`POST /detection/start`**: `CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `CASHIER_BOX_OPEN`, `PHONE_USAGE` |
 
 Cashier appears in both: **`CashierService`** and **`CashierDrawerTask`** (registered as **`CASHIER_BOX_OPEN`**) in **`services/cashier.py`**.
 
@@ -86,11 +87,17 @@ Cashier appears in both: **`CashierService`** and **`CashierDrawerTask`** (regis
 export BASE=http://localhost:9000
 # Remote box:
 export BASE=http://192.168.1.50:9000
+# Optional — full URLs in V2 evidence:
+export PUBLIC_ML_BASE_URL=https://ml.example.com
+# Optional — batch `CameraPipeline` only (`full` | `light` | `none`):
+export PIPELINE_IMAGE_MODE=full
 ```
 
 ```bash
 uvicorn app:app --host 0.0.0.0 --port 9000
 ```
+
+Image contract + disk + SSH: [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
 
 ---
 
@@ -395,9 +402,14 @@ curl -sN --max-time 15 "$BASE/detection/stream" | head -n 20
     "attributes": {},
     "confidence": 91
   },
-  "evidence": { "captureImage": "…", "sceneImage": "…" }
+  "evidence": {
+    "captureImage": { "url": "…", "path": "2026-04-22/cam-1_…_….jpg", "type": "capture", "format": "image/jpeg", "timestamp": "2026-04-22T12:00:00.000Z" },
+    "sceneImage": { "url": "…", "path": "2026-04-22/cam-1_…_….jpg", "type": "scene", "format": "image/jpeg", "timestamp": "2026-04-22T12:00:00.000Z" }
+  }
 }
 ```
+
+`captureImage` / `sceneImage` are **ML Image Contract V2** objects, not raw paths. Full contract: [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
 
 ### Example structured `CASHIER_BOX_OPEN` (illustrative)
 
@@ -422,16 +434,28 @@ Same outer envelope as above; body under **`data`**. `personStructural` is abbre
     "id": "550e8400e29b41d4a716446655440000",
     "personStructural": "{\n  \"case_matched\": \"N3\",\n  \"case_level\": \"INFO\"\n}",
     "captureUrl": "",
-    "sceneUrl": ""
+    "sceneUrl": "",
+    "evidence": {
+      "captureImage": { "url": "…", "path": "2026-04-22/CASHIER_BOX_OPEN_….jpg", "type": "capture", "format": "image/jpeg", "timestamp": "2026-04-22T12:00:00.000Z" },
+      "sceneImage": { "url": "…", "path": "2026-04-22/CASHIER_BOX_OPEN_….jpg", "type": "scene", "format": "image/jpeg", "timestamp": "2026-04-22T12:00:00.000Z" }
+    }
   }
 }
 ```
 
-### SSH — task JSONL (if enabled)
+### SSH — task JSONL (per algorithm)
+
+Each enabled task appends one JSON line per event to **`$EVENTS_DIR/task_<taskId>.jsonl`** (default `EVENTS_DIR=/local/storage/events`). Replace `10` with your task id from `GET /api/tasks`.
 
 ```bash
+# Cross-line, PPE, phone, or cashier — same file naming pattern
 ssh user@jetson 'tail -f /local/storage/events/task_10.jsonl'
+ssh user@jetson 'tail -f /local/storage/events/task_20.jsonl'
+# Pretty-print last line evidence
+ssh user@jetson 'tail -n1 /local/storage/events/task_10.jsonl' | python3 -m json.tool
 ```
+
+Reference: [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
 
 ---
 
