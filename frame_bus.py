@@ -147,6 +147,9 @@ class FrameBus:
             "1",
             "yes",
         )
+        self._task_queue_coalesce_threshold = self._env_float_clamped(
+            "TASK_QUEUE_COALESCE_THRESHOLD", 1.0, 0.0, 1.0
+        )
         self._include_frame_ndarray = os.getenv(
             "TASK_QUEUE_INCLUDE_FRAME", "false"
         ).lower() in ("true", "1", "yes")
@@ -154,11 +157,45 @@ class FrameBus:
             str(k): 0 for k in self.task_queues
         }
 
+    @staticmethod
+    def _env_float_clamped(name: str, default: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(os.getenv(name, str(default)))
+        except ValueError:
+            value = default
+        return min(max(value, minimum), maximum)
+
+    def _coalesce_oldest_task_payload(self, q, tid: str, force: bool = False) -> bool:
+        if not self._task_queue_coalesce:
+            return False
+
+        if not force:
+            if self._task_queue_coalesce_threshold >= 1.0:
+                return False
+            try:
+                queue_usage_ratio = q.qsize() / self._task_queue_maxsize
+            except Exception:
+                return False
+            if queue_usage_ratio < self._task_queue_coalesce_threshold:
+                return False
+
+        try:
+            q.get_nowait()
+            self._task_queue_coalesced_by_task[tid] = (
+                self._task_queue_coalesced_by_task.get(tid, 0) + 1
+            )
+            return True
+        except _queue.Empty:
+            return False
+        except Exception:
+            return False
+
     def _enqueue_task_payload(self, q, tid: str, payload: dict) -> None:
         """
         Bounded queue fan-out. When full, optionally drop the oldest item and
         retry once so workers stay on fresh frames (TASK_QUEUE_COALESCE).
         """
+        self._coalesce_oldest_task_payload(q, tid)
         try:
             q.put_nowait(payload)
             return
@@ -172,14 +209,7 @@ class FrameBus:
             self._warn_task_queue_full(tid)
             return
 
-        if self._task_queue_coalesce:
-            try:
-                q.get_nowait()
-                self._task_queue_coalesced_by_task[tid] = (
-                    self._task_queue_coalesced_by_task.get(tid, 0) + 1
-                )
-            except _queue.Empty:
-                pass
+        if self._coalesce_oldest_task_payload(q, tid, force=True):
             try:
                 q.put_nowait(payload)
                 return

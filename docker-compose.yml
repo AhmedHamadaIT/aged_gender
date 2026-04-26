@@ -68,7 +68,12 @@ services:
       - RTSP_ENABLE_GPU_DECODE=false
       - RTSP_HWACCEL=cuda
       - RTSP_HWDECODER=hevc_nvv4l2dec
-      - QUALITY_LADDER=1920x1080x10,1280x720x10,854x480x8
+      # Code-side throttling for high-resolution cameras when camera settings are not accessible.
+      - WIDTH=480
+      - HEIGHT=360
+      - FRAME_SKIP=2
+      - STREAM_TARGET_FPS=5
+      - QUALITY_LADDER=854x480x8,640x360x5
       - STREAM_DOWNGRADE_AFTER=20
       - STREAM_DOWNGRADE_COOLDOWN=30
       - FRAME_MIN_VARIANCE=8.0
@@ -79,13 +84,15 @@ services:
       - EMBED_FLUSH_TIMEOUT=3.0
       - REDIS_LIVE_FPS=10
       # FrameBus → task worker queue depth; IPC is lighter when TASK_QUEUE_INCLUDE_FRAME=false (default).
-      - TASK_QUEUE_MAXSIZE=512
+      - TASK_QUEUE_MAXSIZE=64
       # When a task queue is full, drop the oldest pending frame and enqueue the latest (keeps workers fresh).
       - TASK_QUEUE_COALESCE=true
+      # Start coalescing before saturation so slow task workers do not build stale backlog.
+      - TASK_QUEUE_COALESCE_THRESHOLD=0.5
       # false = JPEG only over the queue (fast); true = also send raw BGR ndarray (heavy pickle; legacy).
       - TASK_QUEUE_INCLUDE_FRAME=false
       # Throttle "task queue saturated" stderr lines per task id.
-      - FRAMEBUS_QUEUE_WARN_INTERVAL_SEC=5
+      - FRAMEBUS_QUEUE_WARN_INTERVAL_SEC=15
 
     volumes:
       - .:/app                  # mount entire project directory

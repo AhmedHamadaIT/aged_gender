@@ -32,6 +32,57 @@ STREAM_RECONNECT_BASE_SEC  = max(0.1, float(os.getenv("STREAM_RECONNECT_BASE_SEC
 STREAM_RECONNECT_MAX_SEC   = max(STREAM_RECONNECT_BASE_SEC, float(os.getenv("STREAM_RECONNECT_MAX_SEC", "30")))
 
 
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except ValueError:
+        return max(minimum, default)
+
+
+def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, str(default))))
+    except ValueError:
+        return max(minimum, default)
+
+
+class _FrameThrottle:
+    def __init__(
+        self,
+        frame_skip: int = 1,
+        target_fps: float = 0.0,
+        time_fn=time.monotonic,
+    ):
+        self.frame_skip = max(1, frame_skip)
+        self.target_fps = max(0.0, target_fps)
+        self._min_interval = 1.0 / self.target_fps if self.target_fps > 0 else 0.0
+        self._time_fn = time_fn
+        self._seen = 0
+        self._last_yield_at = None
+
+    @classmethod
+    def from_env(cls):
+        return cls(
+            frame_skip=_env_int("FRAME_SKIP", 1, minimum=1),
+            target_fps=_env_float("STREAM_TARGET_FPS", 0.0, minimum=0.0),
+        )
+
+    def should_yield(self) -> bool:
+        self._seen += 1
+        if self.frame_skip > 1 and self._seen % self.frame_skip != 0:
+            return False
+
+        if self._min_interval <= 0:
+            return True
+
+        now = self._time_fn()
+        if self._last_yield_at is not None and now - self._last_yield_at < self._min_interval:
+            return False
+
+        self._last_yield_at = now
+        return True
+
+
 def _parse_quality_ladder(raw: str) -> list[dict[str, int | str]]:
     ladder: list[dict[str, int | str]] = []
     for item in raw.split(","):
@@ -183,8 +234,15 @@ def frames(source: str = None, camera_id: str = None):
 
     consecutive_fails = 0
     reconnect_streak  = 0
+    throttle = _FrameThrottle.from_env()
 
     reader.connect()
+    if throttle.frame_skip > 1 or throttle.target_fps > 0:
+        log.info(
+            "[STREAM] Frame throttle active — FRAME_SKIP=%d STREAM_TARGET_FPS=%.2f",
+            throttle.frame_skip,
+            throttle.target_fps,
+        )
     try:
         while True:
             frame = reader.read_frame()
@@ -216,6 +274,8 @@ def frames(source: str = None, camera_id: str = None):
                 continue
             consecutive_fails = 0
             reconnect_streak  = 0
+            if not throttle.should_yield():
+                continue
             yield frame
     finally:
         reader.release()
