@@ -148,7 +148,7 @@ class FrameBus:
             "yes",
         )
         self._task_queue_coalesce_threshold = self._env_float_clamped(
-            "TASK_QUEUE_COALESCE_THRESHOLD", 1.0, 0.0, 1.0
+            "TASK_QUEUE_COALESCE_THRESHOLD", 0.8, 0.0, 1.0
         )
         self._include_frame_ndarray = os.getenv(
             "TASK_QUEUE_INCLUDE_FRAME", "false"
@@ -209,12 +209,12 @@ class FrameBus:
             self._warn_task_queue_full(tid)
             return
 
-        if self._coalesce_oldest_task_payload(q, tid, force=True):
-            try:
-                q.put_nowait(payload)
-                return
-            except _queue.Full:
-                pass
+        self._coalesce_oldest_task_payload(q, tid, force=True)
+        try:
+            q.put_nowait(payload)
+            return
+        except _queue.Full:
+            pass
 
         self._frames_dropped += 1
         self._task_queue_drops_by_task[tid] = (
