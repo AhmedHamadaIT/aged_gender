@@ -40,6 +40,8 @@ async def stream_metrics(request: Request):
     - ``latency_estimate_ms`` — EMA of wall time between consecutive yielded frames (jitter / stalls).
     - ``framebus_process_alive`` / ``last_state_update_age_sec`` — reconciled with the parent
       FrameBus process when available.
+    - ``rtsp_backend`` — active ingest: ``gstreamer``, ``adaptive_ffmpeg``, ``opencv_ffmpeg``, etc.
+    - ``live_annotation_mode`` — ``ultralytics`` / ``opencv`` / ``none`` for Redis live JPEGs.
     """
     detection = getattr(request.app.state, "detection", None)
     if detection is None:

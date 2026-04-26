@@ -19,6 +19,7 @@ load_dotenv()
 
 from logger.logger_config import Logger
 from stream_adapter import AdaptiveStream, StreamProber, profile_health
+from stream_gstreamer import gstreamer_backend_available, open_gstreamer_capture, should_attempt_gstreamer
 from utils.rtsp_ffmpeg import apply_rtsp_ffmpeg_env, open_rtsp_videocapture, warmup_rtsp_capture
 
 log = Logger.get_logger(__name__)
@@ -132,6 +133,21 @@ _current_hw_decoder_active = False
 _current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
 _current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
 _current_stream_health = {}
+_current_rtsp_backend = "unknown"
+
+
+def _rtsp_backend_mode() -> str:
+    v = os.getenv("RTSP_BACKEND", "auto").lower().strip()
+    if v in ("auto", "gstreamer", "ffmpeg", "opencv"):
+        return v
+    return "auto"
+
+
+def _codec_ok_for_gstreamer(codec: str) -> bool:
+    c = (codec or "").lower()
+    return c in (
+        "h264", "avc", "avc1", "h264v", "hevc", "h265", "hev1", "hvc1",
+    )
 
 
 class _RTSPReader:
@@ -145,17 +161,34 @@ class _RTSPReader:
         self._force_cpu_decode = False
         self._disable_adaptive_ffmpeg = False
         self._adaptive_failure_cycles = 0
+        self._ingest_backend: str | None = None
+        self._gstreamer_profile = None  # probed profile used for GStreamer + metrics
 
     def connect(self) -> None:
         global _current_quality_label, _current_decoder_type, _current_hw_decoder_requested
         global _current_hw_decoder_active, _current_profile, _current_transport, _current_stream_health
+        global _current_rtsp_backend
 
         self._connect_count += 1
         self.release()
         _current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
         _current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
+        rtsp_mode = _rtsp_backend_mode()
+        # Skip PyPI opencv+GStreamer check on forced mode before probe
+        if rtsp_mode == "gstreamer" and not gstreamer_backend_available():
+            raise RuntimeError(
+                "[STREAM] RTSP_BACKEND=gstreamer but OpenCV has no GStreamer support "
+                "(use Jetson/L4T OpenCV build; do not override with opencv-python*)."
+            )
 
-        if _env_bool("RTSP_ADAPTIVE_FFMPEG", "true") and not self._disable_adaptive_ffmpeg:
+        adaptive_wanted = (
+            _env_bool("RTSP_ADAPTIVE_FFMPEG", "true")
+            and not self._disable_adaptive_ffmpeg
+            and rtsp_mode != "opencv"
+        )
+        need_probe = adaptive_wanted or should_attempt_gstreamer(rtsp_mode)
+        profile = None
+        if need_probe:
             profile = StreamProber.probe(self.url, camera_id=self.camera_id)
             if self._force_cpu_decode and profile.hw_decoder_requested:
                 log.warning(
@@ -165,17 +198,76 @@ class _RTSPReader:
                 profile.hw_decoder_requested = None
                 profile.hw_decoder_active = False
                 profile.decoder = "cpu"
+
+        # 1) GStreamer (Jetson NVDEC) — before FFmpeg subprocess
+        if (
+            profile is not None
+            and should_attempt_gstreamer(rtsp_mode)
+            and _codec_ok_for_gstreamer(profile.codec)
+        ):
+            gst = open_gstreamer_capture(profile)
+            if gst is not None:
+                self.cap, health = gst
+                self._gstreamer_profile = profile
+                self._ingest_backend = "gstreamer"
+                _current_rtsp_backend = "gstreamer"
+                _current_quality_label = f"{profile.target_width}x{profile.target_height}@gstreamer"
+                _current_decoder_type = "nvv4l2decoder"
+                _current_hw_decoder_requested = "nvv4l2decoder"
+                _current_hw_decoder_active = True
+                _current_stream_health = {**health, "backend": "gstreamer"}
+                log.info(
+                    "[STREAM] GStreamer NVDEC connected — native=%dx%d@%.2ffps codec=%s target=%s",
+                    profile.native_width,
+                    profile.native_height,
+                    profile.native_fps,
+                    profile.codec,
+                    _current_quality_label,
+                )
+                wup = max(0, int(os.getenv("RTSP_GST_WARMUP_FRAMES", os.getenv("RTSP_WARMUP_FRAMES", "3"))))
+                for _ in range(wup):
+                    if self.cap is not None:
+                        self.cap.read()
+                return
+            if rtsp_mode == "gstreamer":
+                raise RuntimeError(
+                    f"[STREAM] RTSP_BACKEND=gstreamer but failed to open pipeline for {self.url!r}"
+                )
+            log.warning(
+                "[STREAM] GStreamer open failed for camera=%s; falling back to Adaptive FFmpeg / OpenCV",
+                self.camera_id,
+            )
+        elif profile is not None and should_attempt_gstreamer(rtsp_mode) and not _codec_ok_for_gstreamer(profile.codec):
+            log.info(
+                "[STREAM] GStreamer skipped (codec=%s) — not H.264/H.265",
+                profile.codec,
+            )
+
+        # 2) Adaptive FFmpeg
+        if adaptive_wanted:
+            if profile is None:
+                profile = StreamProber.probe(self.url, camera_id=self.camera_id)
+                if self._force_cpu_decode and profile.hw_decoder_requested:
+                    log.warning(
+                        "[STREAM] HW decoder disabled for camera=%s after device errors; using CPU decode",
+                        self.camera_id,
+                    )
+                    profile.hw_decoder_requested = None
+                    profile.hw_decoder_active = False
+                    profile.decoder = "cpu"
             stream = AdaptiveStream(profile)
             if stream.open():
                 self._adaptive_profile = profile
                 self._adaptive = stream
+                self._ingest_backend = "adaptive_ffmpeg"
+                _current_rtsp_backend = "adaptive_ffmpeg"
                 _current_quality_label = (
                     f"{profile.target_width}x{profile.target_height}@{profile.target_fps:.2f}fps"
                 )
                 _current_decoder_type = profile.decoder
                 _current_hw_decoder_requested = profile.hw_decoder_requested
                 _current_hw_decoder_active = profile.hw_decoder_active
-                _current_stream_health = profile_health(profile)
+                _current_stream_health = {**profile_health(profile), "backend": "adaptive_ffmpeg"}
                 log.info(
                     "[STREAM] Adaptive FFmpeg connected — native=%dx%d@%.2ffps codec=%s target=%s decoder=%s",
                     profile.native_width,
@@ -199,6 +291,8 @@ class _RTSPReader:
         self.cap = open_rtsp_videocapture(self.url)
         if not self.cap.isOpened():
             raise RuntimeError(f"[STREAM] Cannot open: {self.url}")
+        self._ingest_backend = "opencv_ffmpeg"
+        _current_rtsp_backend = "opencv_ffmpeg"
         wup = max(0, int(os.getenv("RTSP_WARMUP_FRAMES", "8")))
         okw = warmup_rtsp_capture(self.cap)
         w   = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -218,6 +312,7 @@ class _RTSPReader:
             "hw_decoder_requested": None,
             "hw_decoder_active": False,
             "healthy": True,
+            "backend": "opencv_ffmpeg",
         }
         log.info("[STREAM] Connected — %dx%d @ %.1ffps", w, h, fps)
         w_tgt = int(os.getenv("WIDTH", "1280"))
@@ -243,13 +338,31 @@ class _RTSPReader:
 
     def read_frame(self):
         global _current_stream_health
+        if self._ingest_backend == "gstreamer" and self.cap is not None:
+            ret, frame = self.cap.read()
+            if self._gstreamer_profile is not None:
+                if not ret or frame is None:
+                    self._gstreamer_profile.frames_dropped += 1
+                    self._gstreamer_profile.healthy = False
+                else:
+                    self._gstreamer_profile.frames_received += 1
+                    self._gstreamer_profile.healthy = True
+                _current_stream_health = {
+                    **profile_health(self._gstreamer_profile),
+                    "backend": "gstreamer",
+                    "decoder": "nvv4l2decoder",
+                    "hw_decoder_requested": "nvv4l2decoder",
+                    "hw_decoder_active": True,
+                }
+            return frame if ret else None
         if self._adaptive is not None:
             frame = self._adaptive.read_frame()
             if self._adaptive_profile is not None:
                 if frame is None:
                     self._adaptive_profile.frames_dropped += 1
                     self._adaptive_profile.healthy = False
-                _current_stream_health = profile_health(self._adaptive_profile)
+                h = {**profile_health(self._adaptive_profile), "backend": "adaptive_ffmpeg"}
+                _current_stream_health = h
             return frame
         if self.cap is None:
             return None
@@ -263,6 +376,8 @@ class _RTSPReader:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
+        self._gstreamer_profile = None
+        self._ingest_backend = None
 
 
 class _VideoReader:

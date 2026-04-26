@@ -157,6 +157,11 @@ class FrameBus:
             str(k): 0 for k in self.task_queues
         }
 
+        _lam = os.getenv("LIVE_ANNOTATION_MODE", "ultralytics").lower().strip()
+        self._live_annotation_mode: str = (
+            _lam if _lam in ("ultralytics", "opencv", "none") else "ultralytics"
+        )
+
     @staticmethod
     def _env_float_clamped(name: str, default: float, minimum: float, maximum: float) -> float:
         try:
@@ -236,6 +241,48 @@ class FrameBus:
                 f"task {tid} (TASK_QUEUE_MAXSIZE={self._task_queue_maxsize}). {hint}"
             )
 
+    def _draw_boxes_opencv(self, frame, detections: list):
+        """Lighter than Ultralytics plot(); for Redis preview / LIVE_ANNOTATION_MODE=opencv."""
+        out = frame
+        for det in detections:
+            x1, y1, x2, y2 = int(det.x1), int(det.y1), int(det.x2), int(det.y2)
+            cv2.rectangle(out, (x1, y1), (x2, y2), (0, 200, 0), 1, lineType=cv2.LINE_AA)
+            tid = det.track_id
+            if tid is not None and int(tid) >= 0:
+                label = f"{det.class_name} {int(tid)}"
+            else:
+                label = str(det.class_name)
+            cv2.putText(
+                out,
+                label,
+                (x1, max(0, y1 - 2)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (0, 255, 0),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+        return out
+
+    def _annotate_for_stream(
+        self, resized_frame, results, detections: list, need_draw: bool
+    ):
+        """
+        Build frame with boxes for live Redis / optional disk save.
+        Skips heavy Ultralytics ``plot()`` when not needed (see need_draw).
+        """
+        if not need_draw:
+            return resized_frame
+        if self._live_annotation_mode == "none":
+            return resized_frame
+        if self._live_annotation_mode == "opencv":
+            if not detections:
+                return resized_frame
+            return self._draw_boxes_opencv(resized_frame, detections)
+        if results:
+            return results[0].plot()
+        return resized_frame
+
     def run(self):
         from stream import QUALITY_LADDER, frames
 
@@ -284,6 +331,8 @@ class FrameBus:
             "state_updated_at": time.time(),
             "task_queue_drops_by_task": dict(self._task_queue_drops_by_task),
             "task_queue_coalesced_by_task": dict(self._task_queue_coalesced_by_task),
+            "live_annotation_mode": self._live_annotation_mode,
+            "rtsp_backend": "unknown",
         }
 
         if self.save_output:
@@ -341,11 +390,16 @@ class FrameBus:
                 # ── Save best crop per tracked person ─────────────────────────
                 self._save_best_crops(resized_frame, detections, frame_count)
 
-                # Always annotate — needed for live stream even when SAVE_OUTPUT is off
-                annotated = results[0].plot() if results else resized_frame
+                will_publish = self._redis is not None and (
+                    frame_count % self._publish_every == 0
+                )
+                need_draw   = self.save_output or will_publish
+                annotated   = self._annotate_for_stream(
+                    resized_frame, results, detections, need_draw
+                )
 
                 # ── Publish annotated JPEG to Redis (live stream) ──────────────
-                if self._redis is not None and frame_count % self._publish_every == 0:
+                if will_publish:
                     try:
                         _, _buf = cv2.imencode(
                             ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75]
@@ -402,6 +456,9 @@ class FrameBus:
                     profile = str(getattr(_stream_mod, "_current_profile", "balanced"))
                     transport = str(getattr(_stream_mod, "_current_transport", "tcp"))
                     reconnects = int(getattr(_stream_mod, "_rtsp_reconnect_count", 0))
+                    rtsp_backend = str(
+                        getattr(_stream_mod, "_current_rtsp_backend", "unknown")
+                    )
                 except Exception:
                     quality_label = _q0
                     decode_failures = 0
@@ -412,6 +469,7 @@ class FrameBus:
                     profile = os.getenv("RTSP_PROFILE", "balanced").lower()
                     transport = os.getenv("RTSP_TRANSPORT", "tcp")
                     reconnects = 0
+                    rtsp_backend = "unknown"
 
                 # Stream source: failed VideoCapture.read() vs successful yields (same process / one generator).
                 stream_reads = decode_failures + frame_count
@@ -459,8 +517,10 @@ class FrameBus:
                     "stream_health"   : stream_health,
                     "profile"         : profile,
                     "transport"       : transport,
+                    "rtsp_backend"    : rtsp_backend,
                     "embed_skip_rate" : skip_rate,
                     "state_updated_at": time.time(),
+                    "live_annotation_mode": self._live_annotation_mode,
                 }
 
         except Exception as e:

@@ -63,7 +63,7 @@ from the directory that contains `docker-compose.yml`.
 ## Features (complete inventory)
 
 ### Architecture (v2 runtime)
-- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`.
+- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`, `LIVE_ANNOTATION_MODE` (`ultralytics` / `opencv` / `none`). Ingest path: `RTSP_BACKEND` (`auto` / `gstreamer` / `ffmpeg` / `opencv`) — see [`stream.py`](stream.py) / [`stream_gstreamer.py`](stream_gstreamer.py) on Jetson.
 - **Task workers** ([`task_worker.py`](task_worker.py)) — One worker process per enabled task; looks up `algorithmType` in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`, emits events to the shared result queue **and** publishes them to Redis `live:event:{camera_id}`.
 - **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` (subscribes from both the multiprocessing queue and Redis `live:event:*` so multiple uvicorn workers can all serve SSE). Serves **WebSocket** live frame stream at `WS /cameras/{id}/live` via [`apis/ws_live.py`](apis/ws_live.py).
 - **Redis** ([`docker-compose.yml`](docker-compose.yml) `redis:7-alpine`) — Fire-and-forget Pub/Sub broker. FrameBus publishes binary JPEG frames; FastAPI WebSocket handlers subscribe. No persistence needed (`--appendonly no`).
@@ -295,6 +295,8 @@ connect("cam1");   // change to your camera id
 |---|---|---|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
 | `REDIS_LIVE_FPS` | `13` | Target publish rate (fps); FrameBus auto-adjusts per measured camera FPS |
+| `LIVE_ANNOTATION_MODE` | `ultralytics` | `ultralytics` (full `plot()`), `opencv` (fast boxes), or `none` (no overlay) for live Redis JPEGs; still uses full plot when `SAVE_OUTPUT` is on |
+| `RTSP_BACKEND` | `auto` | `auto` (GStreamer NVDEC on Jetson if available, else Adaptive FFmpeg, else OpenCV), or force `gstreamer` / `ffmpeg` / `opencv` |
 | `WS_SEND_TIMEOUT_MS` | `50` | Drop frame if client cannot receive within this many ms |
 
 ### Cashier — zones (`GET` / `POST` / `POST …/reset`)

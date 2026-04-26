@@ -11,8 +11,8 @@
 FROM dustynv/l4t-pytorch:r36.4.0
 
 # ── System dependencies ──────────────────────
-# Runtime libs only (wheels via pip). Avoid *-dev FFmpeg/GStreamer stacks here;
-# they often pull conflicting deps on L4T images and make apt exit 100.
+# Runtime libs only. Avoid *-dev headers for GStreamer here; they often pull conflicting deps.
+# GStreamer plugins are required for cv2.CAP_GSTREAMER + nvv4l2decoder on Jetson.
 ENV DEBIAN_FRONTEND=noninteractive
 # L4T uses ports.ubuntu.com. "invalid signature" / "not signed" during build is often:
 # - corrupt apt lists or low disk on the Docker host (prune images, free space),
@@ -33,7 +33,13 @@ RUN set -eux; \
         libxrender1 \
         libgomp1 \
         libgl1 \
-        ffmpeg; \
+        ffmpeg \
+        gstreamer1.0-tools \
+        gstreamer1.0-plugins-base \
+        gstreamer1.0-plugins-good \
+        gstreamer1.0-plugins-bad \
+        gstreamer1.0-plugins-ugly \
+        ; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
@@ -55,7 +61,10 @@ RUN python3 -m pip install --no-cache-dir "lap>=0.5.12" \
 
 # ── Find which python/pip the base image uses and install deps ──
 # Use --no-deps on ultralytics to prevent pip from pulling in CPU torch
-# Install all other ultralytics deps manually
+# Install all other ultralytics deps manually.
+# Do NOT pip install opencv-python / opencv-python-headless: L4T base images ship OpenCV
+# with GStreamer support; PyPI wheels replace it and break RTSP_BACKEND=gstreamer (CAP_GSTREAMER).
+# System OpenCV is provided by the dustynv/l4t-pytorch base (or python3-opencv on some images).
 RUN python3 -m pip install --no-cache-dir --no-deps \
         --index-url https://pypi.org/simple \
         --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
@@ -69,7 +78,6 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         --trusted-host pypi.org \
         --trusted-host files.pythonhosted.org \
         --trusted-host pypi.jetson-ai-lab.io \
-        opencv-python-headless \
         "numpy<2" \
         requests \
         Pillow \

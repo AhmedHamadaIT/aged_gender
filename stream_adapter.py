@@ -76,6 +76,11 @@ def _is_jetson() -> bool:
         return False
 
 
+def is_jetson() -> bool:
+    """True on NVIDIA Jetson (Tegra) hosts — used for GStreamer nvv4l2decode path selection."""
+    return _is_jetson()
+
+
 class StreamProber:
     JETSON_HW_DECODERS = {
         "h264": "h264_v4l2m2m",
