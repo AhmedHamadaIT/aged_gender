@@ -78,6 +78,8 @@ services:
       - EMBED_BATCH_SIZE=8
       - EMBED_FLUSH_TIMEOUT=3.0
       - REDIS_LIVE_FPS=10
+      # FrameBus → task worker queue depth (default 64 in code); raise if task_queue_drop_rate stays high at 4K.
+      - TASK_QUEUE_MAXSIZE=128
 
     volumes:
       - .:/app                  # mount entire project directory

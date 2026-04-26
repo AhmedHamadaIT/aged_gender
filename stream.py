@@ -96,11 +96,32 @@ class _RTSPReader:
         self.cap = open_rtsp_videocapture(self.url)
         if not self.cap.isOpened():
             raise RuntimeError(f"[STREAM] Cannot open: {self.url}")
-        warmup_rtsp_capture(self.cap)
+        wup = max(0, int(os.getenv("RTSP_WARMUP_FRAMES", "8")))
+        okw = warmup_rtsp_capture(self.cap)
         w   = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h   = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 0.0
         log.info("[STREAM] Connected — %dx%d @ %.1ffps", w, h, fps)
+        w_tgt = int(os.getenv("WIDTH", "1280"))
+        h_raw = int(os.getenv("HEIGHT", "0"))
+        if h_raw > 0:
+            log.info(
+                "[STREAM] Processing size target: WIDTH=%d HEIGHT=%d (set in env; FrameBus resizes to this).",
+                w_tgt,
+                h_raw,
+            )
+        else:
+            log.info(
+                "[STREAM] Processing width target: WIDTH=%d (HEIGHT=0 keep aspect; FrameBus resizes). "
+                "If CPU load is high, use a 720p/1080p substream or lower WIDTH.",
+                w_tgt,
+            )
+        if wup > 0 and okw < wup:
+            log.warning(
+                "[STREAM] Warmup only got %d/%d frames; decode may be unstable (HEVC/RTSP).",
+                okw,
+                wup,
+            )
 
     def read_frame(self):
         if self.cap is None:

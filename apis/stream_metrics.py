@@ -37,12 +37,18 @@ async def stream_metrics(request: Request):
     - ``task_queue_drop_rate`` — ``put_nowait`` failures when fan-out queues are full.
     - ``reconnects`` — RTSP reconnects after a consecutive-read-failure burst.
     - ``latency_estimate_ms`` — EMA of wall time between consecutive yielded frames (jitter / stalls).
+    - ``framebus_process_alive`` / ``last_state_update_age_sec`` — reconciled with the parent
+      FrameBus process when available.
     """
     detection = getattr(request.app.state, "detection", None)
     if detection is None:
         return []
     shared = detection._shared_state
-    return [dict(v) for v in shared.values()]
+    out = []
+    for cam_id, v in shared.items():
+        row = dict(v)
+        out.append(detection.enrich_shared_camera_row(str(cam_id), row))
+    return out
 
 
 @router.get("/quality-events")

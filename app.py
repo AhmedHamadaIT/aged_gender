@@ -172,8 +172,17 @@ def task_delete(task_id: int):
 # Detection routes
 # ─────────────────────────────────────────────
 @app.post("/detection/start")
-def detection_start(camera_id: str = None):
-    return detection.on_post(DetectionRequest(action="start", camera_id=camera_id))
+def detection_start(
+    camera_id: Optional[str] = None,
+    all_channels: bool = False,
+):
+    return detection.on_post(
+        DetectionRequest(
+            action="start",
+            camera_id=camera_id,
+            all_channels=all_channels,
+        )
+    )
 
 
 @app.post("/detection/stop")

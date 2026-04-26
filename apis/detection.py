@@ -19,6 +19,8 @@ Routes registered in app.py:
 """
 
 import multiprocessing
+import os
+import time
 
 # Parent process loads CUDA-backed models (e.g. ReID/OSNet) before workers start.
 # Linux default start method is "fork"; forked children cannot re-init CUDA.
@@ -61,20 +63,56 @@ class DetectionResource(BaseResource):
     # ── Status ───────────────────────────────────────────────────────────────
 
     def on_post(self, req: DetectionRequest):
-        return self.get_service(req.action)(req.camera_id)
+        if req.action == "start":
+            return self._start(req.camera_id, all_channels=req.all_channels)
+        if req.action == "stop":
+            return self._stop(req.camera_id)
+        if req.action == "stop_all":
+            return self._stop_all()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown action '{req.action}'. Available: start, stop, stop_all",
+        )
+
+    def enrich_shared_camera_row(self, cam_id: str, cam_state: dict) -> dict:
+        """Merge manager shared_state with parent process liveness; used by /detection/status and /stream/metrics."""
+        out = dict(cam_state)
+        proc = self._bus_processes.get(cam_id)
+        if proc is not None:
+            alive = proc.is_alive()
+            out["framebus_process_alive"] = alive
+            if out.get("running") and not alive:
+                out["running"] = False
+                if not out.get("error"):
+                    out["stopped_reason"] = out.get("stopped_reason") or "framebus_process_exited"
+        else:
+            out["framebus_process_alive"] = None
+
+        ts = out.get("state_updated_at")
+        if ts is not None:
+            try:
+                out["last_state_update_age_sec"] = max(0.0, time.time() - float(ts))
+            except (TypeError, ValueError):
+                out["last_state_update_age_sec"] = None
+        return out
 
     def on_get(self):
-        return DetectionStatus(cameras={
-            cam_id: CameraStatus(**cam_state)
-            for cam_id, cam_state in self._shared_state.items()
-        })
+        return DetectionStatus(
+            cameras={
+                cam_id: CameraStatus(
+                    **self.enrich_shared_camera_row(cam_id, dict(cam_state))
+                )
+                for cam_id, cam_state in self._shared_state.items()
+            }
+        )
 
     # ── Start ─────────────────────────────────────────────────────────────────
 
-    def _start(self, camera_id: Optional[str] = None):
+    def _start(self, camera_id: Optional[str] = None, all_channels: bool = False):
         from task_worker import run_task_worker
 
-        tasks   = task_registry.get_enabled()
+        all_enabled = task_registry.get_enabled()
+        tasks   = all_enabled
         cameras = camera_registry.all()
 
         if not tasks:
@@ -92,9 +130,25 @@ class DetectionResource(BaseResource):
         if camera_id:
             tasks = [t for t in tasks if str(t["channelId"]) == str(camera_id)]
             if not tasks:
+                chans = sorted({str(t["channelId"]) for t in all_enabled})
                 raise HTTPException(
                     status_code=404,
-                    detail=f"No enabled tasks found for camera '{camera_id}'."
+                    detail=(
+                        f"No enabled tasks found for camera '{camera_id}'. "
+                        f"Enabled task channelIds: {chans}. "
+                        f"Registered camera ids: {sorted(cameras.keys())}."
+                    ),
+                )
+        else:
+            distinct = sorted({str(t["channelId"]) for t in tasks})
+            if len(distinct) > 1 and not all_channels:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Multiple enabled task channels: {distinct}. "
+                        "Use POST /detection/start?camera_id=<id> to start one channel, "
+                        "or pass all_channels=true to start all."
+                    ),
                 )
 
         # Group tasks by channelId — one FrameBus per camera
@@ -123,9 +177,12 @@ class DetectionResource(BaseResource):
 
             # One task worker process per task
             self._task_processes.setdefault(chan_id, {})
+            # Bounded queue between FrameBus and each task worker. Too small + slow
+            # startup (TRT, 4K decode) causes put_nowait drops every frame; override via TASK_QUEUE_MAXSIZE.
+            _tq_max = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "64")))
             for task_cfg in chan_tasks:
                 task_id = str(task_cfg["taskId"])
-                q = self._manager.Queue(maxsize=10)
+                q = self._manager.Queue(maxsize=_tq_max)
                 task_queues[task_id] = q
 
                 p = multiprocessing.Process(

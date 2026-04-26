@@ -132,6 +132,16 @@ class FrameBus:
         self._metrics_last_wall_t: Optional[float] = None
         self._metrics_inter_frame_ema_ms = 0.0
 
+        # Per-task queue backpressure (put_nowait failures) + throttled warnings
+        self._task_queue_drops_by_task: Dict[str, int] = {
+            str(k): 0 for k in self.task_queues
+        }
+        self._queue_warn_last: Dict[str, float] = {}
+        self._queue_warn_interval = float(
+            os.getenv("FRAMEBUS_QUEUE_WARN_INTERVAL_SEC", "2.0")
+        )
+        self._task_queue_maxsize = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "64")))
+
     def run(self):
         from stream import QUALITY_LADDER, frames
 
@@ -173,6 +183,8 @@ class FrameBus:
             "embed_skip_rate" : 0.0,
             "uptime_sec"      : 0.0,
             "fps_actual"      : 0.0,
+            "state_updated_at": time.time(),
+            "task_queue_drops_by_task": dict(self._task_queue_drops_by_task),
         }
 
         if self.save_output:
@@ -257,11 +269,27 @@ class FrameBus:
                     },
                 }
 
-                for q in self.task_queues.values():
+                for task_id, q in self.task_queues.items():
+                    tid = str(task_id)
                     try:
                         q.put_nowait(payload)
                     except Exception:
                         self._frames_dropped += 1
+                        self._task_queue_drops_by_task[tid] = (
+                            self._task_queue_drops_by_task.get(tid, 0) + 1
+                        )
+                        nowt = time.time()
+                        if (
+                            nowt - self._queue_warn_last.get(tid, 0.0)
+                            >= self._queue_warn_interval
+                        ):
+                            self._queue_warn_last[tid] = nowt
+                            print(
+                                f"[{self.camera_id}] Task queue full; dropping frame for "
+                                f"task {tid} (TASK_QUEUE_MAXSIZE={self._task_queue_maxsize}). "
+                                f"Consider raising TASK_QUEUE_MAXSIZE, lowering WIDTH, or "
+                                f"using a lower-resolution RTSP substream."
+                            )
 
                 if self.save_output:
                     save_frame(annotated, self.out_dir, frame_count)
@@ -326,6 +354,9 @@ class FrameBus:
                     "decode_error_rate": decode_error_rate,
                     "task_queue_drops": self._frames_dropped,
                     "task_queue_drop_rate": task_queue_drop_rate,
+                    "task_queue_drops_by_task": dict(
+                        self._task_queue_drops_by_task
+                    ),
                     "reconnects"      : reconnects,
                     "latency_estimate_ms": round(self._metrics_inter_frame_ema_ms, 2),
                     "stream_read_failures": decode_failures,
@@ -336,6 +367,7 @@ class FrameBus:
                     "profile"         : profile,
                     "transport"       : transport,
                     "embed_skip_rate" : skip_rate,
+                    "state_updated_at": time.time(),
                 }
 
         except Exception as e:
@@ -343,12 +375,14 @@ class FrameBus:
                 **self.shared_state[self.camera_id],
                 "error"  : str(e),
                 "running": False,
+                "state_updated_at": time.time(),
             }
             print(f"[{self.camera_id}] FrameBus error: {e}")
         finally:
             self.shared_state[self.camera_id] = {
                 **self.shared_state[self.camera_id],
                 "running": False,
+                "state_updated_at": time.time(),
             }
             print(f"[{self.camera_id}] FrameBus stopped. Frames: {frame_count}")
 
