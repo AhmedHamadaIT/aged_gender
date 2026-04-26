@@ -70,6 +70,29 @@ def test_basic_health_endpoints(client: TestClient, monkeypatch):
     assert client.get("/detection/status").json() == {"cameras": {}}
 
 
+def test_camera_post_accepts_flat_dashboard_body(client: TestClient, monkeypatch):
+    captured = []
+
+    def _capture(req):
+        captured.append(req)
+        return {"status": "configured", "cameras": {}}
+
+    monkeypatch.setattr(app_mod.camera_registry, "on_post", _capture)
+    r = client.post(
+        "/cameras",
+        json={
+            "camera_id": 1,
+            "name": "Main Entrance",
+            "rtsp_url": "rtsp://10.0.0.1/stream",
+            "status": "active",
+        },
+    )
+    assert r.status_code == 200
+    assert len(captured) == 1
+    assert captured[0].cameras[0].id == "1"
+    assert captured[0].cameras[0].url == "rtsp://10.0.0.1/stream"
+
+
 def test_camera_endpoints(client: TestClient, monkeypatch):
     monkeypatch.setattr(
         app_mod.camera_registry,

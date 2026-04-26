@@ -25,7 +25,9 @@ Base URL for all examples: `http://localhost:9000`
 
 ## 1. Register Cameras
 
-The body takes a `cameras` array — you can register one or multiple cameras in a single call. The `id` must match the `channelId` used in your tasks.
+The canonical body is **`{ "cameras": [ { "id", "url" }, ... ] }`** — one or more cameras per call. The `id` must match the `channelId` used in your tasks (both are strings after parsing; numeric `id` in JSON is accepted and normalized, e.g. `1` → `"1"`).
+
+**Shortcut (single camera):** you may POST a **flat** object with **`camera_id`** (or **`id`**) and **`rtsp_url`** (or **`url`**). Extra fields such as `name` or `status` are **ignored** by the ML server.
 
 ### Add one camera
 ```bash
@@ -35,6 +37,21 @@ curl -X POST http://localhost:9000/cameras \
     "cameras": [
       {"id": "1", "url": "rtsp://192.168.1.10/stream"}
     ]
+  }'
+```
+
+Both shapes below return the same JSON response.
+
+### Add one camera (flat body — same as above)
+
+```bash
+curl -X POST http://localhost:9000/cameras \
+  -H "Content-Type: application/json" \
+  -d '{
+    "camera_id": "1",
+    "name": "Main Entrance",
+    "rtsp_url": "rtsp://192.168.1.10/stream",
+    "status": "active"
   }'
 ```
 

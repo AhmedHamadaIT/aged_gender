@@ -17,11 +17,11 @@ import re
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
 from fastapi import HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from utils.rtsp_ffmpeg import open_rtsp_videocapture
 
@@ -30,12 +30,44 @@ from utils.rtsp_ffmpeg import open_rtsp_videocapture
 # Schemas
 # ─────────────────────────────────────────────
 class CameraConfig(BaseModel):
-    id : str
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
     url: str
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _id_to_str(cls, v: Any) -> str:
+        if v is None:
+            raise TypeError("id is required")
+        if isinstance(v, bool):
+            raise TypeError("id must be str or int, not bool")
+        return str(v)
 
 
 class CameraSetupRequest(BaseModel):
+    """Batch shape: ``{\"cameras\": [{\"id\", \"url\"}, ...]}``.
+
+    Also accepts a **single flat** body (common from dashboards):
+    ``{\"id\"|\"camera_id\", \"url\"|\"rtsp_url\", ...}`` — extra keys are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
     cameras: list[CameraConfig] = Field(..., min_length=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_flat_single_camera(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("cameras") is not None:
+            return data
+        cam_id = data.get("id", data.get("camera_id"))
+        url = data.get("url", data.get("rtsp_url"))
+        if cam_id is not None and url is not None:
+            return {"cameras": [{"id": cam_id, "url": url}]}
+        return data
 
 
 # ─────────────────────────────────────────────
