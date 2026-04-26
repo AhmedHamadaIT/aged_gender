@@ -178,8 +178,8 @@ class DetectionResource(BaseResource):
             # One task worker process per task
             self._task_processes.setdefault(chan_id, {})
             # Bounded queue between FrameBus and each task worker. Too small + slow
-            # startup (TRT, 4K decode) causes put_nowait drops every frame; override via TASK_QUEUE_MAXSIZE.
-            _tq_max = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "64")))
+            # startup (TRT, 4K decode) causes put_nowait drops; override via TASK_QUEUE_MAXSIZE.
+            _tq_max = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "256")))
             for task_cfg in chan_tasks:
                 task_id = str(task_cfg["taskId"])
                 q = self._manager.Queue(maxsize=_tq_max)

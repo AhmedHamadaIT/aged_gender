@@ -34,7 +34,8 @@ async def stream_metrics(request: Request):
     - ``fps`` / ``fps_actual`` — measured processing rate.
     - ``drop_rate`` / ``decode_error_rate`` — failed ``VideoCapture.read()`` divided by
       (failed reads + frames received); RTSP/decode health, not task-queue backpressure.
-    - ``task_queue_drop_rate`` — ``put_nowait`` failures when fan-out queues are full.
+    - ``task_queue_drop_rate`` — fan-out queue could not accept a frame after coalesce retry.
+    - ``task_queue_coalesced_by_task`` — oldest queued frame dropped to make room (see ``TASK_QUEUE_COALESCE``).
     - ``reconnects`` — RTSP reconnects after a consecutive-read-failure burst.
     - ``latency_estimate_ms`` — EMA of wall time between consecutive yielded frames (jitter / stalls).
     - ``framebus_process_alive`` / ``last_state_update_age_sec`` — reconciled with the parent

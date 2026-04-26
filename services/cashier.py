@@ -119,6 +119,7 @@ from dotenv import load_dotenv
 
 from logger.logger_config import Logger
 from utils import build_image
+from utils.task_payload import task_frame_bgr
 
 # Optional GIF support
 try:
@@ -1980,7 +1981,7 @@ class CashierDrawerTask:
         context: Dict[str, Any] = {
             "camera_id": camera_id,
             "data": {
-                "frame": payload["frame"],
+                "frame": task_frame_bgr(payload),
                 "detection": {"items": list(items), "count": len(items)},
                 "use_case": {},
             },

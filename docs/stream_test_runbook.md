@@ -42,7 +42,7 @@ To persist, add `vm.overcommit_memory = 1` to `/etc/sysctl.conf` and reboot or r
 2. `POST /api/tasks` — register tasks. For `CROSS_LINE` with `enable: true`, `areaPosition` must be a non-empty JSON array of line objects (see `services/cross_line.py`).
 3. `POST /detection/start?camera_id=<id>` — start **one** channel. Recommended to avoid starting every camera that has a task.
 4. To start every enabled task channel: `POST /detection/start?all_channels=true` (use only when you intend to run all channels).
-5. `GET /detection/status` and `GET /stream/metrics` — pipeline health; `task_queue_drop_rate` high means task workers/queues are saturated; see `TASK_QUEUE_MAXSIZE` and `WIDTH` in `.env` / `docker-compose.yml`.
+5. `GET /detection/status` and `GET /stream/metrics` — pipeline health; if `task_queue_drop_rate` stays high, raise `TASK_QUEUE_MAXSIZE`, lower `WIDTH`, use an H.264 substream, and check `task_queue_coalesced_by_task` when `TASK_QUEUE_COALESCE=true`. Default `TASK_QUEUE_INCLUDE_FRAME=false` sends JPEG over the queue (lighter IPC than raw BGR).
 
 ## RTSP / HEVC
 

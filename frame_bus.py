@@ -28,6 +28,7 @@ _DEFAULT_TRACKER_YAML = os.path.join(_repo_root, "cfg", "trackers", "botsort_sta
 import time
 import base64
 import hashlib
+import queue as _queue
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -138,9 +139,72 @@ class FrameBus:
         }
         self._queue_warn_last: Dict[str, float] = {}
         self._queue_warn_interval = float(
-            os.getenv("FRAMEBUS_QUEUE_WARN_INTERVAL_SEC", "2.0")
+            os.getenv("FRAMEBUS_QUEUE_WARN_INTERVAL_SEC", "5.0")
         )
-        self._task_queue_maxsize = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "64")))
+        self._task_queue_maxsize = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "256")))
+        self._task_queue_coalesce = os.getenv("TASK_QUEUE_COALESCE", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        self._include_frame_ndarray = os.getenv(
+            "TASK_QUEUE_INCLUDE_FRAME", "false"
+        ).lower() in ("true", "1", "yes")
+        self._task_queue_coalesced_by_task: Dict[str, int] = {
+            str(k): 0 for k in self.task_queues
+        }
+
+    def _enqueue_task_payload(self, q, tid: str, payload: dict) -> None:
+        """
+        Bounded queue fan-out. When full, optionally drop the oldest item and
+        retry once so workers stay on fresh frames (TASK_QUEUE_COALESCE).
+        """
+        try:
+            q.put_nowait(payload)
+            return
+        except _queue.Full:
+            pass
+        except Exception:
+            self._frames_dropped += 1
+            self._task_queue_drops_by_task[tid] = (
+                self._task_queue_drops_by_task.get(tid, 0) + 1
+            )
+            self._warn_task_queue_full(tid)
+            return
+
+        if self._task_queue_coalesce:
+            try:
+                q.get_nowait()
+                self._task_queue_coalesced_by_task[tid] = (
+                    self._task_queue_coalesced_by_task.get(tid, 0) + 1
+                )
+            except _queue.Empty:
+                pass
+            try:
+                q.put_nowait(payload)
+                return
+            except _queue.Full:
+                pass
+
+        self._frames_dropped += 1
+        self._task_queue_drops_by_task[tid] = (
+            self._task_queue_drops_by_task.get(tid, 0) + 1
+        )
+        self._warn_task_queue_full(tid)
+
+    def _warn_task_queue_full(self, tid: str) -> None:
+        nowt = time.time()
+        if nowt - self._queue_warn_last.get(tid, 0.0) >= self._queue_warn_interval:
+            self._queue_warn_last[tid] = nowt
+            hint = (
+                "Consider raising TASK_QUEUE_MAXSIZE, lowering WIDTH, using a "
+                "lower-resolution RTSP substream, or keep TASK_QUEUE_COALESCE=true "
+                "(drops oldest queued frame for freshest)."
+            )
+            print(
+                f"[{self.camera_id}] Task queue saturated; dropping frame for "
+                f"task {tid} (TASK_QUEUE_MAXSIZE={self._task_queue_maxsize}). {hint}"
+            )
 
     def run(self):
         from stream import QUALITY_LADDER, frames
@@ -185,6 +249,7 @@ class FrameBus:
             "fps_actual"      : 0.0,
             "state_updated_at": time.time(),
             "task_queue_drops_by_task": dict(self._task_queue_drops_by_task),
+            "task_queue_coalesced_by_task": dict(self._task_queue_coalesced_by_task),
         }
 
         if self.save_output:
@@ -262,34 +327,17 @@ class FrameBus:
                     "frame_id"  : frame_count,
                     "timestamp" : datetime.utcnow().isoformat(),
                     "frame_b64" : frame_b64,
-                    "frame"     : resized_frame.copy(),
                     "detection" : {
                         "items": detections,
                         "count": last_det,
                     },
                 }
+                if self._include_frame_ndarray:
+                    payload["frame"] = resized_frame.copy()
 
                 for task_id, q in self.task_queues.items():
                     tid = str(task_id)
-                    try:
-                        q.put_nowait(payload)
-                    except Exception:
-                        self._frames_dropped += 1
-                        self._task_queue_drops_by_task[tid] = (
-                            self._task_queue_drops_by_task.get(tid, 0) + 1
-                        )
-                        nowt = time.time()
-                        if (
-                            nowt - self._queue_warn_last.get(tid, 0.0)
-                            >= self._queue_warn_interval
-                        ):
-                            self._queue_warn_last[tid] = nowt
-                            print(
-                                f"[{self.camera_id}] Task queue full; dropping frame for "
-                                f"task {tid} (TASK_QUEUE_MAXSIZE={self._task_queue_maxsize}). "
-                                f"Consider raising TASK_QUEUE_MAXSIZE, lowering WIDTH, or "
-                                f"using a lower-resolution RTSP substream."
-                            )
+                    self._enqueue_task_payload(q, tid, payload)
 
                 if self.save_output:
                     save_frame(annotated, self.out_dir, frame_count)
@@ -356,6 +404,9 @@ class FrameBus:
                     "task_queue_drop_rate": task_queue_drop_rate,
                     "task_queue_drops_by_task": dict(
                         self._task_queue_drops_by_task
+                    ),
+                    "task_queue_coalesced_by_task": dict(
+                        self._task_queue_coalesced_by_task
                     ),
                     "reconnects"      : reconnects,
                     "latency_estimate_ms": round(self._metrics_inter_frame_ema_ms, 2),

@@ -46,6 +46,7 @@ import cv2
 import numpy as np
 
 from utils import build_image, make_evidence_paths
+from utils.task_payload import task_frame_bgr
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -131,7 +132,7 @@ class MaskHairnetChefHatTask:
         if not self.enable or not self.alarm_types or not self._in_schedule():
             return []
 
-        frame     = payload["frame"]
+        frame     = task_frame_bgr(payload)
         detection = payload["detection"]
 
         persons = [
