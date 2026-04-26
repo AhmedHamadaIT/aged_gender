@@ -96,9 +96,10 @@ services:
       - EMBED_FLUSH_TIMEOUT=3.0
       - REDIS_LIVE_FPS=10
       # FrameBus → task worker queue depth; IPC is lighter when TASK_QUEUE_INCLUDE_FRAME=false (default).
-      - TASK_QUEUE_MAXSIZE=64
+      - TASK_QUEUE_MAXSIZE=8
       # When a task queue is full, drop the oldest pending frame and enqueue the latest (keeps workers fresh).
       - TASK_QUEUE_COALESCE=true
+      - LOG_LEVEL=DEBUG
       # Start coalescing before saturation so slow task workers do not build stale backlog.
       - TASK_QUEUE_COALESCE_THRESHOLD=0.5
       # false = JPEG only over the queue (fast); true = also send raw BGR ndarray (heavy pickle; legacy).
