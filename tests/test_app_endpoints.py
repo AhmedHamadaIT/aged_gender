@@ -30,6 +30,7 @@ def test_openapi_contains_expected_http_paths(client: TestClient):
         "/status",
         "/cameras",
         "/cameras/{cam_id}",
+        "/cameras/{cam_id}/tasks",
         "/api/tasks",
         "/api/tasks/{task_id}",
         "/detection/start",
@@ -68,6 +69,23 @@ def test_basic_health_endpoints(client: TestClient, monkeypatch):
     assert client.get("/health").status_code == 200
     assert client.get("/status").json() == {"cameras": {}}
     assert client.get("/detection/status").json() == {"cameras": {}}
+
+
+def test_camera_attach_task_route(client: TestClient, monkeypatch):
+    monkeypatch.setattr(
+        app_mod,
+        "camera_link_task",
+        lambda cam_id, body: {
+            "status": "ok",
+            "camera_id": cam_id,
+            "task": {"taskId": body.task_id},
+        },
+    )
+    r = client.post("/cameras/1/tasks", json={"task_id": 1, "enable": True})
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    r2 = client.post("/cameras/1/tasks", json={"taskId": 2})
+    assert r2.status_code == 200
 
 
 def test_camera_post_accepts_flat_dashboard_body(client: TestClient, monkeypatch):

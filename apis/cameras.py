@@ -7,9 +7,10 @@ Manages camera configuration in memory.
 Cameras can be added/removed while detection is running.
 
 Endpoints (registered in app.py):
-    POST   /cameras          → add one or more cameras
-    GET    /cameras          → list all configured cameras
-    DELETE /cameras/{cam_id} → remove a camera
+    POST   /cameras                  → add one or more cameras
+    GET    /cameras                  → list all configured cameras
+    DELETE /cameras/{cam_id}         → remove a camera
+    POST   /cameras/{cam_id}/tasks   → ensure a task uses this camera (updates channelId if needed)
 """
 
 import os
@@ -21,7 +22,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import cv2
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from utils.rtsp_ffmpeg import open_rtsp_videocapture
 
@@ -68,6 +69,66 @@ class CameraSetupRequest(BaseModel):
         if cam_id is not None and url is not None:
             return {"cameras": [{"id": cam_id, "url": url}]}
         return data
+
+
+class CameraTaskLinkBody(BaseModel):
+    """Body for ``POST /cameras/{camera_id}/tasks``; JSON may use ``taskId`` or ``task_id``."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    task_id: int = Field(..., validation_alias=AliasChoices("task_id", "taskId"))
+    enable: Optional[bool] = None
+
+
+def camera_link_task(cam_id: str, body: CameraTaskLinkBody) -> dict:
+    """Point an existing task at this camera (``channelId``); optional ``enable`` toggle.
+
+    Tasks are normally bound via ``channelId`` on ``POST /api/tasks``. This route is a
+    convenience for clients that register the camera first, then attach tasks.
+    """
+    # Import here to avoid import cycles at module load.
+    from apis.tasks import TaskConfig, task_registry
+
+    cam_id_s = str(cam_id)
+    if camera_registry.get(cam_id_s) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No camera registered with id '{cam_id_s}'. "
+                "Register it via POST /cameras first."
+            ),
+        )
+
+    task_dict = task_registry.get(body.task_id)
+    if task_dict is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No task with taskId {body.task_id}. "
+                "Create it via POST /api/tasks first."
+            ),
+        )
+
+    t = dict(task_dict)
+    changed = False
+    if str(t.get("channelId", "")) != cam_id_s:
+        t["channelId"] = cam_id_s
+        changed = True
+    if body.enable is not None and bool(t.get("enable", True)) != body.enable:
+        t["enable"] = body.enable
+        changed = True
+
+    if changed:
+        task_registry.upsert(TaskConfig(**t))
+        out_status = "updated"
+    else:
+        out_status = "ok"
+
+    return {
+        "status": out_status,
+        "camera_id": cam_id_s,
+        "task": task_registry.require(body.task_id),
+    }
 
 
 # ─────────────────────────────────────────────

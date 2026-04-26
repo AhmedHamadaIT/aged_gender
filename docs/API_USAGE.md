@@ -117,6 +117,21 @@ curl -X DELETE http://localhost:9000/cameras/1
 }
 ```
 
+### Link a task to this camera (optional)
+
+Tasks are **normally** tied to cameras by setting **`channelId`** on **`POST /api/tasks`** to the same string as the camera **`id`**. Some clients register the RTSP camera first, then want an explicit “attach” call — use:
+
+`POST /cameras/{camera_id}/tasks` with JSON **`taskId`** or **`task_id`**, and optional **`enable`** (updates the task when it differs).
+
+```bash
+curl -X POST http://localhost:9000/cameras/1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"taskId": 1, "enable": true}'
+```
+
+- **`404`** if the camera is not registered (`POST /cameras` first) or the task does not exist (`POST /api/tasks` first).
+- **`status`**: `"ok"` if nothing changed, `"updated"` if `channelId` and/or `enable` was written.
+
 ---
 
 ## 2. Register Tasks

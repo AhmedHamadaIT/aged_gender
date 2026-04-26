@@ -6,6 +6,7 @@ Application entry point — owns all routes and startup.
 Workflow:
     1. POST /cameras                  → register cameras (id → rtsp_url)
     2. POST /api/tasks                → register tasks (algorithmType, channelId, config)
+       POST /cameras/{id}/tasks       → optional: point an existing task at this camera
     3. POST /detection/start          → start processing
     4. GET  /detection/stream         → SSE stream of task events (broadcast, optional filters)
     5. GET  /detection/status         → monitor camera status
@@ -45,7 +46,12 @@ from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, Query, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
-from apis.cameras   import camera_registry, CameraSetupRequest
+from apis.cameras import (
+    CameraSetupRequest,
+    CameraTaskLinkBody,
+    camera_link_task,
+    camera_registry,
+)
 from apis.cashier   import router as cashier_router
 from apis.detection import detection
 from apis.stream_metrics import router as stream_metrics_router
@@ -138,6 +144,11 @@ def camera_list():
 @app.delete("/cameras/{cam_id}")
 def camera_delete(cam_id: str):
     return camera_registry.on_delete(cam_id)
+
+
+@app.post("/cameras/{cam_id}/tasks")
+def camera_attach_task(cam_id: str, body: CameraTaskLinkBody):
+    return camera_link_task(cam_id, body)
 
 
 # ─────────────────────────────────────────────
