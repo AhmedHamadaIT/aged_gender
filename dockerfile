@@ -40,6 +40,12 @@ RUN set -eux; \
 # ── Working directory ────────────────────────
 WORKDIR /app
 
+# L4T base images may set pip's primary index to Jetson AI Lab. If that host is unreachable
+# (DNS "Name or service not known"), every package (e.g. seaborn) fails. Prefer PyPI first;
+# Jetson-specific wheels (ultralytics, onnxruntime-gpu) still resolve via extra index.
+ENV PIP_INDEX_URL=https://pypi.org/simple \
+    PIP_EXTRA_INDEX_URL=https://pypi.jetson-ai-lab.io/jp6/cu126
+
 # Base L4T images often set pip index-url to Jetson-only mirrors; Ultralytics may try to
 # `pip install lap` at runtime and fail DNS / miss wheels. Force lap from PyPI.
 RUN python3 -m pip install --no-cache-dir "lap>=0.5.12" \
@@ -51,11 +57,18 @@ RUN python3 -m pip install --no-cache-dir "lap>=0.5.12" \
 # Use --no-deps on ultralytics to prevent pip from pulling in CPU torch
 # Install all other ultralytics deps manually
 RUN python3 -m pip install --no-cache-dir --no-deps \
-        --index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
-        --extra-index-url https://pypi.org/simple \
+        --index-url https://pypi.org/simple \
+        --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
+        --trusted-host pypi.org \
+        --trusted-host files.pythonhosted.org \
+        --trusted-host pypi.jetson-ai-lab.io \
         ultralytics && \
     python3 -m pip install --no-cache-dir \
-        --extra-index-url https://pypi.org/simple \
+        --index-url https://pypi.org/simple \
+        --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
+        --trusted-host pypi.org \
+        --trusted-host files.pythonhosted.org \
+        --trusted-host pypi.jetson-ai-lab.io \
         opencv-python-headless \
         "numpy<2" \
         requests \
@@ -81,17 +94,15 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
 # Jetson AI Lab wheels provide CUDAExecutionProvider (+ TensorRT EP when compatible).
 RUN python3 -m pip uninstall -y onnxruntime onnxruntime-gpu 2>/dev/null || true; \
     python3 -m pip install --no-cache-dir onnxruntime-gpu \
+        --index-url https://pypi.org/simple \
         --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
-        --extra-index-url https://pypi.org/simple \
-        --trusted-host pypi.jetson-ai-lab.io \
         --trusted-host pypi.org \
-        --trusted-host files.pythonhosted.org
+        --trusted-host files.pythonhosted.org \
+        --trusted-host pypi.jetson-ai-lab.io
 
 # RTSP stability for OpenCV/FFmpeg inside the container
 ENV OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|timeout;5000000|reconnect;1|reconnect_delay_max;5"
 ENV PYTHONUNBUFFERED=1
-# If Ultralytics still spawns pip for optional deps, prefer PyPI as a fallback index.
-ENV PIP_EXTRA_INDEX_URL=https://pypi.org/simple
 
 # ── Create directories ───────────────────────
 RUN mkdir -p /app/models /app/videos /app/outputs
