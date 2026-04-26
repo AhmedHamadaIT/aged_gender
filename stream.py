@@ -32,6 +32,48 @@ STREAM_RECONNECT_BASE_SEC  = max(0.1, float(os.getenv("STREAM_RECONNECT_BASE_SEC
 STREAM_RECONNECT_MAX_SEC   = max(STREAM_RECONNECT_BASE_SEC, float(os.getenv("STREAM_RECONNECT_MAX_SEC", "30")))
 
 
+def _parse_quality_ladder(raw: str) -> list[dict[str, int | str]]:
+    ladder: list[dict[str, int | str]] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.lower().split("x")
+        if len(parts) != 3:
+            ladder.append({"label": item})
+            continue
+        try:
+            width, height, fps = (int(part) for part in parts)
+        except ValueError:
+            ladder.append({"label": item})
+            continue
+        ladder.append(
+            {
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "label": f"{width}x{height}@{fps}fps",
+            }
+        )
+    return ladder
+
+
+QUALITY_LADDER = _parse_quality_ladder(
+    os.getenv("QUALITY_LADDER", "1920x1080x10,1280x720x10,854x480x8")
+)
+_current_quality_label = QUALITY_LADDER[0]["label"] if QUALITY_LADDER else "live"
+_current_decode_failures = 0
+_current_decoder_type = "cpu"
+_current_hw_decoder_requested = (
+    os.getenv("RTSP_HWDECODER")
+    if os.getenv("RTSP_ENABLE_GPU_DECODE", "false").lower() in ("true", "1", "yes")
+    else None
+)
+_current_hw_decoder_active = False
+_current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
+_current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
+
+
 class _RTSPReader:
     def __init__(self, url: str):
         self.url = url
@@ -98,13 +140,16 @@ def _reconnect_delay_seconds(attempt_index: int) -> float:
     return min(STREAM_RECONNECT_MAX_SEC, delay)
 
 
-def frames(source: str = None):
+def frames(source: str = None, camera_id: str = None):
     """
     Generator yielding BGR numpy frames.
 
     Args:
         source: RTSP URL, video file path, or None (uses .env defaults)
+        camera_id: optional caller context for compatibility with FrameBus.
     """
+    global _current_decode_failures
+
     if source is None:
         source = RTSP_URL if USE_STREAM else INPUT_VIDEO
 
@@ -120,6 +165,7 @@ def frames(source: str = None):
             frame = reader.read_frame()
             if frame is None:
                 consecutive_fails += 1
+                _current_decode_failures += 1
                 if consecutive_fails >= RTSP_MAX_CONSECUTIVE_FAILS:
                     if is_rtsp:
                         wait = _reconnect_delay_seconds(reconnect_streak)
