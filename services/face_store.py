@@ -7,7 +7,16 @@ Supports:
     - Library CRUD (create / delete / list)
     - Person CRUD (add / delete / list with multi-image registration)
     - Cross-library search (lib_ids="-1" searches all)
+    - Multi-embedding voting (max score per person across all their embeddings)
     - Stranger store (separate FAISS index for unknowns, auto-dedup)
+
+Index type: IndexIDMap(IndexFlatIP)
+    - IndexFlatIP: exhaustive inner-product search (cosine on L2-normalised vectors)
+    - IndexIDMap: wraps it with custom int64 IDs, enabling remove_ids() for
+      incremental person deletion without full index rebuild.
+
+    FAISS ID scheme: person_id * 10000 + embedding_index_within_person
+    This gives up to 10,000 embeddings per person (far more than needed).
 
 Storage layout on disk:
     {FACE_STORAGE_DIR}/
@@ -84,12 +93,30 @@ class LibraryMeta:
 
 
 # ─────────────────────────────────────────────
+# FAISS ID helpers
+# ─────────────────────────────────────────────
+_EMBEDDINGS_PER_PERSON = 10000   # max embeddings per person (ID namespace)
+
+
+def _make_faiss_id(person_id: int, emb_idx: int) -> int:
+    """Deterministic FAISS ID: person_id * 10000 + emb_idx."""
+    return person_id * _EMBEDDINGS_PER_PERSON + emb_idx
+
+
+def _person_from_faiss_id(faiss_id: int) -> int:
+    """Extract person_id from a FAISS ID."""
+    return faiss_id // _EMBEDDINGS_PER_PERSON
+
+
+# ─────────────────────────────────────────────
 # Face Store
 # ─────────────────────────────────────────────
 class FaceStore:
     """
     Thread-safe FAISS-backed face embedding store.
-    Uses IndexFlatIP (inner-product on normalised vectors = cosine similarity).
+
+    Uses IndexIDMap(IndexFlatIP) — inner-product on normalised vectors = cosine
+    similarity, with custom int64 IDs for incremental add/remove.
     """
 
     EMBEDDING_DIM = 512
@@ -101,8 +128,10 @@ class FaceStore:
         self._lock        = threading.RLock()
 
         self._libraries : Dict[int, LibraryMeta] = {}
-        self._indices   : Dict[int, object]      = {}
-        self._emb_maps  : Dict[int, List[Tuple[int, int]]] = {}
+        self._indices   : Dict[int, object]      = {}   # lib_id → IndexIDMap
+
+        # O(1) lookup: FAISS ID → person_id (per library)
+        self._id_to_person : Dict[int, Dict[int, int]] = {}  # {lib_id: {faiss_id: person_id}}
 
         self._stranger_index   = None
         self._stranger_meta    : List[dict] = []
@@ -132,7 +161,7 @@ class FaceStore:
                 raw = json.loads(meta_path.read_text())
                 lib_id = raw["lib_id"]
                 lib_meta = LibraryMeta(lib_id=lib_id, name=raw.get("name", f"Library {lib_id}"))
-                emb_map = []
+                id_map = {}
                 for p in raw.get("persons", []):
                     pr = PersonRecord(
                         person_id=p["person_id"], name=p["name"],
@@ -141,13 +170,15 @@ class FaceStore:
                     )
                     lib_meta.persons[pr.person_id] = pr
                     for idx in pr.embedding_indices:
-                        emb_map.append((pr.person_id, idx))
+                        id_map[idx] = pr.person_id
                 self._libraries[lib_id] = lib_meta
-                self._emb_maps[lib_id]  = emb_map
+                self._id_to_person[lib_id] = id_map
+
                 if index_path.exists():
                     self._indices[lib_id] = faiss.read_index(str(index_path))
                 else:
-                    self._indices[lib_id] = faiss.IndexFlatIP(self.EMBEDDING_DIM)
+                    self._indices[lib_id] = faiss.IndexIDMap(
+                        faiss.IndexFlatIP(self.EMBEDDING_DIM))
             except Exception as e:
                 print(f"[FaceStore] Failed to load {lib_path.name}: {e}")
 
@@ -203,8 +234,9 @@ class FaceStore:
             if lib_id in self._libraries:
                 raise ValueError(f"Library {lib_id} already exists")
             self._libraries[lib_id] = LibraryMeta(lib_id=lib_id, name=name)
-            self._indices[lib_id]   = faiss.IndexFlatIP(self.EMBEDDING_DIM)
-            self._emb_maps[lib_id]  = []
+            self._indices[lib_id]   = faiss.IndexIDMap(
+                faiss.IndexFlatIP(self.EMBEDDING_DIM))
+            self._id_to_person[lib_id] = {}
             lib_path = self._lib_dir / f"lib_{lib_id}"
             lib_path.mkdir(parents=True, exist_ok=True)
             (lib_path / "faces").mkdir(exist_ok=True)
@@ -217,7 +249,7 @@ class FaceStore:
                 return False
             del self._libraries[lib_id]
             self._indices.pop(lib_id, None)
-            self._emb_maps.pop(lib_id, None)
+            self._id_to_person.pop(lib_id, None)
             lib_path = self._lib_dir / f"lib_{lib_id}"
             if lib_path.exists():
                 shutil.rmtree(lib_path)
@@ -258,9 +290,8 @@ class FaceStore:
             if person_id in lib.persons:
                 raise ValueError(f"Person {person_id} already exists in library {lib_id}")
 
-            index   = self._indices[lib_id]
-            emb_map = self._emb_maps[lib_id]
-            start_idx   = index.ntotal
+            index  = self._indices[lib_id]
+            id_map = self._id_to_person[lib_id]
             saved_faces = []
 
             if face_images:
@@ -275,10 +306,11 @@ class FaceStore:
             for i, emb in enumerate(embeddings):
                 emb_np = np.array(emb, dtype=np.float32).reshape(1, -1)
                 faiss.normalize_L2(emb_np)
-                index.add(emb_np)
-                idx = start_idx + i
-                emb_indices.append(idx)
-                emb_map.append((person_id, idx))
+                faiss_id = _make_faiss_id(person_id, i)
+                ids = np.array([faiss_id], dtype=np.int64)
+                index.add_with_ids(emb_np, ids)
+                emb_indices.append(faiss_id)
+                id_map[faiss_id] = person_id
 
             lib.persons[person_id] = PersonRecord(
                 person_id=person_id, name=name,
@@ -296,40 +328,26 @@ class FaceStore:
             if person_id not in lib.persons:
                 return False
             person = lib.persons.pop(person_id)
+
+            # Remove face images from disk
             faces_dir = self._lib_dir / f"lib_{lib_id}" / "faces"
             for fname in person.face_images:
                 fpath = faces_dir / fname
                 if fpath.exists():
                     fpath.unlink()
-            self._rebuild_index(lib_id)
+
+            # Remove embeddings from FAISS index by ID (no rebuild needed)
+            if person.embedding_indices and lib_id in self._indices:
+                ids_to_remove = np.array(person.embedding_indices, dtype=np.int64)
+                self._indices[lib_id].remove_ids(ids_to_remove)
+
+            # Clean up the id_map
+            id_map = self._id_to_person.get(lib_id, {})
+            for idx in person.embedding_indices:
+                id_map.pop(idx, None)
+
             self._save_library(lib_id)
             return True
-
-    def _rebuild_index(self, lib_id: int):
-        faiss = _get_faiss()
-        old_index = self._indices.get(lib_id)
-        lib       = self._libraries[lib_id]
-        new_index = faiss.IndexFlatIP(self.EMBEDDING_DIM)
-        new_map   = []
-
-        if old_index is not None and old_index.ntotal > 0:
-            all_vecs = faiss.rev_swig_ptr(
-                old_index.get_xb(), old_index.ntotal * self.EMBEDDING_DIM)
-            all_vecs = np.array(all_vecs).reshape(old_index.ntotal, self.EMBEDDING_DIM)
-            idx_counter = 0
-            for pid, person in lib.persons.items():
-                new_indices = []
-                for old_idx in person.embedding_indices:
-                    if old_idx < len(all_vecs):
-                        vec = all_vecs[old_idx].reshape(1, -1).astype(np.float32)
-                        new_index.add(vec)
-                        new_indices.append(idx_counter)
-                        new_map.append((pid, idx_counter))
-                        idx_counter += 1
-                person.embedding_indices = new_indices
-
-        self._indices[lib_id]  = new_index
-        self._emb_maps[lib_id] = new_map
 
     def list_persons(self, lib_id: int) -> Optional[List[dict]]:
         with self._lock:
@@ -345,6 +363,13 @@ class FaceStore:
 
     def search(self, embedding: np.ndarray, lib_ids: str = "-1",
                top_k: int = 1, threshold: float = 70.0) -> List[MatchResult]:
+        """
+        Search across libraries for the closest matching person(s).
+
+        Multi-embedding voting: when a person has multiple enrolled embeddings,
+        the best (highest) score across all their embeddings is used.
+        This gives robust matching without averaging.
+        """
         faiss = _get_faiss()
         with self._lock:
             query = np.array(embedding, dtype=np.float32).reshape(1, -1)
@@ -353,39 +378,53 @@ class FaceStore:
             target_libs = (list(self._libraries.keys()) if lib_ids == "-1"
                            else [int(x.strip()) for x in lib_ids.split(",") if x.strip()])
 
-            all_results = []
+            # Collect best score per (lib_id, person_id)
+            person_scores: Dict[Tuple[int, int], float] = {}
+
             for lid in target_libs:
                 if lid not in self._indices:
                     continue
                 index = self._indices[lid]
                 if index.ntotal == 0:
                     continue
-                k = min(top_k, index.ntotal)
-                scores, indices = index.search(query, k)
-                lib_meta = self._libraries[lid]
-                emb_map  = self._emb_maps[lid]
+
+                # Search for more results to allow voting across multiple embeddings
+                k = min(top_k * 5, index.ntotal)
+                scores, ids = index.search(query, k)
+                id_map = self._id_to_person.get(lid, {})
 
                 for i in range(k):
-                    if indices[0][i] < 0:
+                    faiss_id = int(ids[0][i])
+                    if faiss_id < 0:
                         continue
                     sim_score = float(scores[0][i]) * 100.0
                     if sim_score < threshold:
                         continue
-                    faiss_idx = int(indices[0][i])
-                    pid = None
-                    for person_id, emb_idx in emb_map:
-                        if emb_idx == faiss_idx:
-                            pid = person_id
-                            break
+
+                    # O(1) lookup: FAISS ID → person_id
+                    pid = id_map.get(faiss_id)
                     if pid is None:
-                        continue
-                    person = lib_meta.persons.get(pid)
-                    if person is None:
-                        continue
-                    all_results.append(MatchResult(
-                        person_id=pid, person_name=person.name, lib_id=lid,
-                        score=round(sim_score, 1),
-                        face_image=person.face_images[0] if person.face_images else ""))
+                        # Fallback: derive from FAISS ID scheme
+                        pid = _person_from_faiss_id(faiss_id)
+
+                    key = (lid, pid)
+                    # Keep the best score for this person (max voting)
+                    if key not in person_scores or sim_score > person_scores[key]:
+                        person_scores[key] = sim_score
+
+            # Build results sorted by score
+            all_results = []
+            for (lid, pid), score in person_scores.items():
+                lib_meta = self._libraries.get(lid)
+                if lib_meta is None:
+                    continue
+                person = lib_meta.persons.get(pid)
+                if person is None:
+                    continue
+                all_results.append(MatchResult(
+                    person_id=pid, person_name=person.name, lib_id=lid,
+                    score=round(score, 1),
+                    face_image=person.face_images[0] if person.face_images else ""))
 
             all_results.sort(key=lambda r: r.score, reverse=True)
             return all_results[:top_k]

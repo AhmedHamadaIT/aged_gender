@@ -11,6 +11,15 @@ Receives per-frame payloads from FrameBus. Each Detection in the payload
 already carries a track_id assigned by BoT-SORT, which is used to avoid
 re-processing the same face across consecutive frames.
 
+Face detection pipeline:
+    1. FrameBus sends the full frame + YOLO person detections (with track IDs)
+    2. InsightFace runs ONCE on the full frame:
+       - RetinaFace detection → face bounding boxes + 5-point landmarks
+       - Similarity-transform alignment using 5-point landmarks
+       - ArcFace 512-d embedding extraction on aligned 112×112 face
+    3. Detected faces are associated to tracked persons via IoU / containment
+    4. Each face is matched against registered libraries (FAISS cosine search)
+
 Two operation modes:
     - Attendance  → match against registered face libraries, log check-ins
     - Surveillance → detect unknown persons, store in stranger index
@@ -130,28 +139,21 @@ class FaceRecognitionTask:
 
         active_track_ids = set()
 
+        # ── Run InsightFace ONCE on the full frame ────────────────────────
+        # Returns list of (FaceDetection, person_det) pairs, with each face
+        # already associated to a tracked person via IoU / containment.
+        face_person_pairs = self._engine.detect_and_embed_full_frame(
+            frame, persons, det_thresh=0.5,
+        )
+
+        for face_det, person_det in face_person_pairs:
+            active_track_ids.add(person_det.track_id)
+            face_events = self._process_face(face_det, person_det, frame, timestamp)
+            events.extend(face_events)
+
+        # Also track persons with no face detected (for fail counting)
         for det in persons:
             active_track_ids.add(det.track_id)
-
-            # Crop person region from frame
-            h, w = frame.shape[:2]
-            x1 = max(0, det.x1)
-            y1 = max(0, det.y1)
-            x2 = min(w, det.x2)
-            y2 = min(h, det.y2)
-            if x2 <= x1 or y2 <= y1:
-                continue
-
-            person_crop = frame[y1:y2, x1:x2]
-
-            # Detect faces within person crop
-            faces = self._engine.detect_and_embed(person_crop, det_thresh=0.5)
-
-            for face_det in faces:
-                # Offset face bbox from crop-space to frame-space
-                face_det.offset(x1, y1)
-                face_events = self._process_face(face_det, det, frame, timestamp)
-                events.extend(face_events)
 
         # Clean up fail tracker for tracks no longer in frame
         self._fail_tracker = {

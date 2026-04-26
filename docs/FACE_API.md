@@ -7,9 +7,33 @@ This module provides a robust face recognition system for the `ml-server`, backe
 The system is split into four primary components:
 
 1. **API Router (`apis/face_lib.py`)**: Exposes REST endpoints for managing face libraries, people, strangers, and single-image recognition queries.
-2. **Face Store (`services/face_store.py`)**: A thread-safe, FAISS-backed face embedding and metadata store. It manages distinct libraries as well as a separate surveillance index for unknown (stranger) faces.
-3. **Face Engine (`services/face_engine.py`)**: An `InsightFace` wrapper that extracts 512-d embeddings, bounding boxes, pose estimations (yaw/pitch), and quality heuristics.
-4. **Task Pipeline (`services/face_recognition.py`)**: A task processor designed to be executed per-frame against a real-time stream. It implements the `FaceRecognitionTask` running attendance / surveillance tracking over track IDs.
+2. **Face Store (`services/face_store.py`)**: A thread-safe, FAISS-backed face embedding and metadata store. Uses `IndexIDMap(IndexFlatIP)` for cosine similarity search with incremental add/remove support. Manages distinct libraries as well as a separate surveillance index for unknown (stranger) faces.
+3. **Face Engine (`services/face_engine.py`)**: An `InsightFace` wrapper that runs the full face pipeline: RetinaFace detection → 5-point landmark alignment (similarity transform) → ArcFace 512-d embedding extraction. Runs once on the full frame for efficiency.
+4. **Task Pipeline (`services/face_recognition.py`)**: A task processor executed per-frame against a real-time stream. InsightFace detects faces on the full frame and associates them to YOLO-tracked persons via IoU overlap. Implements attendance / surveillance tracking.
+
+### Face Detection Pipeline (per frame)
+
+```
+Frame from FrameBus
+    │
+    ├── YOLO BoT-SORT → person bounding boxes + track IDs
+    │
+    ├── InsightFace (single inference on full frame):
+    │   ├── RetinaFace → face bboxes + 5-point landmarks
+    │   ├── Similarity-transform alignment → 112×112 aligned face
+    │   └── ArcFace → 512-d normalised embedding
+    │
+    ├── Face-to-Person association (IoU / containment)
+    │
+    └── FAISS cosine search → identity match or stranger
+```
+
+### Embedding Index Design
+
+- **Index type**: `IndexIDMap(IndexFlatIP)` — exhaustive inner-product search on L2-normalised vectors (equivalent to cosine similarity), wrapped with custom int64 IDs.
+- **FAISS ID scheme**: `person_id * 10000 + embedding_index` — enables `remove_ids()` for O(1) person deletion without full index rebuild.
+- **Multi-embedding voting**: When a person has multiple enrolled images, the best (highest) cosine score across all their embeddings is used for matching.
+- **Incremental updates**: Adding/removing persons updates the FAISS index in-place. No rebuild required.
 
 ---
 
@@ -43,13 +67,13 @@ Add or remove registered identities from a specified library.
 - **`POST /api/face/lib/{lib_id}/persons`**
   - **Description**: Add a new person with multiple images to a library.
   - **Form/Multipart Data**: `person_id` (int), `name` (str), `images` (List[UploadFile])
-  - **Behavior**: Detects faces in all uploaded images and stores their embeddings in the FAISS index.
+  - **Behavior**: Detects faces in all uploaded images and stores their embeddings in the FAISS index. Each image produces one 512-d embedding. Multiple images per person improve matching robustness (multi-embedding voting).
 
 - **`GET /api/face/lib/{lib_id}/persons`**
   - **Description**: List all people in a specific library.
 
 - **`DELETE /api/face/lib/{lib_id}/persons/{person_id}`**
-  - **Description**: Remove a person from the library and rebuild the FAISS index.
+  - **Description**: Remove a person from the library. Uses FAISS `remove_ids()` — no full index rebuild needed.
 
 ### One-Shot Recognition
 
@@ -118,8 +142,8 @@ The Face DB components generate data on-disk with the following layout (controll
 data/face/
 ├── libraries/
 │   └── lib_{id}/
-│       ├── index.faiss
-│       ├── metadata.json
+│       ├── index.faiss        ← IndexIDMap(IndexFlatIP) with custom int64 IDs
+│       ├── metadata.json      ← persons, embedding indices, face image paths
 │       └── faces/
 │           └── person_{id}_{idx}.jpg
 └── surveillance/
@@ -127,3 +151,18 @@ data/face/
     ├── strangers_meta.json
     └── faces/
 ```
+
+### How Incremental Updates Work
+
+- **Adding a person**: Embeddings are added to the FAISS index with deterministic IDs (`person_id * 10000 + emb_idx`). Metadata JSON is updated. No rebuild.
+- **Removing a person**: FAISS `remove_ids()` deletes the embeddings by ID. Face images are deleted from disk. No rebuild.
+- **Startup**: All libraries and indices are loaded from disk. The ID-to-person mapping is rebuilt from metadata.
+
+### How Similarity Thresholding Works
+
+1. Query embedding is L2-normalised.
+2. FAISS inner-product search returns cosine similarities (0.0–1.0).
+3. Scores are scaled to 0–100 range.
+4. Per-person max score is computed (multi-embedding voting).
+5. Results below the threshold are filtered out.
+6. Top-k results are returned sorted by score.

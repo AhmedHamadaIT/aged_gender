@@ -10,6 +10,9 @@ Usage:
     engine = FaceEngine()
     faces  = engine.detect_and_embed(bgr_frame)
     emb    = engine.embedding_from_image(bgr_image)
+
+    # Full-frame detection for task pipeline (associates faces to persons via IoU)
+    pairs = engine.detect_and_embed_full_frame(bgr_frame, person_detections)
 """
 
 import os
@@ -66,6 +69,11 @@ class FaceEngine:
     """
     InsightFace detection + ArcFace embedding engine.
     Initialised once per worker process — model loaded in __init__.
+
+    Face pipeline (handled internally by InsightFace app.get()):
+        1. RetinaFace detection → bounding boxes + 5-point landmarks
+        2. Similarity-transform alignment using 5-point landmarks
+        3. ArcFace embedding extraction on the aligned 112×112 face
     """
 
     EMBEDDING_DIM = 512
@@ -81,9 +89,12 @@ class FaceEngine:
 
         print(f"[FaceEngine] Loading {model_name} (det_size={det_size}, ctx={ctx_id})")
 
+        # Only load detection + recognition. The recognition module does its own
+        # 5-point landmark alignment internally — no need for the heavy
+        # landmark_2d_106 model (saves ~100MB GPU memory on Jetson).
         self._app = FaceAnalysis(
             name=model_name,
-            allowed_modules=["detection", "recognition", "landmark_2d_106"],
+            allowed_modules=["detection", "recognition"],
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
         )
         self._app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size))
@@ -91,6 +102,96 @@ class FaceEngine:
 
         loaded_models = list(self._app.models.keys()) if isinstance(self._app.models, dict) else [getattr(m, "taskname", str(m)) for m in self._app.models]
         print(f"[FaceEngine] Ready — models: {loaded_models}")
+
+    # ── Full-frame detection for task pipeline ─────────────────────────────
+
+    def detect_and_embed_full_frame(
+        self,
+        frame: np.ndarray,
+        person_detections: list,
+        det_thresh: float = 0.5,
+    ) -> List[Tuple["FaceDetection", object]]:
+        """
+        Run face detection on the **full frame** and associate each detected
+        face with a tracked person via bounding box IoU overlap.
+
+        This replaces the old approach of cropping each YOLO person bbox and
+        running InsightFace per-crop. Benefits:
+            - One inference pass instead of N (one per person)
+            - Faces detected at native resolution with full context
+            - InsightFace alignment works on the original image (not a crop)
+
+        Args:
+            frame:             BGR frame (full resolution).
+            person_detections: List of Detection objects from FrameBus
+                               (each has .x1/.y1/.x2/.y2 and .track_id).
+            det_thresh:        Minimum face detection confidence.
+
+        Returns:
+            List of (FaceDetection, person_det) pairs.
+            Faces that don't overlap any person bbox are skipped.
+        """
+        faces = self._app.get(frame)
+        results = []
+
+        h, w = frame.shape[:2]
+
+        for face in faces:
+            if float(face.det_score) < det_thresh:
+                continue
+
+            self._face_counter += 1
+            fx1, fy1, fx2, fy2 = map(int, face.bbox)
+            fx1, fy1 = max(0, fx1), max(0, fy1)
+            fx2, fy2 = min(w, fx2), min(h, fy2)
+
+            if fx2 <= fx1 or fy2 <= fy1:
+                continue
+
+            # Find the person bbox with the highest IoU overlap
+            best_person = None
+            best_iou    = 0.0
+
+            for det in person_detections:
+                iou = self._compute_iou(
+                    (fx1, fy1, fx2, fy2),
+                    (det.x1, det.y1, det.x2, det.y2),
+                )
+                # Face bbox should be contained within person bbox.
+                # Use a low IoU threshold since face is much smaller than person.
+                if iou > best_iou:
+                    best_iou    = iou
+                    best_person = det
+
+            # Also accept containment: face center inside person bbox
+            if best_person is None:
+                face_cx = (fx1 + fx2) // 2
+                face_cy = (fy1 + fy2) // 2
+                for det in person_detections:
+                    if det.x1 <= face_cx <= det.x2 and det.y1 <= face_cy <= det.y2:
+                        best_person = det
+                        break
+
+            if best_person is None:
+                continue
+
+            yaw, pitch = self._estimate_pose(face)
+            quality    = self._estimate_quality(face, frame)
+
+            face_det = FaceDetection(
+                face_id    = self._face_counter,
+                bbox       = (fx1, fy1, fx2, fy2),
+                confidence = float(face.det_score),
+                quality    = quality,
+                yaw        = yaw,
+                pitch      = pitch,
+                embedding  = face.normed_embedding if hasattr(face, "normed_embedding") else None,
+            )
+            results.append((face_det, best_person))
+
+        return results
+
+    # ── Standalone detection (used by API endpoints) ───────────────────────
 
     def detect_and_embed(
         self,
@@ -143,7 +244,30 @@ class FaceEngine:
         best = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
         return best.normed_embedding if hasattr(best, "normed_embedding") else None
 
-    # ── Pose estimation ───────────────────────────────────────────────────────
+    # ── IoU computation ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_iou(
+        box_a: Tuple[int, int, int, int],
+        box_b: Tuple[int, int, int, int],
+    ) -> float:
+        """Compute intersection-over-union between two (x1,y1,x2,y2) boxes."""
+        xa = max(box_a[0], box_b[0])
+        ya = max(box_a[1], box_b[1])
+        xb = min(box_a[2], box_b[2])
+        yb = min(box_a[3], box_b[3])
+
+        inter = max(0, xb - xa) * max(0, yb - ya)
+        if inter == 0:
+            return 0.0
+
+        area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+        area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+        union  = area_a + area_b - inter
+
+        return inter / union if union > 0 else 0.0
+
+    # ── Pose estimation ───────────────────────────────────────────────────
 
     @staticmethod
     def _estimate_pose(face) -> Tuple[float, float]:
@@ -179,7 +303,7 @@ class FaceEngine:
         except Exception:
             return (0.0, 0.0)
 
-    # ── Quality estimation ────────────────────────────────────────────────────
+    # ── Quality estimation ────────────────────────────────────────────────
 
     @staticmethod
     def _estimate_quality(face, frame: np.ndarray) -> float:
