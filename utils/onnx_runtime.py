@@ -50,7 +50,11 @@ def select_onnx_execution_providers(
 ) -> List[ProviderEntry]:
     """
     Return a provider list suitable for ort.InferenceSession(..., providers=...).
-    Order: TensorRT (optional) -> CUDA -> CPU.
+
+    Order is controlled by ``ONNX_EXECUTION_PROVIDERS_ORDER``:
+    - ``tensorrt_first`` (default): TensorRT -> CUDA -> CPU
+    - ``cuda_first``: CUDA -> TensorRT -> CPU (helps some Jetson ORT builds where TRT EP misbehaves)
+    - ``cuda_only``: CUDA -> CPU (no TensorRT; set ``ONNX_ALLOW_TENSORRT=0`` for the same effect)
     """
     if os.getenv("ONNX_ALLOW_TENSORRT", "1").lower() not in (
         "1",
@@ -60,15 +64,31 @@ def select_onnx_execution_providers(
     ):
         allow_tensorrt = False
 
+    order = os.getenv(
+        "ONNX_EXECUTION_PROVIDERS_ORDER", "tensorrt_first"
+    ).strip().lower()
+    if order == "cuda_only":
+        allow_tensorrt = False
+
     available = set(ort.get_available_providers())
     selected: List[ProviderEntry] = []
 
+    trt: List[ProviderEntry] = []
     if allow_tensorrt and "TensorrtExecutionProvider" in available:
-        selected.append(("TensorrtExecutionProvider", _tensorrt_options()))
+        trt.append(("TensorrtExecutionProvider", _tensorrt_options()))
+
+    cuda: List[ProviderEntry] = []
     if "CUDAExecutionProvider" in available:
-        selected.append("CUDAExecutionProvider")
+        cuda.append("CUDAExecutionProvider")
+
+    cpu: List[ProviderEntry] = []
     if "CPUExecutionProvider" in available:
-        selected.append("CPUExecutionProvider")
+        cpu.append("CPUExecutionProvider")
+
+    if order == "cuda_first":
+        selected = cuda + trt + cpu
+    else:
+        selected = trt + cuda + cpu
 
     if not selected:
         log.warning(

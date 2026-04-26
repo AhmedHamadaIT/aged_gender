@@ -52,7 +52,11 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
       - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Include `video` for NVDEC/NVENC when RTSP_ENABLE_GPU_DECODE=true (Jetson Orin).
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # Jetson / ONNX: if TensorRT EP errors (e.g. vendor/card quirks), try:
+      #   ONNX_EXECUTION_PROVIDERS_ORDER=cuda_first
+      # or disable TRT: ONNX_ALLOW_TENSORRT=0
       # Default for in-compose Redis (avoids localhost:6379 inside the container)
       - REDIS_URL=redis://redis:6379/0
       # RTSP defaults favor decode stability (HEVC/H.264, jittery Wi‑Fi, substreams).

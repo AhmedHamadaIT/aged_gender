@@ -272,6 +272,10 @@ class FrameBus:
             "decoder"         : "cpu",
             "hw_decoder_requested": None,
             "hw_decoder_active": False,
+            "stream_codec"    : None,
+            "stream_native"   : None,
+            "stream_target"   : None,
+            "stream_health"   : {},
             "profile"         : os.getenv("RTSP_PROFILE", "balanced").lower(),
             "transport"       : os.getenv("RTSP_TRANSPORT", "tcp"),
             "embed_skip_rate" : 0.0,
@@ -392,6 +396,9 @@ class FrameBus:
                     hw_decoder_active = bool(
                         getattr(_stream_mod, "_current_hw_decoder_active", False)
                     )
+                    stream_health = dict(
+                        getattr(_stream_mod, "_current_stream_health", {}) or {}
+                    )
                     profile = str(getattr(_stream_mod, "_current_profile", "balanced"))
                     transport = str(getattr(_stream_mod, "_current_transport", "tcp"))
                     reconnects = int(getattr(_stream_mod, "_rtsp_reconnect_count", 0))
@@ -401,6 +408,7 @@ class FrameBus:
                     decoder = "cpu"
                     hw_decoder_requested = None
                     hw_decoder_active = False
+                    stream_health = {}
                     profile = os.getenv("RTSP_PROFILE", "balanced").lower()
                     transport = os.getenv("RTSP_TRANSPORT", "tcp")
                     reconnects = 0
@@ -445,6 +453,10 @@ class FrameBus:
                     "decoder"         : decoder,
                     "hw_decoder_requested": hw_decoder_requested,
                     "hw_decoder_active": hw_decoder_active,
+                    "stream_codec"    : stream_health.get("codec"),
+                    "stream_native"   : stream_health.get("native"),
+                    "stream_target"   : stream_health.get("target"),
+                    "stream_health"   : stream_health,
                     "profile"         : profile,
                     "transport"       : transport,
                     "embed_skip_rate" : skip_rate,

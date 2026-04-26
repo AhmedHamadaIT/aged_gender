@@ -10,6 +10,7 @@ requests>=2.28.0
 Pillow>=9.0.0
 PyYAML>=6.0
 tqdm>=4.64.0
+# Desktop/x86: PyPI wheel. Jetson Docker: see dockerfile (onnxruntime-gpu from jetson-ai-lab jp6/cu126).
 onnxruntime
 scipy>=1.10.0
 

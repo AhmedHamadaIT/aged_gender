@@ -70,13 +70,22 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         matplotlib \
         py-cpuinfo \
         fastapi \
-        onnxruntime \
         "uvicorn[standard]" \
         qdrant-client \
         gdown \
         python-multipart \
         open_clip_torch \
         redis
+
+# Jetson Orin / aarch64: PyPI `onnxruntime` is often CPU-only or mismatched CUDA.
+# Jetson AI Lab wheels provide CUDAExecutionProvider (+ TensorRT EP when compatible).
+RUN python3 -m pip uninstall -y onnxruntime onnxruntime-gpu 2>/dev/null || true; \
+    python3 -m pip install --no-cache-dir onnxruntime-gpu \
+        --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126 \
+        --extra-index-url https://pypi.org/simple \
+        --trusted-host pypi.jetson-ai-lab.io \
+        --trusted-host pypi.org \
+        --trusted-host files.pythonhosted.org
 
 # RTSP stability for OpenCV/FFmpeg inside the container
 ENV OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|timeout;5000000|reconnect;1|reconnect_delay_max;5"

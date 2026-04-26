@@ -52,6 +52,24 @@ async def stream_metrics(request: Request):
     return out
 
 
+@router.get("/health")
+async def stream_health(request: Request):
+    """Per-camera stream health summary, including adaptive FFmpeg probe details."""
+    rows = await stream_metrics(request)
+    return {"cameras": rows}
+
+
+@router.get("/health/{camera_id}")
+async def camera_stream_health(camera_id: str, request: Request):
+    detection = getattr(request.app.state, "detection", None)
+    if detection is None:
+        return {"error": "detection service not initialized"}
+    row = detection._shared_state.get(camera_id)
+    if row is None:
+        return {"error": f"Camera {camera_id} not found"}
+    return detection.enrich_shared_camera_row(camera_id, dict(row))
+
+
 @router.get("/quality-events")
 async def quality_events_sse(request: Request):
     """SSE — quality ladder change events (JSON on stream:quality_events)."""

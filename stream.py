@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from logger.logger_config import Logger
+from stream_adapter import AdaptiveStream, StreamProber, profile_health
 from utils.rtsp_ffmpeg import apply_rtsp_ffmpeg_env, open_rtsp_videocapture, warmup_rtsp_capture
 
 log = Logger.get_logger(__name__)
@@ -44,6 +45,10 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
         return max(minimum, float(os.getenv(name, str(default))))
     except ValueError:
         return max(minimum, default)
+
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).lower() in ("true", "1", "yes", "on")
 
 
 class _FrameThrottle:
@@ -126,16 +131,53 @@ _current_hw_decoder_requested = (
 _current_hw_decoder_active = False
 _current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
 _current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
+_current_stream_health = {}
 
 
 class _RTSPReader:
-    def __init__(self, url: str):
+    def __init__(self, url: str, camera_id: str | None = None):
         self.url = url
+        self.camera_id = camera_id or "camera"
         self.cap = None
+        self._adaptive = None
+        self._adaptive_profile = None
         self._connect_count = 0
 
     def connect(self) -> None:
+        global _current_quality_label, _current_decoder_type, _current_hw_decoder_requested
+        global _current_hw_decoder_active, _current_profile, _current_transport, _current_stream_health
+
         self._connect_count += 1
+        self.release()
+        _current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
+        _current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
+
+        if _env_bool("RTSP_ADAPTIVE_FFMPEG", "true"):
+            profile = StreamProber.probe(self.url, camera_id=self.camera_id)
+            stream = AdaptiveStream(profile)
+            if stream.open():
+                self._adaptive_profile = profile
+                self._adaptive = stream
+                _current_quality_label = (
+                    f"{profile.target_width}x{profile.target_height}@{profile.target_fps:.2f}fps"
+                )
+                _current_decoder_type = profile.decoder
+                _current_hw_decoder_requested = profile.hw_decoder_requested
+                _current_hw_decoder_active = profile.hw_decoder_active
+                _current_stream_health = profile_health(profile)
+                log.info(
+                    "[STREAM] Adaptive FFmpeg connected — native=%dx%d@%.2ffps codec=%s target=%s decoder=%s",
+                    profile.native_width,
+                    profile.native_height,
+                    profile.native_fps,
+                    profile.codec,
+                    _current_quality_label,
+                    profile.decoder,
+                )
+                return
+
+            log.warning("[STREAM] Adaptive FFmpeg unavailable; falling back to OpenCV VideoCapture")
+
         opts = apply_rtsp_ffmpeg_env()
         log.info(
             "[STREAM] Connecting (attempt %d): %s | ffmpeg_opts=%r",
@@ -143,7 +185,6 @@ class _RTSPReader:
             self.url,
             opts,
         )
-        self.release()
         self.cap = open_rtsp_videocapture(self.url)
         if not self.cap.isOpened():
             raise RuntimeError(f"[STREAM] Cannot open: {self.url}")
@@ -152,6 +193,21 @@ class _RTSPReader:
         w   = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h   = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 0.0
+        _current_quality_label = QUALITY_LADDER[0]["label"] if QUALITY_LADDER else "live"
+        _current_decoder_type = "cpu"
+        _current_hw_decoder_requested = None
+        _current_hw_decoder_active = False
+        _current_stream_health = {
+            "camera_id": self.camera_id,
+            "codec": "opencv",
+            "native": f"{w}x{h}@{round(fps, 2)}fps",
+            "target": "FrameBus resize",
+            "quality_tier": "opencv",
+            "decoder": "cpu",
+            "hw_decoder_requested": None,
+            "hw_decoder_active": False,
+            "healthy": True,
+        }
         log.info("[STREAM] Connected — %dx%d @ %.1ffps", w, h, fps)
         w_tgt = int(os.getenv("WIDTH", "1280"))
         h_raw = int(os.getenv("HEIGHT", "0"))
@@ -175,12 +231,24 @@ class _RTSPReader:
             )
 
     def read_frame(self):
+        global _current_stream_health
+        if self._adaptive is not None:
+            frame = self._adaptive.read_frame()
+            if self._adaptive_profile is not None:
+                if frame is None:
+                    self._adaptive_profile.frames_dropped += 1
+                    self._adaptive_profile.healthy = False
+                _current_stream_health = profile_health(self._adaptive_profile)
+            return frame
         if self.cap is None:
             return None
         ret, frame = self.cap.read()
         return frame if ret else None
 
     def release(self) -> None:
+        if self._adaptive is not None:
+            self._adaptive.close()
+            self._adaptive = None
         if self.cap is not None:
             self.cap.release()
             self.cap = None
@@ -230,7 +298,7 @@ def frames(source: str = None, camera_id: str = None):
         source = RTSP_URL if USE_STREAM else INPUT_VIDEO
 
     is_rtsp = source.startswith("rtsp://")
-    reader  = _RTSPReader(source) if is_rtsp else _VideoReader(source)
+    reader  = _RTSPReader(source, camera_id=camera_id) if is_rtsp else _VideoReader(source)
 
     consecutive_fails = 0
     reconnect_streak  = 0
@@ -263,6 +331,8 @@ def frames(source: str = None, camera_id: str = None):
                         try:
                             reader.connect()
                             _rtsp_reconnect_count += 1
+                            if is_rtsp and getattr(reader, "_adaptive_profile", None) is not None:
+                                reader._adaptive_profile.reconnects = _rtsp_reconnect_count
                         except Exception as exc:  # noqa: BLE001
                             log.warning(
                                 "[STREAM] Reconnect failed: %s — will retry with backoff", exc
