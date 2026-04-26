@@ -55,5 +55,6 @@ def test_adaptive_stream_command_scales_and_outputs_bgr(monkeypatch):
     vf = cmd[cmd.index("-vf") + 1]
 
     assert "-vf" in cmd
+    assert "-timeout" not in cmd
     assert f"scale={profile.target_width}:{profile.target_height}:flags=fast_bilinear" in vf
     assert cmd[-3:] == ["-pix_fmt", "bgr24", "pipe:1"]

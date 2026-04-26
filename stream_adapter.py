@@ -204,8 +204,6 @@ class AdaptiveStream:
         os.getenv("RTSP_MAX_DELAY_US", "3000000"),
         "-reorder_queue_size",
         os.getenv("RTSP_REORDER_QUEUE_SIZE", "512"),
-        "-timeout",
-        os.getenv("RTSP_FFMPEG_TIMEOUT_US", "10000000"),
     )
 
     def __init__(self, profile: CameraProfile):
