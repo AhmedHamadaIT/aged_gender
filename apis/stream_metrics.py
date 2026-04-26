@@ -27,7 +27,17 @@ def _redis_url() -> str:
 
 @router.get("/metrics")
 async def stream_metrics(request: Request):
-    """Per-camera pipeline stats (fps, stream_quality, frames_dropped, embed_skip_rate, …)."""
+    """Per-camera pipeline stats.
+
+    Important fields (see ``FrameBus`` / ``stream`` modules):
+
+    - ``fps`` / ``fps_actual`` — measured processing rate.
+    - ``drop_rate`` / ``decode_error_rate`` — failed ``VideoCapture.read()`` divided by
+      (failed reads + frames received); RTSP/decode health, not task-queue backpressure.
+    - ``task_queue_drop_rate`` — ``put_nowait`` failures when fan-out queues are full.
+    - ``reconnects`` — RTSP reconnects after a consecutive-read-failure burst.
+    - ``latency_estimate_ms`` — EMA of wall time between consecutive yielded frames (jitter / stalls).
+    """
     detection = getattr(request.app.state, "detection", None)
     if detection is None:
         return []

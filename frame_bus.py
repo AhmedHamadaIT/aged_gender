@@ -23,6 +23,8 @@ _repo_root = os.path.dirname(os.path.abspath(__file__))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+_DEFAULT_TRACKER_YAML = os.path.join(_repo_root, "cfg", "trackers", "botsort_stable.yaml")
+
 import time
 import base64
 import hashlib
@@ -121,6 +123,15 @@ class FrameBus:
         self._embed_skipped  = 0
         self._embed_passed   = 0
 
+        _tracker_env = os.getenv("TRACKER_YAML", "").strip()
+        self._tracker_yaml = _tracker_env or (
+            _DEFAULT_TRACKER_YAML if os.path.isfile(_DEFAULT_TRACKER_YAML) else "botsort.yaml"
+        )
+
+        # Wall-clock spacing between yielded frames (EMA) — jitter / stall indicator for metrics.
+        self._metrics_last_wall_t: Optional[float] = None
+        self._metrics_inter_frame_ema_ms = 0.0
+
     def run(self):
         from stream import QUALITY_LADDER, frames
 
@@ -147,6 +158,12 @@ class FrameBus:
             "stream_quality"  : _q0,
             "frames_dropped"  : 0,
             "drop_rate"       : 0.0,
+            "decode_error_rate": 0.0,
+            "task_queue_drops": 0,
+            "task_queue_drop_rate": 0.0,
+            "reconnects"      : 0,
+            "latency_estimate_ms": 0.0,
+            "stream_read_failures": 0,
             "decode_failures" : 0,
             "decoder"         : "cpu",
             "hw_decoder_requested": None,
@@ -154,6 +171,8 @@ class FrameBus:
             "profile"         : os.getenv("RTSP_PROFILE", "balanced").lower(),
             "transport"       : os.getenv("RTSP_TRANSPORT", "tcp"),
             "embed_skip_rate" : 0.0,
+            "uptime_sec"      : 0.0,
+            "fps_actual"      : 0.0,
         }
 
         if self.save_output:
@@ -161,6 +180,17 @@ class FrameBus:
 
         try:
             for frame in frames(self.rtsp_url, camera_id=self.camera_id):
+                now_wall = time.time()
+                if self._metrics_last_wall_t is not None:
+                    dt_ms = (now_wall - self._metrics_last_wall_t) * 1000.0
+                    if self._metrics_inter_frame_ema_ms <= 0.0:
+                        self._metrics_inter_frame_ema_ms = dt_ms
+                    else:
+                        self._metrics_inter_frame_ema_ms = (
+                            0.85 * self._metrics_inter_frame_ema_ms + 0.15 * dt_ms
+                        )
+                self._metrics_last_wall_t = now_wall
+
                 if self.stop_event.is_set():
                     break
 
@@ -186,7 +216,7 @@ class FrameBus:
                 results = self._model.track(
                     resized_frame,
                     persist  = True,          # keeps track state across frames
-                    tracker  = "botsort.yaml",
+                    tracker  = self._tracker_yaml,
                     conf     = self._conf,
                     classes  = self._classes,
                     device   = self._device,
@@ -258,6 +288,7 @@ class FrameBus:
                     )
                     profile = str(getattr(_stream_mod, "_current_profile", "balanced"))
                     transport = str(getattr(_stream_mod, "_current_transport", "tcp"))
+                    reconnects = int(getattr(_stream_mod, "_rtsp_reconnect_count", 0))
                 except Exception:
                     quality_label = _q0
                     decode_failures = 0
@@ -266,24 +297,38 @@ class FrameBus:
                     hw_decoder_active = False
                     profile = os.getenv("RTSP_PROFILE", "balanced").lower()
                     transport = os.getenv("RTSP_TRANSPORT", "tcp")
+                    reconnects = 0
 
-                routed_frames = self._frames_passed + self._frames_dropped
-                drop_rate = (
-                    round(self._frames_dropped / routed_frames * 100, 2)
-                    if routed_frames
-                    else 0.0
+                # Stream source: failed VideoCapture.read() vs successful yields (same process / one generator).
+                stream_reads = decode_failures + frame_count
+                decode_error_rate = (
+                    round(decode_failures / stream_reads, 4) if stream_reads > 0 else 0.0
                 )
+                # Task workers saturated (queue full) — not the same as RTSP read loss.
+                routed_frames = self._frames_passed + self._frames_dropped
+                task_queue_drop_rate = (
+                    round(self._frames_dropped / routed_frames, 4) if routed_frames > 0 else 0.0
+                )
+                uptime_sec = round(time.time() - started_at, 1)
 
                 self.shared_state[self.camera_id] = {
                     **self.shared_state[self.camera_id],
                     "frame_count"     : frame_count,
                     "fps"             : fps,
+                    "fps_actual"      : fps,
                     "last_detections" : last_det,
                     "total_detections": total_detections,
-                    "uptime_seconds"  : round(time.time() - started_at, 1),
+                    "uptime_seconds"  : uptime_sec,
+                    "uptime_sec"      : uptime_sec,
                     "stream_quality"  : quality_label,
                     "frames_dropped"  : self._frames_dropped,
-                    "drop_rate"       : drop_rate,
+                    "drop_rate"       : decode_error_rate,
+                    "decode_error_rate": decode_error_rate,
+                    "task_queue_drops": self._frames_dropped,
+                    "task_queue_drop_rate": task_queue_drop_rate,
+                    "reconnects"      : reconnects,
+                    "latency_estimate_ms": round(self._metrics_inter_frame_ema_ms, 2),
+                    "stream_read_failures": decode_failures,
                     "decode_failures" : decode_failures,
                     "decoder"         : decoder,
                     "hw_decoder_requested": hw_decoder_requested,

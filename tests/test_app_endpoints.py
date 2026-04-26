@@ -143,6 +143,57 @@ def test_stream_metrics_endpoint(client: TestClient):
     assert isinstance(r.json(), list)
 
 
+def test_stream_metrics_returns_populated_camera(client: TestClient):
+    """Metrics list mirrors detection shared_state (plain dict values)."""
+    fake = {
+        "camera_id": "cam-x",
+        "rtsp_url": "rtsp://example/stream",
+        "running": True,
+        "frame_count": 100,
+        "fps": 12.3,
+        "fps_actual": 12.3,
+        "last_detections": 1,
+        "total_detections": 50,
+        "uptime_seconds": 360.0,
+        "uptime_sec": 360.0,
+        "error": None,
+        "stream_quality": "640x360@10fps",
+        "frames_dropped": 2,
+        "drop_rate": 0.03,
+        "decode_error_rate": 0.03,
+        "task_queue_drops": 2,
+        "task_queue_drop_rate": 0.0198,
+        "reconnects": 2,
+        "latency_estimate_ms": 95.0,
+        "stream_read_failures": 3,
+        "decode_failures": 3,
+        "decoder": "cpu",
+        "hw_decoder_requested": None,
+        "hw_decoder_active": False,
+        "profile": "balanced",
+        "transport": "tcp",
+        "embed_skip_rate": 0.0,
+    }
+    try:
+        app_mod.detection._shared_state.clear()
+        app_mod.detection._shared_state["cam-x"] = fake
+
+        r = client.get("/stream/metrics")
+        assert r.status_code == 200
+        rows = r.json()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["camera_id"] == "cam-x"
+        assert row["drop_rate"] == 0.03
+        assert row["decode_error_rate"] == 0.03
+        assert row["task_queue_drop_rate"] == 0.0198
+        assert row["reconnects"] == 2
+        assert row["uptime_sec"] == 360.0
+        assert row["fps_actual"] == 12.3
+    finally:
+        app_mod.detection._shared_state.clear()
+
+
 def test_person_search_endpoints(client: TestClient, monkeypatch):
     async def _fake_search(file, top_k: int):
         assert top_k == 3

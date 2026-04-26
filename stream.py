@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from logger.logger_config import Logger
-from utils.rtsp_ffmpeg import apply_rtsp_ffmpeg_env, open_rtsp_videocapture
+from utils.rtsp_ffmpeg import apply_rtsp_ffmpeg_env, open_rtsp_videocapture, warmup_rtsp_capture
 
 log = Logger.get_logger(__name__)
 
@@ -62,7 +62,10 @@ QUALITY_LADDER = _parse_quality_ladder(
     os.getenv("QUALITY_LADDER", "1920x1080x10,1280x720x10,854x480x8")
 )
 _current_quality_label = QUALITY_LADDER[0]["label"] if QUALITY_LADDER else "live"
+# Cumulative failed VideoCapture.read() attempts (RTSP gaps, decode hiccups, EOS on file).
 _current_decode_failures = 0
+# Successful RTSP reconnects after a failure burst (initial connect is not counted).
+_rtsp_reconnect_count = 0
 _current_decoder_type = "cpu"
 _current_hw_decoder_requested = (
     os.getenv("RTSP_HWDECODER")
@@ -93,6 +96,7 @@ class _RTSPReader:
         self.cap = open_rtsp_videocapture(self.url)
         if not self.cap.isOpened():
             raise RuntimeError(f"[STREAM] Cannot open: {self.url}")
+        warmup_rtsp_capture(self.cap)
         w   = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h   = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = self.cap.get(cv2.CAP_PROP_FPS) or 0.0
@@ -148,7 +152,7 @@ def frames(source: str = None, camera_id: str = None):
         source: RTSP URL, video file path, or None (uses .env defaults)
         camera_id: optional caller context for compatibility with FrameBus.
     """
-    global _current_decode_failures
+    global _current_decode_failures, _rtsp_reconnect_count
 
     if source is None:
         source = RTSP_URL if USE_STREAM else INPUT_VIDEO
@@ -179,6 +183,7 @@ def frames(source: str = None, camera_id: str = None):
                         time.sleep(wait)
                         try:
                             reader.connect()
+                            _rtsp_reconnect_count += 1
                         except Exception as exc:  # noqa: BLE001
                             log.warning(
                                 "[STREAM] Reconnect failed: %s — will retry with backoff", exc

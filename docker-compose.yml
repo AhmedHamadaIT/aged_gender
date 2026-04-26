@@ -55,16 +55,19 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Default for in-compose Redis (avoids localhost:6379 inside the container)
       - REDIS_URL=redis://redis:6379/0
-      # Camera is now stable H.264 — run performance profile.
-      - RTSP_PROFILE=performance
+      # RTSP defaults favor decode stability (HEVC/H.264, jittery Wi‑Fi, substreams).
+      # For lowest latency on a clean LAN + H.264, set RTSP_PROFILE=performance and RTSP_LOW_DELAY=true.
+      - RTSP_PROFILE=balanced
       - FORCE_TRANSCODE=false
-      - RTSP_DISCARD_CORRUPT=false
-      - RTSP_LOW_DELAY=true
+      - RTSP_DISCARD_CORRUPT=true
+      - RTSP_LOW_DELAY=false
+      - RTSP_OPENCV_BUFFER_SIZE=3
+      - RTSP_WARMUP_FRAMES=8
       - RTSP_FFMPEG_OPTIONS=
-      # Hardware decode (fallback to CPU automatically if unavailable)
-      - RTSP_ENABLE_GPU_DECODE=true
+      # Hardware decode (Jetson): match RTSP_HWDECODER to the camera codec, or leave GPU decode off for max compatibility.
+      - RTSP_ENABLE_GPU_DECODE=false
       - RTSP_HWACCEL=cuda
-      - RTSP_HWDECODER=h264_nvv4l2dec
+      - RTSP_HWDECODER=hevc_nvv4l2dec
       - QUALITY_LADDER=1920x1080x10,1280x720x10,854x480x8
       - STREAM_DOWNGRADE_AFTER=20
       - STREAM_DOWNGRADE_COOLDOWN=30
