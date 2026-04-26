@@ -25,3 +25,8 @@ lap>=0.5.12
 
 # Optional: download weights from Google Drive (tools/download_models.py)
 gdown>=5.0.0
+
+insightface>=0.7.3
+faiss-cpu>=1.7.4
+python-multipart>=0.0.9
+lapx

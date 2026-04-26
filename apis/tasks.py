@@ -38,6 +38,12 @@ class DetailConfig(BaseModel):
     serviceWaitLimit: int        = 30
     enableStaffList : bool       = False
     staffIds        : List[int]  = []
+    # FACE
+    facePixelSize   : int        = 60
+    qualityThreshold: int        = 60
+    yawThreshold    : int        = 35
+    pitchThreshold  : int        = 25
+    failCount       : int        = 2
 
 
 class TaskConfig(BaseModel):
@@ -54,13 +60,16 @@ class TaskConfig(BaseModel):
     ]
     validStartTime: int  = 0
     validEndTime  : int  = 86400000   # end of day in ms
+    # FACE-specific (ignored by other tasks)
+    libIds        : str         = "-1"
+    enableStranger: bool        = True
 
 
 # ─────────────────────────────────────────────
 # Registry
 # ─────────────────────────────────────────────
 class TaskRegistry:
-    SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_BOX_OPEN", "PHONE_USAGE"}
+    SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_BOX_OPEN", "PHONE_USAGE", "FACE"}
 
     def __init__(self):
         self._tasks: dict = {}   # {task_id (int): task_config (dict)}

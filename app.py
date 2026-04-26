@@ -55,6 +55,7 @@ from apis.detection_stream import (
 )
 from apis.tasks     import task_registry, TaskConfig
 from apis.ws_live   import live_frames_ws, live_events_ws
+from apis.face_lib  import router as face_router
 from schemas        import DetectionRequest, DetectionStatus
 from apis.person_search import person_search_api
 from apis.semantic_search import semantic_search_api
@@ -97,6 +98,10 @@ app = FastAPI(
     description=_API_DESCRIPTION,
 )
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
+
+app = FastAPI(title="Vision Pipeline API", version="2.0.0")
+
+app.include_router(face_router)
 
 
 # ─────────────────────────────────────────────
@@ -259,6 +264,7 @@ async def detection_stream(
             "Access-Control-Allow-Origin": "*",
         },
     )
+
 
 # ─────────────────────────────────────────────
 # Live stream WebSocket routes

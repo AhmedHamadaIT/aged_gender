@@ -72,11 +72,15 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         fastapi \
         onnxruntime \
         "uvicorn[standard]" \
+        "python-multipart"\
         qdrant-client \
         gdown \
         python-multipart \
         open_clip_torch \
-        redis
+        redis \
+        insightface \
+        faiss-cpu \
+        lapx
 
 # RTSP stability for OpenCV/FFmpeg inside the container
 ENV OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|timeout;5000000|reconnect;1|reconnect_delay_max;5"
@@ -88,6 +92,7 @@ ENV PIP_EXTRA_INDEX_URL=https://pypi.org/simple
 RUN mkdir -p /app/models /app/videos /app/outputs
 
 EXPOSE 9000
+RUN mkdir -p /app/models /app/videos /app/outputs /app/data/face
 
 # ── Default command ──────────────────────────
 CMD ["sleep", "infinity"]
