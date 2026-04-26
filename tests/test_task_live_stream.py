@@ -57,6 +57,13 @@ _BASE = {
 }
 
 
+def test_task_config_channel_id_int_coerced_to_str():
+    cfg = TaskConfig(**{**_BASE, "channelId": 1})
+    assert cfg.channelId == "1"
+    dumped = cfg.model_dump()
+    assert dumped["channelId"] == "1"
+
+
 def test_get_by_name_found():
     reg = _make_registry(_BASE)
     task = reg.get_by_name("entrance_line")

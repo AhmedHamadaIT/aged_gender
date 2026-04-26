@@ -17,7 +17,7 @@ Task config shape (from POST /api/tasks):
     "taskId"        : int,
     "taskName"      : str,
     "algorithmType" : "CROSS_LINE",
-    "channelId"     : int,
+    "channelId"     : str | int,    # JSON number accepted; stored as str
     "enable"        : bool,
     "threshold"     : int,            # 0-100 — minimum detection confidence
     "areaPosition"  : str,            # JSON-encoded array of line definitions

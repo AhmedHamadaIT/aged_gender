@@ -22,7 +22,7 @@ import json
 from typing import Any, List, Optional
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # Sentinel returned when a taskName lookup is ambiguous (multiple tasks share the same name).
 _AMBIGUOUS = object()
@@ -58,6 +58,16 @@ class TaskConfig(BaseModel):
     ]
     validStartTime: int  = 0
     validEndTime  : int  = 86400000   # end of day in ms
+
+    @field_validator("channelId", mode="before")
+    @classmethod
+    def _channel_id_to_str(cls, v: Any) -> str:
+        """Allow numeric JSON (e.g. 1) while matching cameras by string id everywhere."""
+        if v is None:
+            raise TypeError("channelId is required")
+        if isinstance(v, bool):
+            raise TypeError("channelId must be str or int, not bool")
+        return str(v)
 
 
 # ─────────────────────────────────────────────

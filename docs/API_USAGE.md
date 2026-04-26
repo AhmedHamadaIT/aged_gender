@@ -106,6 +106,10 @@ curl -X DELETE http://localhost:9000/cameras/1
 
 Tasks are registered independently of cameras. The `channelId` links a task to a camera.
 
+**Request body (required):** `taskId` (int), `taskName` (string), `algorithmType` (string), `channelId` (string **or** number — numbers are normalized to string, e.g. `1` → `"1"`, matching `POST /cameras` camera `id`).
+
+**`CROSS_LINE` geometry** is **not** a nested `config.lines` object. Put line endpoints in **`areaPosition`**: a JSON **string** whose parsed value is an array of objects with `line_id`, `line_name`, `point` (two `{x,y}` maps), and `direction` (`0` = both ways, `1` / `2` = one-way). See the examples below.
+
 ### Register a CrossLine task (no age/gender)
 ```bash
 curl -X POST http://localhost:9000/api/tasks \
