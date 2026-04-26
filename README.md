@@ -44,7 +44,7 @@ The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detect
    ```
 
 ### Docker Compose (GPU)
-The repo includes [`docker-compose.yml`](docker-compose.yml): NVIDIA runtime, project bind-mount, `models/` and `outputs/` volumes, port **9000**, optional [`.env`](.env).
+The repo includes [`docker-compose.yml`](docker-compose.yml): NVIDIA runtime, project bind-mount, `models/` and `outputs/` volumes, port **9000**, optional [`.env`](.env) (copy from [`.env.example`](.env.example) for RTSP/Jetson hints).
 
 ```bash
 docker compose up -d --build
@@ -1954,11 +1954,17 @@ export PPE_MODEL="./models/best_PPE.onnx"
 ### RTSP stability (H.264 / H.265) and snapshots
 | Variable | Default | Role |
 |----------|---------|------|
+| `RTSP_ENABLE_GPU_DECODE` | `auto` in Compose | Jetson hardware decode for Adaptive FFmpeg ([`stream_adapter.py`](stream_adapter.py)): `auto` enables `*_v4l2m2m` when Jetson is detected; `true` forces that path; `false` uses CPU. Set `true` if `auto` skips HW inside Docker. |
+| `RTSP_JETSON_HEVC_DECODER` / `RTSP_JETSON_H264_DECODER` | *(unset)* | Optional ffmpeg decoder names for HEVC/H.265 and H.264 (e.g. `hevc_nvmpi` on some Jetson ffmpeg builds). |
+| `RTSP_HWDECODER` | *(unset)* | Legacy fallback decoder when per-codec vars are unset (same name is passed for the probed codec — use only if you know your stream matches). |
+| `STREAM_ADAPTER_FFMPEG_STDERR_MAX` | `8192` | Max bytes of ffmpeg stderr retained for logging on RTSP reconnect ([`stream_adapter.py`](stream_adapter.py)). |
 | `RTSP_FFMPEG_EXTRA_OPTIONS` | *(see `utils/rtsp_ffmpeg.py`)* | Extra OpenCV-FFmpeg options (pipe-separated `key;value` segments); `rtsp_transport;tcp` is always applied |
 | `RTSP_MAX_CONSECUTIVE_READ_FAILS` | `10` | Fails before stream reconnect in `stream.py` |
 | `STREAM_RECONNECT_BASE_SEC` / `STREAM_RECONNECT_MAX_SEC` | `2` / `30` | Exponential reconnect backoff (capped) |
 | `RTSP_OPENCV_BUFFER_SIZE` / `RTSP_OPEN_TIMEOUT_MSEC` / `RTSP_READ_TIMEOUT_MSEC` | `1` / `15000` / `0` | OpenCV capture tuning |
 | `CAMERA_SNAPSHOT_CACHE_TTL_SEC` | `5` | `GET /cameras` reuses a recent JPEG per camera instead of opening RTSP on every request |
+
+**Substream (e.g. Hikvision):** for a lighter H.264 feed, point `POST /cameras` at a substream URL such as `.../Streaming/channels/102` or `.../h264/ch1/sub/av_stream` instead of the 4K main path. See [`.env.example`](.env.example).
 
 ### ONNX Runtime and GPU policy
 | Variable | Default | Role |

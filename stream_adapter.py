@@ -12,11 +12,12 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
-from typing import Optional
+from typing import BinaryIO, Optional
 
 import numpy as np
 
@@ -191,7 +192,25 @@ class StreamProber:
             return None
         if mode == "auto" and not _is_jetson():
             return None
-        return cls.JETSON_HW_DECODERS.get(codec.lower())
+
+        c = (codec or "").lower()
+        default = cls.JETSON_HW_DECODERS.get(c)
+        if default is None:
+            return None
+
+        if c in ("hevc", "h265"):
+            o = os.getenv("RTSP_JETSON_HEVC_DECODER", "").strip()
+            if o:
+                return o
+        elif c == "h264":
+            o = os.getenv("RTSP_JETSON_H264_DECODER", "").strip()
+            if o:
+                return o
+
+        legacy = os.getenv("RTSP_HWDECODER", "").strip()
+        if legacy:
+            return legacy
+        return default
 
 
 class AdaptiveStream:
@@ -210,6 +229,9 @@ class AdaptiveStream:
         self.profile = profile
         self._proc: subprocess.Popen | None = None
         self._running = False
+        self._stderr_tail = bytearray()
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_max = max(1024, int(os.getenv("STREAM_ADAPTER_FFMPEG_STDERR_MAX", "8192")))
 
     def _build_ffmpeg_cmd(self) -> list[str]:
         p = self.profile
@@ -233,13 +255,40 @@ class AdaptiveStream:
         ]
         return cmd
 
+    def _stderr_drainer(self, fh: BinaryIO) -> None:
+        try:
+            while True:
+                chunk = fh.read(4096)
+                if not chunk:
+                    break
+                self._stderr_tail.extend(chunk)
+                excess = len(self._stderr_tail) - self._stderr_max
+                if excess > 0:
+                    del self._stderr_tail[:excess]
+        except Exception:
+            pass
+        finally:
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+    def log_stderr_tail(self, reason: str) -> None:
+        if not self._stderr_tail:
+            return
+        text = self._stderr_tail.decode("utf-8", errors="replace").strip()
+        if text:
+            logger.warning("[%s] ffmpeg stderr tail (%s): %s", self.profile.camera_id, reason, text)
+
     def open(self) -> bool:
+        self._stderr_tail.clear()
+        self._stderr_thread = None
         cmd = self._build_ffmpeg_cmd()
         try:
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 bufsize=0,
             )
         except FileNotFoundError:
@@ -248,6 +297,15 @@ class AdaptiveStream:
         except OSError as exc:
             logger.warning("[%s] ffmpeg start failed: %s", self.profile.camera_id, exc)
             return False
+
+        if self._proc.stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=self._stderr_drainer,
+                args=(self._proc.stderr,),
+                daemon=True,
+                name=f"ffmpeg-stderr-{self.profile.camera_id}",
+            )
+            self._stderr_thread.start()
 
         self._running = True
         logger.info("[%s] ffmpeg started pid=%s decoder=%s", self.profile.camera_id, self._proc.pid, self.profile.decoder)
@@ -286,6 +344,9 @@ class AdaptiveStream:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=3)
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2.0)
+            self._stderr_thread = None
         logger.info("[%s] ffmpeg process closed", self.profile.camera_id)
 
 

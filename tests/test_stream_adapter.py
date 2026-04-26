@@ -40,6 +40,83 @@ def test_probe_derives_4k_target_and_decoder(monkeypatch):
     assert profile.has_audio is True
 
 
+def test_probe_hevc_respects_rtsp_jetson_hevc_decoder_override(monkeypatch):
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "width": 1920,
+                "height": 1080,
+                "avg_frame_rate": "25/1",
+            },
+        ]
+    }
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setenv("RTSP_ENABLE_GPU_DECODE", "true")
+    monkeypatch.setenv("RTSP_JETSON_HEVC_DECODER", "hevc_nvmpi")
+    monkeypatch.delenv("RTSP_HWDECODER", raising=False)
+    monkeypatch.delenv("RTSP_JETSON_H264_DECODER", raising=False)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    profile = StreamProber.probe("rtsp://example/cam", camera_id="cam1")
+    assert profile.hw_decoder_requested == "hevc_nvmpi"
+    assert profile.decoder == "hevc_nvmpi"
+
+
+def test_probe_h264_respects_rtsp_hwdecoder_legacy(monkeypatch):
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": "15/1",
+            },
+        ]
+    }
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setenv("RTSP_ENABLE_GPU_DECODE", "true")
+    monkeypatch.setenv("RTSP_HWDECODER", "h264_nvmpi")
+    monkeypatch.delenv("RTSP_JETSON_H264_DECODER", raising=False)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    profile = StreamProber.probe("rtsp://example/cam", camera_id="cam2")
+    assert profile.hw_decoder_requested == "h264_nvmpi"
+
+
+def test_jetson_hevc_per_codec_override_wins_over_rtsp_hwdecoder(monkeypatch):
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "hevc",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": "12/1",
+            },
+        ]
+    }
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setenv("RTSP_ENABLE_GPU_DECODE", "true")
+    monkeypatch.setenv("RTSP_JETSON_HEVC_DECODER", "hevc_primary")
+    monkeypatch.setenv("RTSP_HWDECODER", "hevc_fallback")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    profile = StreamProber.probe("rtsp://example/cam", camera_id="cam3")
+    assert profile.hw_decoder_requested == "hevc_primary"
+
+
 def test_adaptive_stream_command_scales_and_outputs_bgr(monkeypatch):
     monkeypatch.setenv("RTSP_ENABLE_GPU_DECODE", "false")
     profile = CameraProfile(

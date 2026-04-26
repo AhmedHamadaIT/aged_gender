@@ -20,6 +20,9 @@ Base URL for all examples: `http://localhost:9000`
 10. [Cashier monitor API (`/cashier/*`)](#10-cashier-monitor-api-cashier)
 11. [Live stream & annotated frames (`/cameras/{id}/live`)](#11-live-stream-websocket-camerasidlive)
 12. [Task-name live stream alias (`/tasks/{task_name}/live`)](#12-task-name-live-stream-alias-taskstask_namelive)
+13. [Stream metrics and quality (`/stream/*`)](#13-stream-metrics-and-quality-stream)
+14. [Person search / ReID (`/person_search/*`)](#14-person-search-reid-person_search)
+15. [Semantic image search (`/semantic_search/*`)](#15-semantic-image-search-semantic_search)
 
 ---
 
@@ -93,13 +96,23 @@ curl -X POST http://localhost:9000/cameras \
 curl http://localhost:9000/cameras
 ```
 
+Each camera includes a **`snapshot`** field: a server-local filesystem path to a recent JPEG thumbnail (grabbed from the RTSP/file source), or `null` if capture failed. Paths are under `CAMERA_SNAPSHOT_DIR` (default `./outputs/camera_snapshots`). The server may reuse a cached path for a few seconds (`CAMERA_SNAPSHOT_CACHE_TTL_SEC`).
+
 **Response:**
 ```json
 {
   "count": 2,
   "cameras": [
-    {"id": "1", "url": "rtsp://192.168.1.10/stream"},
-    {"id": "2", "url": "rtsp://192.168.1.11/stream"}
+    {
+      "id": "1",
+      "url": "rtsp://192.168.1.10/stream",
+      "snapshot": "/abs/path/outputs/camera_snapshots/1_20260426T120000_000000Z.jpg"
+    },
+    {
+      "id": "2",
+      "url": "rtsp://192.168.1.11/stream",
+      "snapshot": null
+    }
   ]
 }
 ```
@@ -113,7 +126,8 @@ curl -X DELETE http://localhost:9000/cameras/1
 ```json
 {
   "status": "removed",
-  "camera_id": "1"
+  "camera_id": "1",
+  "remaining": ["2", "north_gate"]
 }
 ```
 
@@ -1478,6 +1492,94 @@ asyncio.run(first_frame_by_task("mainentrance1"))
 - The route resolves `taskName` with an **exact string match** (case-sensitive). `mainentrance1` and `MainEntrance1` are different names.
 - If two tasks are registered with the same `taskName`, the endpoint closes immediately with code `4009`. Use unique `taskName` values or connect via `/cameras/{camera_id}/live`.
 - Reconnect logic is the same as for `/cameras/{camera_id}/live`: the WebSocket does **not** auto-reconnect; implement a 2-second retry in `ws.onclose`.
+
+---
+
+## 13. Stream Metrics and Quality (`/stream/*`)
+
+These routes expose **FrameBus / decoder** health and optional **Redis-backed** streams. They are useful for ops dashboards and debugging RTSP quality without opening a WebSocket.
+
+### `GET /stream/metrics`
+
+Returns a **JSON array** — one object per camera currently tracked in the detection service’s shared state. Fields are enriched from the pipeline (examples: `fps`, `fps_actual`, `drop_rate`, `decode_error_rate`, `task_queue_drop_rate`, `reconnects`, `latency_estimate_ms`, `framebus_process_alive`, `last_state_update_age_sec`). Shape may evolve with the worker; treat unknown keys as optional.
+
+```bash
+curl http://localhost:9000/stream/metrics
+```
+
+### `GET /stream/health`
+
+Same rows as metrics, wrapped as `{ "cameras": [ ... ] }`.
+
+```bash
+curl http://localhost:9000/stream/health
+```
+
+### `GET /stream/health/{camera_id}`
+
+Single-camera summary, or an `error` object if that camera id is not in shared state.
+
+```bash
+curl http://localhost:9000/stream/health/1
+```
+
+### `GET /stream/quality-events` (SSE)
+
+Subscribes to Redis channel **`stream:quality_events`**. Each SSE `data:` line is JSON text describing quality / ladder changes. Requires `REDIS_URL` and a publisher writing to that channel.
+
+```bash
+curl -N http://localhost:9000/stream/quality-events
+```
+
+### `GET /stream/live/{camera_id}` (SSE)
+
+Subscribes to Redis **`live:frame:{camera_id}`** (raw JPEG bytes as published by the live fan-out). Each event is one JSON object with `camera_id`, `frame_b64` (base64-encoded JPEG), and `ts` (server Unix time). Handy when you cannot use WebSockets but can consume SSE; bandwidth is high.
+
+```bash
+curl -N http://localhost:9000/stream/live/1
+```
+
+---
+
+## 14. Person search / ReID (`/person_search/*`)
+
+**`POST /person_search/search`** — multipart form: image **`file`** (required) and optional **`top_k`** (default `10`). Uses the OSNet ReID model and Qdrant; returns `{ "status", "count", "results" }` on success.
+
+**`GET /person_search/health`** — `{ "model_loaded": true|false, "status": "ok"|"unavailable" }`.
+
+If the ReID model is not loaded (`REID_MODEL_PATH`, etc.), search returns **503** with `Retry-After: 120`.
+
+```bash
+curl -X POST http://localhost:9000/person_search/search \
+  -F "file=@/path/to/query.jpg" \
+  -F "top_k=5"
+
+curl http://localhost:9000/person_search/health
+```
+
+---
+
+## 15. Semantic image search (`/semantic_search/*`)
+
+**`POST /semantic_search/search`** — multipart form: provide **`text_query`** and/or an image **`file`** (at least one). Text runs CLIP-style text-to-image search; image-only runs search-by-image. Optional **`top_k`** (default `10`). Returns `{ "status", "count", "results" }` when the ONNX / MobileCLIP stack is loaded.
+
+**`GET /semantic_search/health`** — `{ "model_loaded": true|false, "status": "ok"|"unavailable" }`.
+
+If models are unavailable, search returns **503** with `Retry-After: 120`.
+
+```bash
+# Text query
+curl -X POST http://localhost:9000/semantic_search/search \
+  -F "text_query=person in red jacket" \
+  -F "top_k=8"
+
+# Query image only (must be image/*)
+curl -X POST http://localhost:9000/semantic_search/search \
+  -F "file=@/path/to/query.jpg" \
+  -F "top_k=5"
+
+curl http://localhost:9000/semantic_search/health
+```
 
 ---
 

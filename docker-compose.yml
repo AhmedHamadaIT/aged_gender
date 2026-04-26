@@ -68,10 +68,13 @@ services:
       - RTSP_OPENCV_BUFFER_SIZE=3
       - RTSP_WARMUP_FRAMES=8
       - RTSP_FFMPEG_OPTIONS=
-      # Hardware decode (Jetson): match RTSP_HWDECODER to the camera codec, or leave GPU decode off for max compatibility.
-      - RTSP_ENABLE_GPU_DECODE=false
+      # Hardware decode (Jetson): auto uses /etc/nv_tegra_release or device-tree; true forces hw map; false = CPU.
+      # Override decoder names if your ffmpeg build uses nvmpi instead of v4l2m2m (see .env.example).
+      - RTSP_ENABLE_GPU_DECODE=${RTSP_ENABLE_GPU_DECODE:-auto}
       - RTSP_HWACCEL=cuda
-      - RTSP_HWDECODER=hevc_nvv4l2dec
+      - RTSP_JETSON_HEVC_DECODER=${RTSP_JETSON_HEVC_DECODER:-}
+      - RTSP_JETSON_H264_DECODER=${RTSP_JETSON_H264_DECODER:-}
+      - RTSP_HWDECODER=${RTSP_HWDECODER:-}
       # Code-side throttling for high-resolution cameras when camera settings are not accessible.
       - WIDTH=480
       - HEIGHT=360

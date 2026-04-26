@@ -326,6 +326,8 @@ def frames(source: str = None, camera_id: str = None):
                             wait,
                             reconnect_streak,
                         )
+                        if getattr(reader, "_adaptive", None) is not None:
+                            reader._adaptive.log_stderr_tail("reconnect_after_read_failures")
                         reader.release()
                         time.sleep(wait)
                         try:
