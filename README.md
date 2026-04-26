@@ -1958,6 +1958,7 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `RTSP_JETSON_HEVC_DECODER` / `RTSP_JETSON_H264_DECODER` | *(unset)* | Optional ffmpeg decoder names for HEVC/H.265 and H.264 (e.g. `hevc_nvmpi` on some Jetson ffmpeg builds). |
 | `RTSP_HWDECODER` | *(unset)* | Legacy fallback decoder when per-codec vars are unset (same name is passed for the probed codec — use only if you know your stream matches). |
 | `STREAM_ADAPTER_FFMPEG_STDERR_MAX` | `8192` | Max bytes of ffmpeg stderr retained for logging on RTSP reconnect ([`stream_adapter.py`](stream_adapter.py)). |
+| `RTSP_ADAPTIVE_FAILOVER_AFTER` | `4` | If Adaptive FFmpeg reconnect fails this many cycles consecutively, `stream.py` switches that camera process to OpenCV RTSP fallback. |
 | `RTSP_FFMPEG_EXTRA_OPTIONS` | *(see `utils/rtsp_ffmpeg.py`)* | Extra OpenCV-FFmpeg options (pipe-separated `key;value` segments); `rtsp_transport;tcp` is always applied |
 | `RTSP_MAX_CONSECUTIVE_READ_FAILS` | `10` | Fails before stream reconnect in `stream.py` |
 | `STREAM_RECONNECT_BASE_SEC` / `STREAM_RECONNECT_MAX_SEC` | `2` / `30` | Exponential reconnect backoff (capped) |

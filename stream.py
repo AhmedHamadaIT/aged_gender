@@ -143,6 +143,8 @@ class _RTSPReader:
         self._adaptive_profile = None
         self._connect_count = 0
         self._force_cpu_decode = False
+        self._disable_adaptive_ffmpeg = False
+        self._adaptive_failure_cycles = 0
 
     def connect(self) -> None:
         global _current_quality_label, _current_decoder_type, _current_hw_decoder_requested
@@ -153,7 +155,7 @@ class _RTSPReader:
         _current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
         _current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
 
-        if _env_bool("RTSP_ADAPTIVE_FFMPEG", "true"):
+        if _env_bool("RTSP_ADAPTIVE_FFMPEG", "true") and not self._disable_adaptive_ffmpeg:
             profile = StreamProber.probe(self.url, camera_id=self.camera_id)
             if self._force_cpu_decode and profile.hw_decoder_requested:
                 log.warning(
@@ -312,6 +314,7 @@ def frames(source: str = None, camera_id: str = None):
     consecutive_fails = 0
     reconnect_streak  = 0
     throttle = _FrameThrottle.from_env()
+    adaptive_failover_after = max(1, _env_int("RTSP_ADAPTIVE_FAILOVER_AFTER", 4, minimum=1))
 
     reader.connect()
     if throttle.frame_skip > 1 or throttle.target_fps > 0:
@@ -343,6 +346,18 @@ def frames(source: str = None, camera_id: str = None):
                                     "[STREAM] Camera %s: disabling HW decode due to ffmpeg device errors",
                                     reader.camera_id,
                                 )
+                            reader._adaptive_failure_cycles += 1
+                            if (
+                                not reader._disable_adaptive_ffmpeg
+                                and reader._adaptive_failure_cycles >= adaptive_failover_after
+                            ):
+                                reader._disable_adaptive_ffmpeg = True
+                                log.warning(
+                                    "[STREAM] Camera %s: adaptive ffmpeg failed %d cycles; "
+                                    "switching to OpenCV fallback",
+                                    reader.camera_id,
+                                    reader._adaptive_failure_cycles,
+                                )
                         reader.release()
                         time.sleep(wait)
                         try:
@@ -361,6 +376,8 @@ def frames(source: str = None, camera_id: str = None):
                 continue
             consecutive_fails = 0
             reconnect_streak  = 0
+            if is_rtsp and getattr(reader, "_adaptive", None) is not None:
+                reader._adaptive_failure_cycles = 0
             if not throttle.should_yield():
                 continue
             yield frame
