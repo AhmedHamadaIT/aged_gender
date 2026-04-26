@@ -135,3 +135,39 @@ def test_adaptive_stream_command_scales_and_outputs_bgr(monkeypatch):
     assert "-timeout" not in cmd
     assert f"scale={profile.target_width}:{profile.target_height}:flags=fast_bilinear" in vf
     assert cmd[-3:] == ["-pix_fmt", "bgr24", "pipe:1"]
+
+
+def test_hw_decoder_disable_detects_device_errors():
+    profile = CameraProfile(
+        camera_id="cam1",
+        url="rtsp://example/cam",
+        target_width=640,
+        target_height=480,
+        target_fps=5.0,
+        hw_decoder_requested="hevc_v4l2m2m",
+        decoder="hevc_v4l2m2m",
+        hw_decoder_active=True,
+    )
+    stream = AdaptiveStream(profile)
+    stream._stderr_tail.extend(
+        b"[hevc_v4l2m2m] Could not find a valid device\n"
+        b"[hevc_v4l2m2m] can't configure decoder\n"
+        b"Error while opening decoder for input stream #0:0 : Invalid argument\n"
+    )
+    assert stream.should_disable_hw_decoder() is True
+
+
+def test_hw_decoder_disable_ignores_non_device_errors():
+    profile = CameraProfile(
+        camera_id="cam1",
+        url="rtsp://example/cam",
+        target_width=640,
+        target_height=480,
+        target_fps=5.0,
+        hw_decoder_requested="hevc_v4l2m2m",
+        decoder="hevc_v4l2m2m",
+        hw_decoder_active=True,
+    )
+    stream = AdaptiveStream(profile)
+    stream._stderr_tail.extend(b"[hevc] PPS id out of range: 0\nCould not find ref with POC 12\n")
+    assert stream.should_disable_hw_decoder() is False

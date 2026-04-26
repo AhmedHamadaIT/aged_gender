@@ -142,6 +142,7 @@ class _RTSPReader:
         self._adaptive = None
         self._adaptive_profile = None
         self._connect_count = 0
+        self._force_cpu_decode = False
 
     def connect(self) -> None:
         global _current_quality_label, _current_decoder_type, _current_hw_decoder_requested
@@ -154,6 +155,14 @@ class _RTSPReader:
 
         if _env_bool("RTSP_ADAPTIVE_FFMPEG", "true"):
             profile = StreamProber.probe(self.url, camera_id=self.camera_id)
+            if self._force_cpu_decode and profile.hw_decoder_requested:
+                log.warning(
+                    "[STREAM] HW decoder disabled for camera=%s after device errors; using CPU decode",
+                    self.camera_id,
+                )
+                profile.hw_decoder_requested = None
+                profile.hw_decoder_active = False
+                profile.decoder = "cpu"
             stream = AdaptiveStream(profile)
             if stream.open():
                 self._adaptive_profile = profile
@@ -328,6 +337,12 @@ def frames(source: str = None, camera_id: str = None):
                         )
                         if getattr(reader, "_adaptive", None) is not None:
                             reader._adaptive.log_stderr_tail("reconnect_after_read_failures")
+                            if reader._adaptive.should_disable_hw_decoder():
+                                reader._force_cpu_decode = True
+                                log.warning(
+                                    "[STREAM] Camera %s: disabling HW decode due to ffmpeg device errors",
+                                    reader.camera_id,
+                                )
                         reader.release()
                         time.sleep(wait)
                         try:

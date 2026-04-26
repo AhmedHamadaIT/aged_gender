@@ -280,6 +280,27 @@ class AdaptiveStream:
         if text:
             logger.warning("[%s] ffmpeg stderr tail (%s): %s", self.profile.camera_id, reason, text)
 
+    def stderr_tail_text(self) -> str:
+        if not self._stderr_tail:
+            return ""
+        return self._stderr_tail.decode("utf-8", errors="replace")
+
+    def should_disable_hw_decoder(self) -> bool:
+        """
+        Detect hard HW-decoder device failures and trigger CPU fallback.
+        """
+        if not self.profile.hw_decoder_requested:
+            return False
+        text = self.stderr_tail_text().lower()
+        markers = (
+            "could not find a valid device",
+            "can't configure decoder",
+            "error while opening decoder",
+            "device or resource busy",
+            "operation not permitted",
+        )
+        return any(marker in text for marker in markers)
+
     def open(self) -> bool:
         self._stderr_tail.clear()
         self._stderr_thread = None
