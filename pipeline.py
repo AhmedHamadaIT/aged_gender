@@ -37,6 +37,16 @@ import numpy as np
 
 from utils import resize, save_frame
 
+# ML Image Contract V2: full | light (type only) | none (omit images key)
+_PIPELINE_IMAGE_MODE = os.getenv("PIPELINE_IMAGE_MODE", "full").lower()
+
+
+def _make_pipeline_image_entry(img_type: str, b64: str) -> dict:
+    entry = {"type": img_type}
+    if _PIPELINE_IMAGE_MODE == "full":
+        entry["base64"] = b64
+    return entry
+
 
 class CameraPipeline:
     def __init__(
@@ -125,6 +135,12 @@ class CameraPipeline:
                 for service in services:
                     context = service(context)
 
+                # ── Encode post-service frame as annotated JPEG (V2) ──
+                _, ann_buf   = cv2.imencode(
+                    ".jpg", context["data"]["frame"], [cv2.IMWRITE_JPEG_QUALITY, 85]
+                )
+                annotated_b64 = base64.b64encode(ann_buf).decode("utf-8")
+
                 # ── Save annotated frame ──
                 if self.save_output:
                     save_frame(context["data"]["frame"], self.out_dir, frame_count)
@@ -133,11 +149,19 @@ class CameraPipeline:
                 detection_data = context["data"].get("detection", {})
                 use_case_data  = context["data"].get("use_case",  {})
 
+                images_v2 = {}
+                if _PIPELINE_IMAGE_MODE != "none":
+                    images_v2 = {
+                        "raw"      : _make_pipeline_image_entry("raw",       frame_b64),
+                        "annotated": _make_pipeline_image_entry("annotated", annotated_b64),
+                    }
+
                 result = {
                     "camera_id"  : self.camera_id,
                     "frame_count": frame_count,
                     "timestamp"  : datetime.utcnow().isoformat(),
                     "frame"      : frame_b64,
+                    **({"images": images_v2} if images_v2 else {}),
                     "data": {
                         "detection": {
                             "count": detection_data.get("count", 0),

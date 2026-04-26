@@ -6,6 +6,8 @@ Server-Sent Events from the vision pipeline (all cameras multiplexed on one conn
 
 **Note:** Each JSON payload may also include a top-level `"frame"` key (base64 JPEG). It is omitted in the examples below for readability.
 
+**ML Image Contract V2:** the Eyego block under **`data`** may include **`data.evidence`** with **`captureImage`** and **`sceneImage`** (structured `url` / `path` / `type` / `format` / `timestamp`) alongside `captureUrl` / `sceneUrl` / `captureId` / `sceneId`. On multiplexed `GET /detection/stream`, per-frame **structured** events may set top-level **`evidence`** with the same V2 `captureImage`; `sceneImage` can be `{ "url": null, "type": "scene", "status": "not_available" }` when a single file backs the event. See [service_doc/ml_image_v2.md](service_doc/ml_image_v2.md) for all task types, env vars, and **SSH** JSONL paths.
+
 ---
 
 ## Case summary (quick reference)

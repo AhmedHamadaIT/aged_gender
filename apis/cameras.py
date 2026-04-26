@@ -12,7 +12,12 @@ Endpoints (registered in app.py):
     DELETE /cameras/{cam_id} → remove a camera
 """
 
+import os
+import re
+from datetime import datetime, timezone
 from typing import Dict, Optional
+
+import cv2
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
@@ -35,6 +40,14 @@ class CameraSetupRequest(BaseModel):
 class CameraRegistry:
     def __init__(self):
         self._cameras: Dict[str, str] = {}  # {cam_id: rtsp_url}
+        self._snapshot_frame_index = max(1, int(os.getenv("CAMERA_SNAPSHOT_FRAME_INDEX", "5")))
+        self._snapshot_jpeg_quality = min(
+            100,
+            max(1, int(os.getenv("CAMERA_SNAPSHOT_JPEG_QUALITY", "75"))),
+        )
+        self._snapshot_max_reads = max(self._snapshot_frame_index + 2, int(os.getenv("CAMERA_SNAPSHOT_MAX_READS", "15")))
+        self._snapshot_dir = os.path.abspath(os.getenv("CAMERA_SNAPSHOT_DIR", "./outputs/camera_snapshots"))
+        os.makedirs(self._snapshot_dir, exist_ok=True)
 
     def add(self, cam_id: str, url: str):
         self._cameras[cam_id] = url
@@ -62,10 +75,69 @@ class CameraRegistry:
         }
 
     def on_get(self):
+        cameras = []
+        for cam_id, url in self._cameras.items():
+            cameras.append(
+                {
+                    "id": cam_id,
+                    "url": url,
+                    "snapshot": self._capture_snapshot(cam_id, url),
+                }
+            )
         return {
             "count"  : len(self._cameras),
-            "cameras": [{"id": k, "url": v} for k, v in self._cameras.items()],
+            "cameras": cameras,
         }
+
+    def _capture_snapshot(self, cam_id: str, url: str) -> Optional[str]:
+        """
+        Read one stable frame from the stream and save it as JPEG.
+        Returns None if capture fails to keep API response resilient.
+        """
+        cap = None
+        try:
+            if url.startswith("rtsp://"):
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            else:
+                cap = cv2.VideoCapture(url)
+
+            if not cap.isOpened():
+                return None
+
+            valid_frame = None
+            good_frames = 0
+            for _ in range(self._snapshot_max_reads):
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                good_frames += 1
+                if good_frames >= self._snapshot_frame_index:
+                    valid_frame = frame
+                    break
+
+            if valid_frame is None:
+                return None
+
+            safe_cam_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", cam_id).strip("_") or "camera"
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            file_name = f"{safe_cam_id}_{ts}.jpg"
+            file_path = os.path.join(self._snapshot_dir, file_name)
+
+            ok = cv2.imwrite(
+                file_path,
+                valid_frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self._snapshot_jpeg_quality],
+            )
+            if not ok:
+                return None
+
+            return file_path
+        except Exception:
+            return None
+        finally:
+            if cap is not None:
+                cap.release()
 
     def on_delete(self, cam_id: str):
         self.remove(cam_id)

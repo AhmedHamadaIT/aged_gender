@@ -274,6 +274,7 @@ That's it. The task worker, FrameBus, and **`GET /detection/stream`** pick it up
 | Never block inside `__call__` | The task worker has no timeout — a hanging task stalls that queue permanently |
 | Filter `track_id == -1` if you use tracking | BoT-SORT takes 1–2 frames to assign stable IDs; `-1` means "not yet tracked" |
 | Persist evidence yourself | The task worker does not save anything — persistence is the task's responsibility |
+| Emit **`evidence.captureImage` / `evidence.sceneImage`** as **ML Image Contract V2** objects (`utils.build_image`) | See [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md) |
 | Use `put_nowait` semantics | The result queue drops silently if full — don't rely on every event making it to SSE; persist a durable copy (e.g. `$EVENTS_DIR/task_<taskId>.jsonl`) for replay |
 | SSE filter fields | Include top-level **`eventType`**, **`taskId`**, **`channelId`** (and **`taskName`** if needed) so `GET /detection/stream?...` filters work |
 | Keep `__init__` fast | It runs inside the worker process after `fork()` — loading large models here is fine, but keep it focused |

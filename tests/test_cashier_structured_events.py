@@ -48,7 +48,13 @@ def test_build_cashier_structured_event_shape():
     assert ev["data"]["algorithmType"] == "CASHIER_BOX_OPEN"
     ps = json.loads(ev["data"]["personStructural"])
     assert ps["case_matched"] == "N3"
-    assert ev["evidence"]["captureImage"] == "/tmp/evidence.jpg"
+    cap = ev["evidence"]["captureImage"]
+    assert isinstance(cap, dict)
+    assert cap["type"] == "capture"
+    assert cap["path"] == "tmp/evidence.jpg"
+    sce = ev["evidence"]["sceneImage"]
+    assert sce["type"] == "scene"
+    assert sce["status"] == "not_available"
 
 
 def test_severity_to_case_level_mapping():

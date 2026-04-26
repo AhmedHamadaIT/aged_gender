@@ -699,21 +699,31 @@ SSE endpoint: each `data:` line is one **task-produced event** (for example a `C
   "channelId": 4,
   "line": {"id": "1", "name": "Entrance", "direction": 1},
   "person": {"trackingId": 1, "boundingBox": {}, "attributes": {}, "confidence": 0.9},
-  "evidence": {"captureImage": "…", "sceneImage": "…"}
+  "evidence": {
+    "captureImage": { "url": "…", "path": "2026-04-22/cam-1_…_….jpg", "type": "capture", "format": "image/jpeg", "timestamp": "2026-04-22T12:00:00.000Z" },
+    "sceneImage": { "url": "…", "path": "2026-04-22/cam-1_…_….jpg", "type": "scene", "format": "image/jpeg", "timestamp": "2026-04-22T12:00:00.000Z" }
+  }
 }
 ```
+
+Task JSONL on disk: `$EVENTS_DIR/task_<taskId>.jsonl`. Full **ML Image V2** + SSH: [service_doc/ml_image_v2.md](service_doc/ml_image_v2.md).
 
 ---
 
 ### **Legacy pipeline JSON** (`pipeline.py` / batch)
 
-The following structure applies to **offline or script-driven** runs that use `CameraPipeline` and `services.REGISTRY` (not the v2 `/detection/stream` SSE):
+The following structure applies to **offline or script-driven** runs that use `CameraPipeline` and `services.REGISTRY` (not the v2 `/detection/stream` SSE). Each result may include a legacy base64 field **`frame`**, plus optional **`images`** (V2) when `PIPELINE_IMAGE_MODE` is not `none` (`full` = include `base64` under `raw` / `annotated`; `light` = `type` only; `none` = omit `images`):
 
 ```json
 {
   "camera_id": "main_room",
   "frame_count": 5,
   "timestamp": "2026-03-17T12:50:23+00:00",
+  "frame": "<base64 JPEG raw pre-annotation>",
+  "images": {
+    "raw": { "type": "raw", "base64": "..." },
+    "annotated": { "type": "annotated", "base64": "..." }
+  },
   "data": {
     "detection": {
       "count": 1,
