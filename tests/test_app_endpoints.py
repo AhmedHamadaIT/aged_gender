@@ -45,6 +45,7 @@ def test_openapi_contains_expected_http_paths(client: TestClient):
         "/stream/metrics",
         "/stream/health",
         "/stream/health/{camera_id}",
+        "/stream/pipeline-health",
         "/stream/quality-events",
         "/stream/live/{camera_id}",
         "/cashier/status",
@@ -233,6 +234,28 @@ def test_stream_metrics_returns_populated_camera(client: TestClient):
         assert row["reconnects"] == 2
         assert row["uptime_sec"] == 360.0
         assert row["fps_actual"] == 12.3
+    finally:
+        app_mod.detection._shared_state.clear()
+
+
+def test_stream_pipeline_health_endpoint(client: TestClient):
+    fake = {
+        "camera_id": "cam-health",
+        "running": True,
+        "drop_rate": 0.5,
+        "reconnects": 1,
+        "events_total": 10,
+    }
+    try:
+        app_mod.detection._shared_state.clear()
+        app_mod.detection._shared_state["cam-health"] = fake
+        r = client.get("/stream/pipeline-health")
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["status"] == "ok"
+        assert payload["camera_count"] == 1
+        assert payload["cameras"][0]["camera_id"] == "cam-health"
+        assert payload["cameras"][0]["status"] == "ok"
     finally:
         app_mod.detection._shared_state.clear()
 

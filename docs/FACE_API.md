@@ -2,6 +2,8 @@
 
 This module provides a robust face recognition system for the `ml-server`, backed by InsightFace and FAISS. It supports library management, stranger detection, and real-time video stream recognition.
 
+**HTTP cURL quick reference (aligned with the running app):** [API_USAGE.md §16 — Face recognition library](./API_USAGE.md#16-face-recognition-library-apiface).
+
 ## Architecture Components
 
 The system is split into four primary components:

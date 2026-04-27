@@ -299,10 +299,10 @@ curl -si "http://<jetson-ip>:9000/cashier/media/cashier_cam_01/event/A2_20260329
 ### Detection error examples
 
 ```bash
-# No cameras running -> code 203 in JSON body
+# 409 when no cameras are running (FastAPI: JSON body with "detail")
 curl -si -X POST "http://<jetson-ip>:9000/detection/stop"
 
-# Unknown stream camera -> code 301 in JSON body
+# 404 — no route for path suffixes; SSE is only GET /detection/stream (optional ?taskId=…&channelId=…)
 curl -si "http://<jetson-ip>:9000/detection/stream/cam999"
 ```
 
@@ -311,11 +311,11 @@ curl -si "http://<jetson-ip>:9000/detection/stream/cam999"
 ## Recommended setup order
 
 1. `POST /cameras` — register RTSP sources  
-2. `POST /detection/setup` — choose pipeline services (`cashier` must be **last** if you use it)  
+2. **`POST /detection/setup`** — *not present* in the current v2 HTTP API (pipeline is fixed per task type; see [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md)).  
 3. `POST /cashier/zones` — optional; defaults load from `CASHIER_CONFIG` (often `./config/cashier_zones.yaml`)  
 4. `GET /cashier/zones` — optional; inspect merged on-disk config (`zones` as `[[x,y],…]`)  
-5. `POST /detection/start` — spawn pipeline process(es)  
-6. `GET /detection/stream` or `GET /detection/status` — consume results  
+5. `POST /detection/start` — spawn pipeline process(es); use **`?all_channels=true`** when enabled tasks span multiple `channelId` values (see [API_USAGE.md](./API_USAGE.md#3-start-detection))  
+6. `GET /detection/stream` or `GET /detection/status` (alias **`GET /status`**) — consume results  
 7. After traffic flows: `GET /cashier/status`, `GET /cashier/events`, optional `GET /cashier/stream/{camera_id}` — cashier-specific state and SSE  
 
 ---
@@ -333,13 +333,21 @@ curl -s "http://<jetson-ip>:9000/"
 **Sample JSON response**
 
 ```json
-{"service": "Vision Pipeline API", "version": "1.0.0"}
+{"service": "Vision Pipeline API", "version": "2.0.0"}
 ```
 
 **Key fields**
 
 - `service` — Product name string.  
 - `version` — API version string.  
+
+### `GET /health`
+
+Process liveness — same `version` field as `/`; does not probe Redis or models.
+
+```bash
+curl -s "http://<jetson-ip>:9000/health"
+```
 
 ---
 
@@ -477,13 +485,17 @@ curl -s -X POST "http://<jetson-ip>:9000/detection/setup" \
 
 ### `POST /detection/start`
 
-Start the pipeline for one camera or for all configured cameras.
+Start the pipeline for one camera, for **all** enabled task channels, or (when only one distinct `channelId` exists among enabled tasks) a single implicit channel.
 
 ```bash
+# One camera only
 curl -s -X POST "http://<jetson-ip>:9000/detection/start?camera_id=cam1"
+
+# All channels that have enabled tasks (required when tasks use multiple channelIds)
+curl -s -X POST "http://<jetson-ip>:9000/detection/start?all_channels=true"
 ```
 
-Omit `camera_id` to start every configured camera.
+Omit both `camera_id` and `all_channels` only when every enabled task shares the **same** `channelId`; otherwise the server returns **`400`** with a hint to pass `all_channels=true` or `camera_id=…`. See [API_USAGE.md §3](./API_USAGE.md#3-start-detection).
 
 **Sample JSON response**
 
@@ -511,7 +523,7 @@ Stop one camera or all running cameras.
 curl -s -X POST "http://<jetson-ip>:9000/detection/stop?camera_id=cam1"
 ```
 
-Omit `camera_id` to stop **all** running cameras.
+Omit `camera_id` to stop **all** running cameras. Equivalent: **`POST /detection/stop/all`**.
 
 **Sample JSON response**
 

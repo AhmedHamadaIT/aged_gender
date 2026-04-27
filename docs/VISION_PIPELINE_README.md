@@ -348,9 +348,17 @@ There is **no** `POST /detection/setup` in the v2 HTTP API.
 ### Start
 
 ```bash
+# Single channel among all enabled tasks (same channelId everywhere)
 curl -s -X POST "$BASE/detection/start"
+
+# Multiple cameras / channelIds among enabled tasks
+curl -s -X POST "$BASE/detection/start?all_channels=true"
+
+# One camera only
 curl -s -X POST "$BASE/detection/start?camera_id=1"
 ```
+
+`GET /status` is the same payload as `GET /detection/status`. `POST /detection/stop/all` is an alias for stopping all cameras (same as `POST /detection/stop` with no `camera_id`).
 
 ### Example success (200)
 
@@ -366,7 +374,9 @@ curl -s -X POST "$BASE/detection/start?camera_id=1"
 
 ```bash
 curl -s "$BASE/detection/status"
+curl -s "$BASE/status"
 curl -s -X POST "$BASE/detection/stop"
+curl -s -X POST "$BASE/detection/stop/all"
 curl -s -X POST "$BASE/detection/stop?camera_id=1"
 ```
 

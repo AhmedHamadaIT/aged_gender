@@ -62,3 +62,44 @@ With `RTSP_BACKEND=auto` (default) on a Jetson with OpenCV+GStreamer, the app pr
 ## Credentials
 
 Never commit camera passwords or real RTSP URLs into the repo. Use environment-specific `.env` or secret storage.
+
+## Real-time drops runbook (production)
+
+Frame drops are expected under pressure when queue coalescing is enabled (`TASK_QUEUE_COALESCE=true`): old frames are discarded so workers process fresher frames with lower end-to-end latency.
+
+### Quick health checks
+
+```bash
+curl -s http://127.0.0.1:9000/stream/metrics | python3 -m json.tool
+curl -s http://127.0.0.1:9000/stream/pipeline-health | python3 -m json.tool
+curl -s http://127.0.0.1:9000/detection/status | python3 -m json.tool
+```
+
+### Alert thresholds (suggested)
+
+- `critical`: `running=false`
+- `critical`: `reconnects > 5`
+- `critical`: `drop_rate > 0.8`
+- `warning`: `drop_rate > 0.6`
+- `warning`: `reconnects > 2`
+- `warning`: no events while worker is running
+
+### When to ignore vs act
+
+- **Ignore / normal behavior**
+  - `drop_rate` around `0.3` to `0.6` and events continue to flow.
+  - Queue coalescing counters increase but latest frames are still processed.
+- **Investigate soon**
+  - `drop_rate` remains above `0.6` for several minutes.
+  - `reconnects` keeps increasing (network jitter, RTSP instability).
+- **Immediate action**
+  - Worker not running (`running=false`).
+  - `drop_rate > 0.8` sustained.
+  - No detection events at all for active scenes/tasks.
+
+### Fast mitigations if drop rate is high
+
+1. Use camera H.264 substream (avoid high-bitrate/HEVC main stream on edge boxes).
+2. Lower input resolution (`WIDTH`) or source FPS.
+3. Increase worker capacity or reduce expensive per-frame operations.
+4. Increase `TASK_QUEUE_MAXSIZE` moderately and keep coalescing enabled.

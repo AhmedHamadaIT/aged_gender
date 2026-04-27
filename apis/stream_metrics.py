@@ -25,6 +25,58 @@ def _redis_url() -> str:
     return os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 
+def _pipeline_health_for_camera(row: dict[str, Any]) -> dict[str, Any]:
+    """
+    Build a simple health verdict for one camera.
+
+    Status levels:
+    - ok:      pipeline is healthy
+    - warning: pipeline is running but requires attention soon
+    - critical:pipeline is not producing reliable results
+    """
+    running = bool(row.get("running", False))
+    reconnects = int(row.get("reconnects", 0) or 0)
+    drop_rate = float(row.get("drop_rate", 0.0) or 0.0)
+    events_total = int(row.get("events_total", 0) or 0)
+
+    # Track reasons so operators can see exactly why a status changed.
+    reasons: list[str] = []
+    status = "ok"
+
+    if not running:
+        status = "critical"
+        reasons.append("worker_not_running")
+    if reconnects > 5:
+        status = "critical"
+        reasons.append("rtsp_reconnects_high")
+    if drop_rate > 0.8:
+        status = "critical"
+        reasons.append("drop_rate_critical")
+
+    if status != "critical":
+        if drop_rate > 0.6:
+            status = "warning"
+            reasons.append("drop_rate_high")
+        if reconnects > 2:
+            status = "warning"
+            reasons.append("rtsp_reconnects_elevated")
+
+    # Only surface "no events" as a warning when the worker is actually running.
+    if running and events_total == 0:
+        status = "warning" if status == "ok" else status
+        reasons.append("no_events_observed")
+
+    return {
+        "camera_id": str(row.get("camera_id", row.get("id", ""))),
+        "status": status,
+        "running": running,
+        "reconnects": reconnects,
+        "drop_rate": drop_rate,
+        "events_total": events_total,
+        "reasons": reasons,
+    }
+
+
 @router.get("/metrics")
 async def stream_metrics(request: Request):
     """Per-camera pipeline stats.
@@ -70,6 +122,32 @@ async def camera_stream_health(camera_id: str, request: Request):
     if row is None:
         return {"error": f"Camera {camera_id} not found"}
     return detection.enrich_shared_camera_row(camera_id, dict(row))
+
+
+@router.get("/pipeline-health")
+async def stream_pipeline_health(request: Request):
+    """
+    Operator-focused health endpoint with clear status levels.
+
+    Thresholds:
+    - critical if running=false, reconnects>5, or drop_rate>0.8
+    - warning if reconnects>2, drop_rate>0.6, or no events observed yet
+    """
+    rows = await stream_metrics(request)
+    cameras = [_pipeline_health_for_camera(row) for row in rows]
+    has_critical = any(cam["status"] == "critical" for cam in cameras)
+    has_warning = any(cam["status"] == "warning" for cam in cameras)
+
+    overall_status = "critical" if has_critical else ("warning" if has_warning else "ok")
+    return {
+        "status": overall_status,
+        "camera_count": len(cameras),
+        "cameras": cameras,
+        "thresholds": {
+            "critical": {"reconnects_gt": 5, "drop_rate_gt": 0.8},
+            "warning": {"reconnects_gt": 2, "drop_rate_gt": 0.6},
+        },
+    }
 
 
 @router.get("/quality-events")

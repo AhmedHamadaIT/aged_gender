@@ -2,12 +2,15 @@
 
 Base URL for all examples: `http://localhost:9000`
 
-**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — pytest, log/JSONL paths (`EVENTS_DIR`), cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence. **ML Image Contract V2** (structured `evidence`, env, disk, SSH): [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md). Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md).
+**API version:** `2.0.0` (returned by `GET /` and `GET /health` as `version`).
+
+**See also:** [VISION_PIPELINE_README.md](./VISION_PIPELINE_README.md) — pytest, log/JSONL paths (`EVENTS_DIR`), cURL, SSH, and **CASHIER_BOX_OPEN** `data` / evidence. **ML Image Contract V2** (structured `evidence`, env, disk, SSH): [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md). Eyego cURL, mock responses, and full-case JSON: [CASHIER_BOX_OPEN.md](./CASHIER_BOX_OPEN.md). Face stack (InsightFace, FAISS, stream task): [FACE_API.md](./FACE_API.md).
 
 ---
 
 ## Table of Contents
 
+0. [Service metadata and liveness](#0-service-metadata-and-liveness)
 1. [Register Cameras](#1-register-cameras)
 2. [Register Tasks](#2-register-tasks)
 3. [Start Detection](#3-start-detection)
@@ -23,6 +26,23 @@ Base URL for all examples: `http://localhost:9000`
 13. [Stream metrics and quality (`/stream/*`)](#13-stream-metrics-and-quality-stream)
 14. [Person search / ReID (`/person_search/*`)](#14-person-search-reid-person_search)
 15. [Semantic image search (`/semantic_search/*`)](#15-semantic-image-search-semantic_search)
+16. [Face recognition library (`/api/face/*`)](#16-face-recognition-library-apiface)
+
+---
+
+## 0. Service metadata and liveness
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/` | Service name and version: `{"service":"Vision Pipeline API","version":"2.0.0"}` |
+| `GET` | `/health` | Liveness — process is up; does **not** verify Redis, Qdrant, or model files |
+| `GET` | `/status` | Same JSON model as **`GET /detection/status`** (cameras / pipeline state) |
+
+```bash
+curl -s http://localhost:9000/
+curl -s http://localhost:9000/health
+curl -s http://localhost:9000/status
+```
 
 ---
 
@@ -311,12 +331,28 @@ curl -X POST http://localhost:9000/api/tasks \
 
 ## 3. Start Detection
 
-### Start all cameras (all tasks)
+### Query parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `camera_id` | string | omitted | If set, only tasks whose `channelId` matches this camera are started, and only that camera’s FrameBus is started |
+| `all_channels` | bool | `false` | If **`true`**, start every distinct `channelId` among enabled tasks (requires a registered camera per channel). If omitted and you have **more than one** distinct channel among enabled tasks, **`POST /detection/start` without `camera_id` returns `400`** — use `?all_channels=true` or start one channel at a time with `?camera_id=…` |
+
+### Start all cameras (all enabled task channels)
+
+When your enabled tasks span **multiple** cameras, you must opt in explicitly:
+
+```bash
+curl -X POST "http://localhost:9000/detection/start?all_channels=true"
+```
+
+If every enabled task shares the **same** `channelId`, a plain start is enough:
+
 ```bash
 curl -X POST http://localhost:9000/detection/start
 ```
 
-**Response:**
+**Response (multi-camera example):**
 ```json
 {
   "status": "started",
@@ -348,8 +384,13 @@ curl -X POST "http://localhost:9000/detection/start?camera_id=1"
 
 ## 4. Monitor Status
 
+**Canonical path:** `GET /detection/status`  
+**Alias:** `GET /status` — same `DetectionStatus` payload (cameras, `running`, fps, errors, etc.).
+
 ```bash
 curl http://localhost:9000/detection/status
+# equivalent:
+curl http://localhost:9000/status
 ```
 
 **Response (while running):**
@@ -429,7 +470,7 @@ All parameters are optional and combine with **AND** logic:
 | `taskId` | int | Only events from this task ID |
 | `taskName` | string | Only events whose `taskName` matches (note: not guaranteed unique across tasks) |
 | `eventType` | string | Only events of this type (`CROSS_LINE`, `MASK_HAIRNET_CHEF_HAT`, `PHONE_USAGE`, `CASHIER_BOX_OPEN`) |
-| `channelId` | int | Only events from this camera channel |
+| `channelId` | string | Only events from this camera channel (same string as camera `id` / task `channelId`; numeric ids work as query values, e.g. `channelId=1`) |
 
 ```bash
 # Only events from task 10
@@ -601,8 +642,13 @@ Persisted to disk as one JSON line per frame: **`$EVENTS_DIR/task_<taskId>.jsonl
 ## 6. Stop Detection
 
 ### Stop all cameras
+
+Either omit `camera_id` on **`POST /detection/stop`**, or call the explicit alias **`POST /detection/stop/all`** (same behavior).
+
 ```bash
 curl -X POST http://localhost:9000/detection/stop
+# same as:
+curl -X POST http://localhost:9000/detection/stop/all
 ```
 
 **Response:**
@@ -745,6 +791,17 @@ curl -X POST http://localhost:9000/detection/start
 }
 ```
 
+### 400 — Multiple task channels (start without `camera_id` or `all_channels`)
+When enabled tasks reference **more than one** `channelId`, a bare `POST /detection/start` is rejected:
+
+```json
+{
+  "detail": "Multiple enabled task channels: ['1', '2']. Use POST /detection/start?camera_id=<id> to start one channel, or pass all_channels=true to start all."
+}
+```
+
+Use `POST /detection/start?all_channels=true` or start each camera with `?camera_id=1`, etc.
+
 ### 400 — Unsupported algorithmType
 ```json
 {
@@ -854,8 +911,8 @@ curl -X POST http://localhost:9000/api/tasks \
     "detailConfig":{"drawerOpenLimit":20,"serviceWaitLimit":90}
   }'
 
-# 3. Start
-curl -X POST http://localhost:9000/detection/start
+# 3. Start (tasks use channels 1 and 2 — require all_channels=true)
+curl -X POST "http://localhost:9000/detection/start?all_channels=true"
 
 # 4. Open SSE stream in terminal (keep open) — all tasks, or cashier-only:
 curl -N http://localhost:9000/detection/stream
@@ -863,6 +920,7 @@ curl -N http://localhost:9000/detection/stream
 
 # 5. Check status in another terminal
 curl http://localhost:9000/detection/status
+# curl http://localhost:9000/status
 
 # 6. Cashier monitor (optional — uses task 30 on channel 1)
 curl -s http://localhost:9000/cashier/zones
@@ -1550,6 +1608,47 @@ Single-camera summary, or an `error` object if that camera id is not in shared s
 curl http://localhost:9000/stream/health/1
 ```
 
+### `GET /stream/pipeline-health`
+
+Simple operator verdict for real-time pipeline health (per camera + overall).
+
+The endpoint classifies each camera as:
+- `ok`
+- `warning`
+- `critical`
+
+Current thresholds:
+- `critical` when `running=false`, `reconnects > 5`, or `drop_rate > 0.8`
+- `warning` when `reconnects > 2`, `drop_rate > 0.6`, or no events are observed yet while running
+
+```bash
+curl -s http://localhost:9000/stream/pipeline-health | python3 -m json.tool
+```
+
+Typical response:
+
+```json
+{
+  "status": "ok",
+  "camera_count": 1,
+  "cameras": [
+    {
+      "camera_id": "1",
+      "status": "ok",
+      "running": true,
+      "reconnects": 1,
+      "drop_rate": 0.5,
+      "events_total": 128,
+      "reasons": []
+    }
+  ],
+  "thresholds": {
+    "critical": { "reconnects_gt": 5, "drop_rate_gt": 0.8 },
+    "warning": { "reconnects_gt": 2, "drop_rate_gt": 0.6 }
+  }
+}
+```
+
 ### `GET /stream/quality-events` (SSE)
 
 Subscribes to Redis channel **`stream:quality_events`**. Each SSE `data:` line is JSON text describing quality / ladder changes. Requires `REDIS_URL` and a publisher writing to that channel.
@@ -1606,6 +1705,79 @@ curl -X POST http://localhost:9000/semantic_search/search \
   -F "top_k=5"
 
 curl http://localhost:9000/semantic_search/health
+```
+
+---
+
+## 16. Face recognition library (`/api/face/*`)
+
+On-device **face libraries**, **1:N recognition** against enrolled embeddings, and **stranger** storage/search. Implemented in [`apis/face_lib.py`](../apis/face_lib.py) using `FaceEngine` + `FaceStore`. All routes are under the **`/api/face`** prefix.
+
+### Libraries
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/face/lib` | Create a library — **multipart form**: `lib_id` (int), `name` (string). Returns `409` if `lib_id` already exists |
+| `GET` | `/api/face/lib` | List libraries |
+| `GET` | `/api/face/lib/{lib_id}` | Library details — `404` if missing |
+| `DELETE` | `/api/face/lib/{lib_id}` | Delete library — `404` if missing |
+
+```bash
+curl -X POST http://localhost:9000/api/face/lib \
+  -F "lib_id=1" \
+  -F "name=Staff"
+
+curl -s http://localhost:9000/api/face/lib
+curl -s http://localhost:9000/api/face/lib/1
+```
+
+### Persons (enrollment)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/face/lib/{lib_id}/persons` | **Multipart**: `person_id` (int), `name` (string), **`images`** — one or more image files. Each image must contain a detectable face (`400` otherwise). `404` if library missing; `409` on store conflict |
+| `GET` | `/api/face/lib/{lib_id}/persons` | List persons in library |
+| `DELETE` | `/api/face/lib/{lib_id}/persons/{person_id}` | Remove one person |
+
+```bash
+curl -X POST http://localhost:9000/api/face/lib/1/persons \
+  -F "person_id=100" \
+  -F "name=Alice" \
+  -F "images=@/path/to/face1.jpg" \
+  -F "images=@/path/to/face2.jpg"
+```
+
+### Recognition (probe image vs libraries)
+
+**`POST /api/face/recognize`** — multipart: **`image`** (file, required), optional **`lib_ids`** (string, default `"-1"` — meaning depends on `FaceStore.search`), **`threshold`** (int, default `70`), **`top_k`** (int, default `5`). Detects all faces in the image and returns matches per face.
+
+```bash
+curl -X POST http://localhost:9000/api/face/recognize \
+  -F "image=@/path/to/query.jpg" \
+  -F "lib_ids=1" \
+  -F "threshold=70" \
+  -F "top_k=5"
+```
+
+Response shape: `{ "face_count", "faces": [ { "face": {...}, "matches": [ { "person_id", "person_name", "lib_id", "score", "face_image" } ] } ] }`. **`400`** if the image cannot be read or no face is detected.
+
+### Strangers (unknown faces)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/face/strangers` | Paginated list — query `limit` (1–1000, default `100`), `offset` (≥ 0) |
+| `POST` | `/api/face/strangers/search` | **Multipart**: `image` (required), `top_k` (default `5`), `threshold` (default `30`). Returns nearest stranger records |
+| `DELETE` | `/api/face/strangers` | Clear all strangers — `{ "status": "cleared", "count": <n> }` |
+
+```bash
+curl -s "http://localhost:9000/api/face/strangers?limit=50&offset=0"
+
+curl -X POST http://localhost:9000/api/face/strangers/search \
+  -F "image=@/path/to/face.jpg" \
+  -F "top_k=5" \
+  -F "threshold=30"
+
+curl -X DELETE http://localhost:9000/api/face/strangers
 ```
 
 ---
