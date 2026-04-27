@@ -17,7 +17,7 @@ Task config shape (from POST /api/tasks):
     "taskId"        : int,
     "taskName"      : str,
     "algorithmType" : "CROSS_LINE",
-    "channelId"     : int,
+    "channelId"     : str | int,    # JSON number accepted; stored as str
     "enable"        : bool,
     "threshold"     : int,            # 0-100 — minimum detection confidence
     "areaPosition"  : str,            # JSON-encoded array of line definitions
@@ -124,8 +124,16 @@ class CrossLineTask:
         if not self.enable or not self.lines or not self._in_schedule():
             return []
 
-        frame     = payload["frame"]       # np.ndarray BGR
         detection = payload["detection"]
+        frame_cache = None
+
+        def _frame_bgr():
+            nonlocal frame_cache
+            if frame_cache is None:
+                from utils.task_payload import task_frame_bgr
+
+                frame_cache = task_frame_bgr(payload)
+            return frame_cache
 
         persons = [
             d for d in detection.get("items", [])
@@ -149,7 +157,10 @@ class CrossLineTask:
                 if crossing_dir is None:
                     continue
 
-                attrs = self._get_attributes(frame, det)
+                attrs = self._get_attributes(
+                    _frame_bgr() if self.enable_attr else None,
+                    det,
+                )
                 event = self._build_event(
                     det,
                     line,
@@ -158,7 +169,7 @@ class CrossLineTask:
                     payload["timestamp"],
                     str(payload.get("camera_id") or ""),
                 )
-                self._persist(event, frame, det)
+                self._persist(event, _frame_bgr(), det)
                 events.append(event)
 
         # Purge side-state for tracks no longer in the frame

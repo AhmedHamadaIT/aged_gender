@@ -52,7 +52,7 @@ The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detect
 
 ### Docker Compose (GPU)
 
-The repo includes [`docker-compose.yml`](docker-compose.yml): NVIDIA runtime, project bind-mount, `models/` and `outputs/` volumes, port **9000**, optional [`.env`](.env).
+The repo includes [`docker-compose.yml`](docker-compose.yml): NVIDIA runtime, project bind-mount, `models/` and `outputs/` volumes, port **9000**, optional [`.env`](.env) (copy from [`.env.example`](.env.example) for RTSP/Jetson hints).
 
 ```bash
 docker compose up -d --build
@@ -72,7 +72,7 @@ from the directory that contains `docker-compose.yml`.
 
 ### Architecture (v2 runtime)
 
-- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`.
+- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`, `LIVE_ANNOTATION_MODE` (`ultralytics` / `opencv` / `none`). Ingest path: `RTSP_BACKEND` (`auto` / `gstreamer` / `ffmpeg` / `opencv`) — see [`stream.py`](stream.py) / [`stream_gstreamer.py`](stream_gstreamer.py) on Jetson.
 - **Task workers** ([`task_worker.py`](task_worker.py)) — One worker process per enabled task; looks up `algorithmType` in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`, emits events to the shared result queue **and** publishes them to Redis `live:event:{camera_id}`.
 - **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` (subscribes from both the multiprocessing queue and Redis `live:event:*` so multiple uvicorn workers can all serve SSE). Serves **WebSocket** live frame stream at `WS /cameras/{id}/live` via [`apis/ws_live.py`](apis/ws_live.py).
 - **Redis** ([`docker-compose.yml`](docker-compose.yml) `redis:7-alpine`) — Fire-and-forget Pub/Sub broker. FrameBus publishes binary JPEG frames; FastAPI WebSocket handlers subscribe. No persistence needed (`--appendonly no`).
@@ -310,6 +310,8 @@ connect("cam1");   // change to your camera id
 |---|---|---|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
 | `REDIS_LIVE_FPS` | `13` | Target publish rate (fps); FrameBus auto-adjusts per measured camera FPS |
+| `LIVE_ANNOTATION_MODE` | `ultralytics` | `ultralytics` (full `plot()`), `opencv` (fast boxes), or `none` (no overlay) for live Redis JPEGs; still uses full plot when `SAVE_OUTPUT` is on |
+| `RTSP_BACKEND` | `auto` | `auto` (GStreamer NVDEC on Jetson if available, else Adaptive FFmpeg, else OpenCV), or force `gstreamer` / `ffmpeg` / `opencv` |
 | `WS_SEND_TIMEOUT_MS` | `50` | Drop frame if client cannot receive within this many ms |
 
 ### Cashier — zones (`GET` / `POST` / `POST …/reset`)
@@ -2274,15 +2276,40 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `CASHIER_EVIDENCE_DIR` | `./evidence/cashier` | Evidence storage |
 | `CASHIER_LOG_MAX` | `5000` | Max in-memory cashier events |
 
-# Face Recognition config
+### Face Recognition (env)
 
+```bash
 export FACE_MODEL="buffalo_l"
 export FACE_DET_SIZE="640"
 export FACE_STORAGE_DIR="./data/face"
 export FACE_DEVICE="0"
 export DEVICE_SN="EDGE_DEVICE_001"
-
 ```
+
+### RTSP stability (H.264 / H.265) and snapshots
+| Variable | Default | Role |
+|----------|---------|------|
+| `RTSP_ENABLE_GPU_DECODE` | `auto` in Compose | Jetson hardware decode for Adaptive FFmpeg ([`stream_adapter.py`](stream_adapter.py)): `auto` enables `*_v4l2m2m` when Jetson is detected; `true` forces that path; `false` uses CPU. Set `true` if `auto` skips HW inside Docker. |
+| `RTSP_JETSON_HEVC_DECODER` / `RTSP_JETSON_H264_DECODER` | *(unset)* | Optional ffmpeg decoder names for HEVC/H.265 and H.264 (e.g. `hevc_nvmpi` on some Jetson ffmpeg builds). |
+| `RTSP_HWDECODER` | *(unset)* | Legacy fallback decoder when per-codec vars are unset (same name is passed for the probed codec — use only if you know your stream matches). |
+| `STREAM_ADAPTER_FFMPEG_STDERR_MAX` | `8192` | Max bytes of ffmpeg stderr retained for logging on RTSP reconnect ([`stream_adapter.py`](stream_adapter.py)). |
+| `RTSP_ADAPTIVE_FAILOVER_AFTER` | `4` | If Adaptive FFmpeg reconnect fails this many cycles consecutively, `stream.py` switches that camera process to OpenCV RTSP fallback. |
+| `RTSP_FFMPEG_EXTRA_OPTIONS` | *(see `utils/rtsp_ffmpeg.py`)* | Extra OpenCV-FFmpeg options (pipe-separated `key;value` segments); `rtsp_transport;tcp` is always applied |
+| `RTSP_MAX_CONSECUTIVE_READ_FAILS` | `10` | Fails before stream reconnect in `stream.py` |
+| `STREAM_RECONNECT_BASE_SEC` / `STREAM_RECONNECT_MAX_SEC` | `2` / `30` | Exponential reconnect backoff (capped) |
+| `RTSP_OPENCV_BUFFER_SIZE` / `RTSP_OPEN_TIMEOUT_MSEC` / `RTSP_READ_TIMEOUT_MSEC` | `1` / `15000` / `0` | OpenCV capture tuning |
+| `CAMERA_SNAPSHOT_CACHE_TTL_SEC` | `5` | `GET /cameras` reuses a recent JPEG per camera instead of opening RTSP on every request |
+
+**Substream (e.g. Hikvision):** for a lighter H.264 feed, point `POST /cameras` at a substream URL such as `.../Streaming/channels/102` or `.../h264/ch1/sub/av_stream` instead of the 4K main path. See [`.env.example`](.env.example).
+
+### ONNX Runtime and GPU policy
+| Variable | Default | Role |
+|----------|---------|------|
+| `ONNX_ALLOW_TENSORRT` | `1` | Allow TensorRT execution provider when installed |
+| `ONNX_TENSORRT_CACHE_PATH` | `./trt_cache` | TensorRT engine cache directory |
+| `ML_REQUIRE_INFERENCE_GPU` | *(unset)* | If `1`/`true`, YOLO/Ultralytics paths require `torch.cuda` when `DEVICE` is a CUDA index or `cuda` |
+| `ML_REQUIRE_ONNX_GPU` | *(unset)* | If `1`/`true`, `onnxruntime` sessions must use CUDA/TensorRT (fails on CPU-only) |
+| `REID_MODEL_ONNX` | *(unset)* | Optional OSNet-compatible ONNX for Re-ID (`PersonSearchService`); otherwise `REID_MODEL_PATH` (TorchScript) is used |
 
 ### Detection Thresholds
 - **YOLO Confidence**: 0.35 (configurable via `CONF_THRESHOLD`)

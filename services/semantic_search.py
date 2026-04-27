@@ -39,8 +39,9 @@ class SemanticSearchService:
                 )
 
             import gc
-            import onnxruntime as ort
             import open_clip
+
+            from utils.onnx_runtime import create_inference_session
 
             # ── MobileCLIP Model + Transforms Setup ──────────────────────────
             model_name = os.getenv("MOBILECLIP_MODEL", "MobileCLIP2-S0")
@@ -57,36 +58,9 @@ class SemanticSearchService:
             del base_model
             gc.collect()
 
-            providers = [
-                ("TensorrtExecutionProvider", {
-                    "device_id": 0,
-                    "trt_max_workspace_size": 2147483648,
-                    "trt_fp16_enable": True,
-                    "trt_engine_cache_enable": True,
-                    "trt_engine_cache_path": "./trt_cache",
-                }),
-                "CUDAExecutionProvider",
-                "CPUExecutionProvider",
-            ]
-            available_providers = set(ort.get_available_providers())
-            selected_providers = []
-
-            for provider in providers:
-                provider_name = provider[0] if isinstance(provider, tuple) else provider
-                if provider_name in available_providers:
-                    selected_providers.append(provider)
-
-            if any(
-                isinstance(provider, tuple) and provider[0] == "TensorrtExecutionProvider"
-                for provider in selected_providers
-            ):
-                os.makedirs("./trt_cache", exist_ok=True)
-
-            if not selected_providers:
-                selected_providers = ["CPUExecutionProvider"]
-
-            self.image_session = ort.InferenceSession(image_onnx_path, providers=selected_providers)
-            self.text_session  = ort.InferenceSession(text_onnx_path, providers=selected_providers)
+            # GPU-first (TensorRT → CUDA → CPU) — shared with other ONNX services
+            self.image_session = create_inference_session(image_onnx_path)
+            self.text_session = create_inference_session(text_onnx_path)
 
             self.image_input_name = self.image_session.get_inputs()[0].name
             self.text_input_name  = self.text_session.get_inputs()[0].name

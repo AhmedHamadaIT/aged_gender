@@ -16,9 +16,13 @@ Endpoints (registered in app.py):
     DELETE /api/tasks/{task_id}   → remove a task
 """
 
-from typing import List, Optional
+from __future__ import annotations
+
+import json
+from typing import Any, List, Optional
+
 from fastapi import HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # Sentinel returned when a taskName lookup is ambiguous (multiple tasks share the same name).
 _AMBIGUOUS = object()
@@ -64,19 +68,79 @@ class TaskConfig(BaseModel):
     libIds        : str         = "-1"
     enableStranger: bool        = True
 
+    @field_validator("channelId", mode="before")
+    @classmethod
+    def _channel_id_to_str(cls, v: Any) -> str:
+        """Allow numeric JSON (e.g. 1) while matching cameras by string id everywhere."""
+        if v is None:
+            raise TypeError("channelId is required")
+        if isinstance(v, bool):
+            raise TypeError("channelId must be str or int, not bool")
+        return str(v)
+
 
 # ─────────────────────────────────────────────
 # Registry
 # ─────────────────────────────────────────────
+def _validate_cross_line_area_position(area_position: str) -> None:
+    """
+    Enabled CROSS_LINE tasks must have areaPosition as a non-empty JSON array
+    of line objects, each with point: [{x,y},{x,y}] (see services/cross_line.py).
+    """
+    if not area_position or not area_position.strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "CROSS_LINE task with enable=true requires a non-empty areaPosition "
+                "JSON array with at least one line (line_id, point with two {x,y} points)."
+            ),
+        )
+    try:
+        parsed: Any = json.loads(area_position)
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"areaPosition must be valid JSON: {e}",
+        ) from e
+    if not isinstance(parsed, list) or len(parsed) < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "CROSS_LINE areaPosition must be a JSON array with at least one line object."
+            ),
+        )
+    for i, line in enumerate(parsed):
+        if not isinstance(line, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"CROSS_LINE areaPosition[{i}] must be an object.",
+            )
+        pts = line.get("point")
+        if not isinstance(pts, list) or len(pts) != 2:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"CROSS_LINE areaPosition[{i}] must have \"point\" as an array of "
+                    "exactly two {{x,y}} objects."
+                ),
+            )
+        for j, p in enumerate(pts):
+            if not isinstance(p, dict) or "x" not in p or "y" not in p:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"CROSS_LINE areaPosition[{i}].point[{j}] must be an object with x and y."
+                    ),
+                )
+
+
 class TaskRegistry:
     SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_BOX_OPEN", "PHONE_USAGE", "FACE"}
 
     def __init__(self):
         self._tasks: dict = {}   # {task_id (int): task_config (dict)}
 
-    # ── CRUD ──────────────────────────────────
-
-    def upsert(self, config: TaskConfig) -> dict:
+    def _validate_config(self, config: TaskConfig) -> None:
         if config.algorithmType not in self.SUPPORTED:
             raise HTTPException(
                 status_code=400,
@@ -85,6 +149,13 @@ class TaskRegistry:
                     f"Supported: {sorted(self.SUPPORTED)}"
                 ),
             )
+        if config.algorithmType == "CROSS_LINE" and config.enable:
+            _validate_cross_line_area_position(config.areaPosition)
+
+    # ── CRUD ──────────────────────────────────
+
+    def upsert(self, config: TaskConfig) -> dict:
+        self._validate_config(config)
         self._tasks[config.taskId] = config.model_dump()
         return self._tasks[config.taskId]
 
@@ -142,8 +213,9 @@ class TaskRegistry:
     # ── API handlers ───────────────────────────
 
     def on_post(self, config: TaskConfig):
+        existed = config.taskId in self._tasks
         task = self.upsert(config)
-        return {"status": "created", "task": task}
+        return {"status": "updated" if existed else "created", "task": task}
 
     def on_get_all(self):
         return {"count": len(self._tasks), "tasks": self.all()}

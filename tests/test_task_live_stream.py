@@ -14,6 +14,7 @@ All tests pass without a camera, Redis, or a real RTSP stream.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,12 +36,32 @@ def _make_registry(*configs: dict) -> TaskRegistry:
     return reg
 
 
+# Valid CROSS_LINE areaPosition for enabled tasks (see apis.tasks validation).
+_AP_LINE = json.dumps(
+    [
+        {
+            "line_id": "1",
+            "line_name": "L",
+            "point": [{"x": 0, "y": 0}, {"x": 100, "y": 0}],
+            "direction": 0,
+        }
+    ]
+)
+
 _BASE = {
     "taskId": 1,
     "taskName": "entrance_line",
     "algorithmType": "CROSS_LINE",
     "channelId": "cam1",
+    "areaPosition": _AP_LINE,
 }
+
+
+def test_task_config_channel_id_int_coerced_to_str():
+    cfg = TaskConfig(**{**_BASE, "channelId": 1})
+    assert cfg.channelId == "1"
+    dumped = cfg.model_dump()
+    assert dumped["channelId"] == "1"
 
 
 def test_get_by_name_found():

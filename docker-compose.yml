@@ -52,9 +52,60 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
       - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Include `video` for NVDEC/NVENC when RTSP_ENABLE_GPU_DECODE=true (Jetson Orin).
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # Jetson / ONNX: if TensorRT EP errors (e.g. vendor/card quirks), try:
+      #   ONNX_EXECUTION_PROVIDERS_ORDER=cuda_first
+      # or disable TRT: ONNX_ALLOW_TENSORRT=0
       # Default for in-compose Redis (avoids localhost:6379 inside the container)
       - REDIS_URL=redis://redis:6379/0
+      # RTSP defaults favor decode stability (HEVC/H.264, jittery Wi‑Fi, substreams).
+      # For lowest latency on a clean LAN + H.264, set RTSP_PROFILE=performance and RTSP_LOW_DELAY=true.
+      - RTSP_PROFILE=balanced
+      - FORCE_TRANSCODE=false
+      - RTSP_DISCARD_CORRUPT=true
+      - RTSP_LOW_DELAY=false
+      - RTSP_OPENCV_BUFFER_SIZE=3
+      - RTSP_WARMUP_FRAMES=8
+      - RTSP_FFMPEG_OPTIONS=
+      # Ingest: auto = GStreamer NVDEC on Jetson (if OpenCV+GStreamer), else Adaptive FFmpeg, else OpenCV.
+      # gstreamer | ffmpeg | opencv to force one path (see stream.py / stream_gstreamer.py).
+      - RTSP_BACKEND=${RTSP_BACKEND:-auto}
+      - RTSP_GSTREAMER=${RTSP_GSTREAMER:-true}
+      - LIVE_ANNOTATION_MODE=${LIVE_ANNOTATION_MODE:-ultralytics}
+      # Hardware decode (Jetson): auto uses /etc/nv_tegra_release or device-tree; true forces hw map; false = CPU.
+      # Override decoder names if your ffmpeg build uses nvmpi instead of v4l2m2m (see .env.example).
+      - RTSP_ENABLE_GPU_DECODE=${RTSP_ENABLE_GPU_DECODE:-auto}
+      - RTSP_HWACCEL=cuda
+      - RTSP_JETSON_HEVC_DECODER=${RTSP_JETSON_HEVC_DECODER:-}
+      - RTSP_JETSON_H264_DECODER=${RTSP_JETSON_H264_DECODER:-}
+      - RTSP_HWDECODER=${RTSP_HWDECODER:-}
+      # Code-side throttling for high-resolution cameras when camera settings are not accessible.
+      - WIDTH=480
+      - HEIGHT=360
+      - FRAME_SKIP=2
+      - STREAM_TARGET_FPS=5
+      - QUALITY_LADDER=854x480x8,640x360x5
+      - STREAM_DOWNGRADE_AFTER=20
+      - STREAM_DOWNGRADE_COOLDOWN=30
+      - FRAME_MIN_VARIANCE=8.0
+      - STREAM_MAX_FAILS=15
+      - STREAM_RECONNECT_DELAY=2.0
+      - EMBED_CONF_THRESHOLD=0.45
+      - EMBED_BATCH_SIZE=8
+      - EMBED_FLUSH_TIMEOUT=3.0
+      - REDIS_LIVE_FPS=10
+      # FrameBus → task worker queue depth; IPC is lighter when TASK_QUEUE_INCLUDE_FRAME=false (default).
+      - TASK_QUEUE_MAXSIZE=8
+      # When a task queue is full, drop the oldest pending frame and enqueue the latest (keeps workers fresh).
+      - TASK_QUEUE_COALESCE=true
+      - LOG_LEVEL=DEBUG
+      # Start coalescing before saturation so slow task workers do not build stale backlog.
+      - TASK_QUEUE_COALESCE_THRESHOLD=0.5
+      # false = JPEG only over the queue (fast); true = also send raw BGR ndarray (heavy pickle; legacy).
+      - TASK_QUEUE_INCLUDE_FRAME=false
+      # Throttle "task queue saturated" stderr lines per task id.
+      - FRAMEBUS_QUEUE_WARN_INTERVAL_SEC=15
 
     volumes:
       - .:/app                  # mount entire project directory
@@ -73,7 +124,7 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu, compute, utility]
+              capabilities: [gpu, compute, utility, video]
 
     restart: "no"
 

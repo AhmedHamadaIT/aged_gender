@@ -87,6 +87,12 @@ class PPEService:
 
         self.model = YOLO(model_path, task="detect")
 
+        from utils.ml_backend import require_gpu_device_if_configured, resolve_ultralytics_device
+
+        require_gpu_device_if_configured(
+            resolve_ultralytics_device(), "PPEService"
+        )
+
         log.info(f"[PPE] Ready — labels: {list(LABELS.values())}\n")
 
     # Crop person box with small padding.

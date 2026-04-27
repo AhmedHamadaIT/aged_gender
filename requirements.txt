@@ -1,6 +1,7 @@
 # Core
 ultralytics>=8.0.0          # YOLOv8
-# OpenCV must come from the Jetson/L4T image or system packages so GStreamer/NVDEC support is preserved.
+# OpenCV: desktop/x86 — opencv-python-headless. Jetson Docker: use L4T OpenCV; do not pip over it (GStreamer/NVDEC).
+opencv-python-headless
 
 # Config loading
 python-dotenv>=1.0.0        # Reads .env file
@@ -10,6 +11,7 @@ requests>=2.28.0
 Pillow>=9.0.0
 PyYAML>=6.0
 tqdm>=4.64.0
+# Desktop/x86: PyPI wheel. Jetson Docker: see dockerfile (onnxruntime-gpu from jetson-ai-lab jp6/cu126).
 onnxruntime
 scipy>=1.10.0
 

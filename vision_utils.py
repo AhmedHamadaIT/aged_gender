@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 """
-utils.py
---------
+vision_utils.py
+----------------
 Drawing, resizing, and frame saving utilities.
 ML Image Contract V2 helpers (get_base_url, build_image, make_evidence_paths).
 """
@@ -10,8 +12,10 @@ import uuid as _uuid
 import cv2
 import numpy as np
 from datetime import datetime, timezone
-from typing import List, Tuple
-from services.detector import Detection
+from typing import List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from services.detector import Detection
 
 
 # ─────────────────────────────────────────────

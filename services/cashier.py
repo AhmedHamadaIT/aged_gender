@@ -119,6 +119,7 @@ from dotenv import load_dotenv
 
 from logger.logger_config import Logger
 from utils import build_image
+from utils.task_payload import task_frame_bgr
 
 # Optional GIF support
 try:
@@ -829,8 +830,9 @@ class CashierService:
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"[CASHIER] Model not found: {model_path}")
 
-        import onnxruntime as ort
-        self._sess     = ort.InferenceSession(model_path)
+        from utils.onnx_runtime import create_inference_session
+
+        self._sess = create_inference_session(model_path)
         self._inp_name = self._sess.get_inputs()[0].name
         inp            = self._sess.get_inputs()[0].shape
         self._img_size = (int(inp[3]), int(inp[2]))
@@ -1979,7 +1981,7 @@ class CashierDrawerTask:
         context: Dict[str, Any] = {
             "camera_id": camera_id,
             "data": {
-                "frame": payload["frame"],
+                "frame": task_frame_bgr(payload),
                 "detection": {"items": list(items), "count": len(items)},
                 "use_case": {},
             },

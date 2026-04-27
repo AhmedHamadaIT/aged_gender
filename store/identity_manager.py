@@ -15,7 +15,7 @@ Environment variables:
 
 import os
 import uuid
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict, Tuple, Union
 
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -133,3 +133,36 @@ class IdentityManager:
         except Exception as e:
             raise
         return point_id
+
+    def upsert_batch(
+        self,
+        batch: List[Tuple[str, Union[list, Any], Optional[dict]]],
+        wait: bool = False,
+    ) -> None:
+        """
+        Upsert multiple (point_id, vector, payload) tuples in one Qdrant call.
+
+        Args:
+            batch: list of (point_id, feature_vector, payload)
+            wait:  if False, do not block on index confirmation (lower tail latency)
+        """
+        if not batch:
+            return
+        points = []
+        for point_id, feature_vector, payload in batch:
+            pl = payload or {}
+            vec = feature_vector
+            if hasattr(vec, "tolist"):
+                vec = vec.tolist()
+            points.append(
+                PointStruct(
+                    id=point_id,
+                    vector=vec,
+                    payload=pl,
+                )
+            )
+        self.client.upsert(
+            collection_name=self.collection,
+            points=points,
+            wait=wait,
+        )

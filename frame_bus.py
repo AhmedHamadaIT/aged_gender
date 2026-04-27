@@ -23,9 +23,12 @@ _repo_root = os.path.dirname(os.path.abspath(__file__))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+_DEFAULT_TRACKER_YAML = os.path.join(_repo_root, "cfg", "trackers", "botsort_stable.yaml")
+
 import time
 import base64
 import hashlib
+import queue as _queue
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -40,6 +43,10 @@ try:
     _REDIS_AVAILABLE = True
 except ImportError:
     _REDIS_AVAILABLE = False
+
+# Minimum confidence / variance to emit crop to embedding worker
+_EMBED_CONF_THRESHOLD = float(os.getenv("EMBED_CONF_THRESHOLD", "0.45"))
+_EMBED_MIN_VARIANCE = float(os.getenv("FRAME_MIN_VARIANCE", "8.0"))
 
 
 class FrameBus:
@@ -78,6 +85,12 @@ class FrameBus:
         self._classes = classes
         self._names   = self._model.names
 
+        from utils.ml_backend import require_gpu_device_if_configured, resolve_ultralytics_device
+
+        require_gpu_device_if_configured(
+            resolve_ultralytics_device(), "FrameBus"
+        )
+
         # ── Best-crop-per-track state ─────────────────────────────────────
         # { track_id: {"best_area": int, "last_frame": int} }
         self._track_state: Dict[int, Dict] = {}
@@ -106,8 +119,172 @@ class FrameBus:
         self._publish_every = max(1, round(25.0 / _target_fps))  # assume 25 FPS until measured
         self._target_fps    = _target_fps
 
+        self._frames_dropped = 0
+        self._frames_passed  = 0
+        self._embed_skipped  = 0
+        self._embed_passed   = 0
+
+        _tracker_env = os.getenv("TRACKER_YAML", "").strip()
+        self._tracker_yaml = _tracker_env or (
+            _DEFAULT_TRACKER_YAML if os.path.isfile(_DEFAULT_TRACKER_YAML) else "botsort.yaml"
+        )
+
+        # Wall-clock spacing between yielded frames (EMA) — jitter / stall indicator for metrics.
+        self._metrics_last_wall_t: Optional[float] = None
+        self._metrics_inter_frame_ema_ms = 0.0
+
+        # Per-task queue backpressure (put_nowait failures) + throttled warnings
+        self._task_queue_drops_by_task: Dict[str, int] = {
+            str(k): 0 for k in self.task_queues
+        }
+        self._queue_warn_last: Dict[str, float] = {}
+        self._queue_warn_interval = float(
+            os.getenv("FRAMEBUS_QUEUE_WARN_INTERVAL_SEC", "5.0")
+        )
+        self._task_queue_maxsize = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "256")))
+        self._task_queue_coalesce = os.getenv("TASK_QUEUE_COALESCE", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        self._task_queue_coalesce_threshold = self._env_float_clamped(
+            "TASK_QUEUE_COALESCE_THRESHOLD", 0.8, 0.0, 1.0
+        )
+        self._include_frame_ndarray = os.getenv(
+            "TASK_QUEUE_INCLUDE_FRAME", "false"
+        ).lower() in ("true", "1", "yes")
+        self._task_queue_coalesced_by_task: Dict[str, int] = {
+            str(k): 0 for k in self.task_queues
+        }
+
+        _lam = os.getenv("LIVE_ANNOTATION_MODE", "ultralytics").lower().strip()
+        self._live_annotation_mode: str = (
+            _lam if _lam in ("ultralytics", "opencv", "none") else "ultralytics"
+        )
+
+    @staticmethod
+    def _env_float_clamped(name: str, default: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(os.getenv(name, str(default)))
+        except ValueError:
+            value = default
+        return min(max(value, minimum), maximum)
+
+    def _coalesce_oldest_task_payload(self, q, tid: str, force: bool = False) -> bool:
+        if not self._task_queue_coalesce:
+            return False
+
+        if not force:
+            if self._task_queue_coalesce_threshold >= 1.0:
+                return False
+            try:
+                queue_usage_ratio = q.qsize() / self._task_queue_maxsize
+            except Exception:
+                return False
+            if queue_usage_ratio < self._task_queue_coalesce_threshold:
+                return False
+
+        try:
+            q.get_nowait()
+            self._task_queue_coalesced_by_task[tid] = (
+                self._task_queue_coalesced_by_task.get(tid, 0) + 1
+            )
+            return True
+        except _queue.Empty:
+            return False
+        except Exception:
+            return False
+
+    def _enqueue_task_payload(self, q, tid: str, payload: dict) -> None:
+        """
+        Bounded queue fan-out. When full, optionally drop the oldest item and
+        retry once so workers stay on fresh frames (TASK_QUEUE_COALESCE).
+        """
+        self._coalesce_oldest_task_payload(q, tid)
+        try:
+            q.put_nowait(payload)
+            return
+        except _queue.Full:
+            pass
+        except Exception:
+            self._frames_dropped += 1
+            self._task_queue_drops_by_task[tid] = (
+                self._task_queue_drops_by_task.get(tid, 0) + 1
+            )
+            self._warn_task_queue_full(tid)
+            return
+
+        self._coalesce_oldest_task_payload(q, tid, force=True)
+        try:
+            q.put_nowait(payload)
+            return
+        except _queue.Full:
+            pass
+
+        self._frames_dropped += 1
+        self._task_queue_drops_by_task[tid] = (
+            self._task_queue_drops_by_task.get(tid, 0) + 1
+        )
+        self._warn_task_queue_full(tid)
+
+    def _warn_task_queue_full(self, tid: str) -> None:
+        nowt = time.time()
+        if nowt - self._queue_warn_last.get(tid, 0.0) >= self._queue_warn_interval:
+            self._queue_warn_last[tid] = nowt
+            hint = (
+                "Consider raising TASK_QUEUE_MAXSIZE, lowering WIDTH, using a "
+                "lower-resolution RTSP substream, or keep TASK_QUEUE_COALESCE=true "
+                "(drops oldest queued frame for freshest)."
+            )
+            print(
+                f"[{self.camera_id}] Task queue saturated; dropping frame for "
+                f"task {tid} (TASK_QUEUE_MAXSIZE={self._task_queue_maxsize}). {hint}"
+            )
+
+    def _draw_boxes_opencv(self, frame, detections: list):
+        """Lighter than Ultralytics plot(); for Redis preview / LIVE_ANNOTATION_MODE=opencv."""
+        out = frame
+        for det in detections:
+            x1, y1, x2, y2 = int(det.x1), int(det.y1), int(det.x2), int(det.y2)
+            cv2.rectangle(out, (x1, y1), (x2, y2), (0, 200, 0), 1, lineType=cv2.LINE_AA)
+            tid = det.track_id
+            if tid is not None and int(tid) >= 0:
+                label = f"{det.class_name} {int(tid)}"
+            else:
+                label = str(det.class_name)
+            cv2.putText(
+                out,
+                label,
+                (x1, max(0, y1 - 2)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (0, 255, 0),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+        return out
+
+    def _annotate_for_stream(
+        self, resized_frame, results, detections: list, need_draw: bool
+    ):
+        """
+        Build frame with boxes for live Redis / optional disk save.
+        Skips heavy Ultralytics ``plot()`` when not needed (see need_draw).
+        """
+        if not need_draw:
+            return resized_frame
+        if self._live_annotation_mode == "none":
+            return resized_frame
+        if self._live_annotation_mode == "opencv":
+            if not detections:
+                return resized_frame
+            return self._draw_boxes_opencv(resized_frame, detections)
+        if results:
+            return results[0].plot()
+        return resized_frame
+
     def run(self):
-        from stream import frames
+        from stream import QUALITY_LADDER, frames
 
         fps_counter      = 0
         fps_timer        = time.time()
@@ -118,6 +295,7 @@ class FrameBus:
 
         print(f"[{self.camera_id}] FrameBus started — tasks: {list(self.task_queues.keys())}")
 
+        _q0 = QUALITY_LADDER[0]["label"] if QUALITY_LADDER else "live"
         self.shared_state[self.camera_id] = {
             "camera_id"       : self.camera_id,
             "rtsp_url"        : self.rtsp_url,
@@ -128,18 +306,57 @@ class FrameBus:
             "total_detections": 0,
             "uptime_seconds"  : 0.0,
             "error"           : None,
+            "stream_quality"  : _q0,
+            "frames_dropped"  : 0,
+            "drop_rate"       : 0.0,
+            "decode_error_rate": 0.0,
+            "task_queue_drops": 0,
+            "task_queue_drop_rate": 0.0,
+            "reconnects"      : 0,
+            "latency_estimate_ms": 0.0,
+            "stream_read_failures": 0,
+            "decode_failures" : 0,
+            "decoder"         : "cpu",
+            "hw_decoder_requested": None,
+            "hw_decoder_active": False,
+            "stream_codec"    : None,
+            "stream_native"   : None,
+            "stream_target"   : None,
+            "stream_health"   : {},
+            "profile"         : os.getenv("RTSP_PROFILE", "balanced").lower(),
+            "transport"       : os.getenv("RTSP_TRANSPORT", "tcp"),
+            "embed_skip_rate" : 0.0,
+            "uptime_sec"      : 0.0,
+            "fps_actual"      : 0.0,
+            "state_updated_at": time.time(),
+            "task_queue_drops_by_task": dict(self._task_queue_drops_by_task),
+            "task_queue_coalesced_by_task": dict(self._task_queue_coalesced_by_task),
+            "live_annotation_mode": self._live_annotation_mode,
+            "rtsp_backend": "unknown",
         }
 
         if self.save_output:
             os.makedirs(self.out_dir, exist_ok=True)
 
         try:
-            for frame in frames(self.rtsp_url):
+            for frame in frames(self.rtsp_url, camera_id=self.camera_id):
+                now_wall = time.time()
+                if self._metrics_last_wall_t is not None:
+                    dt_ms = (now_wall - self._metrics_last_wall_t) * 1000.0
+                    if self._metrics_inter_frame_ema_ms <= 0.0:
+                        self._metrics_inter_frame_ema_ms = dt_ms
+                    else:
+                        self._metrics_inter_frame_ema_ms = (
+                            0.85 * self._metrics_inter_frame_ema_ms + 0.15 * dt_ms
+                        )
+                self._metrics_last_wall_t = now_wall
+
                 if self.stop_event.is_set():
                     break
 
                 frame_count += 1
                 fps_counter += 1
+                self._frames_passed += 1
 
                 elapsed = time.time() - fps_timer
                 if elapsed >= 1.0:
@@ -159,7 +376,7 @@ class FrameBus:
                 results = self._model.track(
                     resized_frame,
                     persist  = True,          # keeps track state across frames
-                    tracker  = "botsort.yaml",
+                    tracker  = self._tracker_yaml,
                     conf     = self._conf,
                     classes  = self._classes,
                     device   = self._device,
@@ -173,11 +390,16 @@ class FrameBus:
                 # ── Save best crop per tracked person ─────────────────────────
                 self._save_best_crops(resized_frame, detections, frame_count)
 
-                # Always annotate — needed for live stream even when SAVE_OUTPUT is off
-                annotated = results[0].plot() if results else resized_frame
+                will_publish = self._redis is not None and (
+                    frame_count % self._publish_every == 0
+                )
+                need_draw   = self.save_output or will_publish
+                annotated   = self._annotate_for_stream(
+                    resized_frame, results, detections, need_draw
+                )
 
                 # ── Publish annotated JPEG to Redis (live stream) ──────────────
-                if self._redis is not None and frame_count % self._publish_every == 0:
+                if will_publish:
                     try:
                         _, _buf = cv2.imencode(
                             ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75]
@@ -193,29 +415,112 @@ class FrameBus:
                     "frame_id"  : frame_count,
                     "timestamp" : datetime.utcnow().isoformat(),
                     "frame_b64" : frame_b64,
-                    "frame"     : resized_frame.copy(),
                     "detection" : {
                         "items": detections,
                         "count": last_det,
                     },
                 }
+                if self._include_frame_ndarray:
+                    payload["frame"] = resized_frame.copy()
 
-                for q in self.task_queues.values():
-                    try:
-                        q.put_nowait(payload)
-                    except Exception:
-                        pass  # drop frame if task is backlogged — never block capture
+                for task_id, q in self.task_queues.items():
+                    tid = str(task_id)
+                    self._enqueue_task_payload(q, tid, payload)
 
                 if self.save_output:
                     save_frame(annotated, self.out_dir, frame_count)
+
+                embed_total = self._embed_passed + self._embed_skipped
+                skip_rate = (
+                    round(self._embed_skipped / embed_total * 100, 1) if embed_total else 0.0
+                )
+                try:
+                    import stream as _stream_mod
+
+                    quality_label = getattr(
+                        _stream_mod, "_current_quality_label", _q0
+                    )
+                    decode_failures = int(
+                        getattr(_stream_mod, "_current_decode_failures", 0)
+                    )
+                    decoder = str(getattr(_stream_mod, "_current_decoder_type", "cpu"))
+                    hw_decoder_requested = getattr(
+                        _stream_mod, "_current_hw_decoder_requested", None
+                    )
+                    hw_decoder_active = bool(
+                        getattr(_stream_mod, "_current_hw_decoder_active", False)
+                    )
+                    stream_health = dict(
+                        getattr(_stream_mod, "_current_stream_health", {}) or {}
+                    )
+                    profile = str(getattr(_stream_mod, "_current_profile", "balanced"))
+                    transport = str(getattr(_stream_mod, "_current_transport", "tcp"))
+                    reconnects = int(getattr(_stream_mod, "_rtsp_reconnect_count", 0))
+                    rtsp_backend = str(
+                        getattr(_stream_mod, "_current_rtsp_backend", "unknown")
+                    )
+                except Exception:
+                    quality_label = _q0
+                    decode_failures = 0
+                    decoder = "cpu"
+                    hw_decoder_requested = None
+                    hw_decoder_active = False
+                    stream_health = {}
+                    profile = os.getenv("RTSP_PROFILE", "balanced").lower()
+                    transport = os.getenv("RTSP_TRANSPORT", "tcp")
+                    reconnects = 0
+                    rtsp_backend = "unknown"
+
+                # Stream source: failed VideoCapture.read() vs successful yields (same process / one generator).
+                stream_reads = decode_failures + frame_count
+                decode_error_rate = (
+                    round(decode_failures / stream_reads, 4) if stream_reads > 0 else 0.0
+                )
+                # Task workers saturated (queue full) — not the same as RTSP read loss.
+                routed_frames = self._frames_passed + self._frames_dropped
+                task_queue_drop_rate = (
+                    round(self._frames_dropped / routed_frames, 4) if routed_frames > 0 else 0.0
+                )
+                uptime_sec = round(time.time() - started_at, 1)
 
                 self.shared_state[self.camera_id] = {
                     **self.shared_state[self.camera_id],
                     "frame_count"     : frame_count,
                     "fps"             : fps,
+                    "fps_actual"      : fps,
                     "last_detections" : last_det,
                     "total_detections": total_detections,
-                    "uptime_seconds"  : round(time.time() - started_at, 1),
+                    "uptime_seconds"  : uptime_sec,
+                    "uptime_sec"      : uptime_sec,
+                    "stream_quality"  : quality_label,
+                    "frames_dropped"  : self._frames_dropped,
+                    "drop_rate"       : decode_error_rate,
+                    "decode_error_rate": decode_error_rate,
+                    "task_queue_drops": self._frames_dropped,
+                    "task_queue_drop_rate": task_queue_drop_rate,
+                    "task_queue_drops_by_task": dict(
+                        self._task_queue_drops_by_task
+                    ),
+                    "task_queue_coalesced_by_task": dict(
+                        self._task_queue_coalesced_by_task
+                    ),
+                    "reconnects"      : reconnects,
+                    "latency_estimate_ms": round(self._metrics_inter_frame_ema_ms, 2),
+                    "stream_read_failures": decode_failures,
+                    "decode_failures" : decode_failures,
+                    "decoder"         : decoder,
+                    "hw_decoder_requested": hw_decoder_requested,
+                    "hw_decoder_active": hw_decoder_active,
+                    "stream_codec"    : stream_health.get("codec"),
+                    "stream_native"   : stream_health.get("native"),
+                    "stream_target"   : stream_health.get("target"),
+                    "stream_health"   : stream_health,
+                    "profile"         : profile,
+                    "transport"       : transport,
+                    "rtsp_backend"    : rtsp_backend,
+                    "embed_skip_rate" : skip_rate,
+                    "state_updated_at": time.time(),
+                    "live_annotation_mode": self._live_annotation_mode,
                 }
 
         except Exception as e:
@@ -223,12 +528,14 @@ class FrameBus:
                 **self.shared_state[self.camera_id],
                 "error"  : str(e),
                 "running": False,
+                "state_updated_at": time.time(),
             }
             print(f"[{self.camera_id}] FrameBus error: {e}")
         finally:
             self.shared_state[self.camera_id] = {
                 **self.shared_state[self.camera_id],
                 "running": False,
+                "state_updated_at": time.time(),
             }
             print(f"[{self.camera_id}] FrameBus stopped. Frames: {frame_count}")
 
@@ -238,9 +545,9 @@ class FrameBus:
 
     def _save_best_crops(self, frame, detections, frame_id: int):
         """
-        For each tracked person, save the crop only when the bounding box area
-        exceeds the previous best by 20%. Emits a message to the embedding_queue
-        so the EmbeddingWorker can extract embeddings asynchronously.
+        For each tracked person, save the crop when bbox area exceeds previous best
+        by 20%, and only if confidence and crop variance pass thresholds.
+        Emits a message to the embedding_queue for EmbeddingWorker.
         """
         persons = [d for d in detections if d.class_name == "person" and d.track_id not in (None, -1)]
         current_track_ids = set()
@@ -263,11 +570,22 @@ class FrameBus:
                     self._track_state[tid] = state
                     continue
 
+                if det.confidence < _EMBED_CONF_THRESHOLD:
+                    self._embed_skipped += 1
+                    self._track_state[tid] = state
+                    continue
+
+                small = cv2.resize(crop, (80, 80), interpolation=cv2.INTER_AREA)
+                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                if float(gray.var()) < _EMBED_MIN_VARIANCE:
+                    self._embed_skipped += 1
+                    self._track_state[tid] = state
+                    continue
+
                 # Deterministic filename: 1 file per track per camera
                 crop_path = os.path.join(self._crop_dir, f"track_{tid}.jpg")
                 cv2.imwrite(crop_path, crop)
 
-                # Emit to embedding worker (non-blocking)
                 if self.embedding_queue is not None:
                     msg = {
                         "camera_id" : self.camera_id,
@@ -280,8 +598,9 @@ class FrameBus:
                     }
                     try:
                         self.embedding_queue.put_nowait(msg)
+                        self._embed_passed += 1
                     except Exception:
-                        pass  # drop if worker is backlogged — crop is on disk
+                        self._embed_skipped += 1
 
                 state["best_area"] = current_area
 

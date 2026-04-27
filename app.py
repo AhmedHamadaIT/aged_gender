@@ -6,6 +6,7 @@ Application entry point — owns all routes and startup.
 Workflow:
     1. POST /cameras                  → register cameras (id → rtsp_url)
     2. POST /api/tasks                → register tasks (algorithmType, channelId, config)
+       POST /cameras/{id}/tasks       → optional: point an existing task at this camera
     3. POST /detection/start          → start processing
     4. GET  /detection/stream         → SSE stream of task events (broadcast, optional filters)
     5. GET  /detection/status         → monitor camera status
@@ -45,9 +46,15 @@ from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, Query, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
-from apis.cameras   import camera_registry, CameraSetupRequest
+from apis.cameras import (
+    CameraSetupRequest,
+    CameraTaskLinkBody,
+    camera_link_task,
+    camera_registry,
+)
 from apis.cashier   import router as cashier_router
 from apis.detection import detection
+from apis.stream_metrics import router as stream_metrics_router
 from apis.detection_stream import (
     DETECTION_SSE_KEEPALIVE_SEC,
     DetectionSSEBridge,
@@ -81,6 +88,7 @@ Requires `REDIS_URL` for live fan-out. Clients should reconnect after disconnect
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start one SSE bridge per process; stop on shutdown."""
+    app.state.detection = detection
     bridge = DetectionSSEBridge(detection.result_queue())
     await bridge.start()
     app.state.detection_sse_bridge = bridge
@@ -98,6 +106,7 @@ app = FastAPI(
     description=_API_DESCRIPTION,
 )
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
+app.include_router(stream_metrics_router)
 app.include_router(face_router)
 
 
@@ -139,6 +148,11 @@ def camera_delete(cam_id: str):
     return camera_registry.on_delete(cam_id)
 
 
+@app.post("/cameras/{cam_id}/tasks")
+def camera_attach_task(cam_id: str, body: CameraTaskLinkBody):
+    return camera_link_task(cam_id, body)
+
+
 # ─────────────────────────────────────────────
 # Task routes
 # ─────────────────────────────────────────────
@@ -171,8 +185,17 @@ def task_delete(task_id: int):
 # Detection routes
 # ─────────────────────────────────────────────
 @app.post("/detection/start")
-def detection_start(camera_id: str = None):
-    return detection.on_post(DetectionRequest(action="start", camera_id=camera_id))
+def detection_start(
+    camera_id: Optional[str] = None,
+    all_channels: bool = False,
+):
+    return detection.on_post(
+        DetectionRequest(
+            action="start",
+            camera_id=camera_id,
+            all_channels=all_channels,
+        )
+    )
 
 
 @app.post("/detection/stop")
