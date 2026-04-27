@@ -103,3 +103,17 @@ curl -s http://127.0.0.1:9000/detection/status | python3 -m json.tool
 2. Lower input resolution (`WIDTH`) or source FPS.
 3. Increase worker capacity or reduce expensive per-frame operations.
 4. Increase `TASK_QUEUE_MAXSIZE` moderately and keep coalescing enabled.
+
+### `.env` tuning behavior in Compose
+
+`docker-compose.yml` uses `${VAR:-default}` for stream throttle settings, so values in `.env` are applied at container start. If `.env` changes are not reflected, recreate the service (`docker compose down && docker compose up -d`).
+
+Recommended low-load Jetson profile:
+
+```bash
+WIDTH=320
+HEIGHT=240
+FRAME_SKIP=2
+STREAM_TARGET_FPS=3
+LIVE_ANNOTATION_MODE=none
+```

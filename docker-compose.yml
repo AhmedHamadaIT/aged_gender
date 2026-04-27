@@ -81,10 +81,10 @@ services:
       - RTSP_JETSON_H264_DECODER=${RTSP_JETSON_H264_DECODER:-}
       - RTSP_HWDECODER=${RTSP_HWDECODER:-}
       # Code-side throttling for high-resolution cameras when camera settings are not accessible.
-      - WIDTH=480
-      - HEIGHT=360
-      - FRAME_SKIP=2
-      - STREAM_TARGET_FPS=5
+      - WIDTH=${WIDTH:-480}
+      - HEIGHT=${HEIGHT:-360}
+      - FRAME_SKIP=${FRAME_SKIP:-2}
+      - STREAM_TARGET_FPS=${STREAM_TARGET_FPS:-5}
       - QUALITY_LADDER=854x480x8,640x360x5
       - STREAM_DOWNGRADE_AFTER=20
       - STREAM_DOWNGRADE_COOLDOWN=30
