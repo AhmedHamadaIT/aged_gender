@@ -1,6 +1,6 @@
 # Core
 ultralytics>=8.0.0          # YOLOv8
-opencv-python-headless      # OpenCV (headless for Docker/server)
+# OpenCV must come from the Jetson/L4T image or system packages so GStreamer/NVDEC support is preserved.
 
 # Config loading
 python-dotenv>=1.0.0        # Reads .env file

@@ -56,7 +56,6 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         ultralytics && \
     python3 -m pip install --no-cache-dir \
         --extra-index-url https://pypi.org/simple \
-        opencv-python-headless \
         "numpy<2" \
         requests \
         Pillow \

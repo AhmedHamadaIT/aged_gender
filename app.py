@@ -98,9 +98,6 @@ app = FastAPI(
     description=_API_DESCRIPTION,
 )
 app.include_router(cashier_router, prefix="/cashier", tags=["Cashier Monitor"])
-
-app = FastAPI(title="Vision Pipeline API", version="2.0.0")
-
 app.include_router(face_router)
 
 

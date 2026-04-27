@@ -21,6 +21,8 @@ import cv2
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+import stream
+
 
 # ─────────────────────────────────────────────
 # Schemas
@@ -91,31 +93,15 @@ class CameraRegistry:
 
     def _capture_snapshot(self, cam_id: str, url: str) -> Optional[str]:
         """
-        Read one stable frame from the stream and save it as JPEG.
-        Returns None if capture fails to keep API response resilient.
+        Read one stable frame via ``stream.capture_preview_frame`` (same path as
+        detection / H265-capable RTSP) and save JPEG. Returns None on failure.
         """
-        cap = None
         try:
-            if url.startswith("rtsp://"):
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-                cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            else:
-                cap = cv2.VideoCapture(url)
-
-            if not cap.isOpened():
-                return None
-
-            valid_frame = None
-            good_frames = 0
-            for _ in range(self._snapshot_max_reads):
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    continue
-                good_frames += 1
-                if good_frames >= self._snapshot_frame_index:
-                    valid_frame = frame
-                    break
-
+            valid_frame = stream.capture_preview_frame(
+                url,
+                max_reads=self._snapshot_max_reads,
+                settle_after_reads=self._snapshot_frame_index,
+            )
             if valid_frame is None:
                 return None
 
@@ -135,9 +121,6 @@ class CameraRegistry:
             return file_path
         except Exception:
             return None
-        finally:
-            if cap is not None:
-                cap.release()
 
     def on_delete(self, cam_id: str):
         self.remove(cam_id)

@@ -730,6 +730,33 @@ curl -X POST http://localhost:9000/detection/start
 }
 ```
 
+### SSH debug responses (copy/paste)
+
+Run these from your laptop to validate the server response over SSH without opening a browser:
+
+```bash
+# 1) SSE headers + first events
+ssh <user>@<jetson-ip> "curl -sN -D - 'http://127.0.0.1:9000/detection/stream?eventType=CASHIER_BOX_OPEN' | sed -n '1,20p'"
+
+# 2) Cashier per-camera SSE headers + first events
+ssh <user>@<jetson-ip> "curl -sN -D - 'http://127.0.0.1:9000/cashier/stream/1' | sed -n '1,20p'"
+
+# 3) Media/evidence endpoint status + body
+ssh <user>@<jetson-ip> "curl -si 'http://127.0.0.1:9000/cashier/media/1/latest/jpg' | sed -n '1,40p'"
+ssh <user>@<jetson-ip> "curl -si 'http://127.0.0.1:9000/cashier/evidence/missing.jpg' | sed -n '1,80p'"
+
+# 4) Task event JSONL debug logs
+ssh <user>@<jetson-ip> "tail -f /local/storage/events/task_30.jsonl"
+
+# 5) App debug logs
+ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/logger/app.log"
+```
+
+Expected quick checks:
+- SSE routes return `HTTP/1.1 200 OK` and `content-type: text/event-stream`.
+- Media routes return either binary JPEG/GIF (`200`) or structured JSON error (`404`).
+- `task_30.jsonl` shows one JSON record per cashier frame while task `30` is running.
+
 ---
 
 ## 9. Full Walkthrough Example
