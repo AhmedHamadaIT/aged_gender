@@ -48,6 +48,7 @@ def build_rtsp_ffmpeg_options() -> str:
 
     Format (OpenCV FFmpeg backend): key;value|key2;value2|...
     Always includes rtsp_transport;tcp (project default: TCP-only).
+    Always includes loglevel;error to suppress decoder warning noise.
 
     Override or extend with RTSP_FFMPEG_EXTRA_OPTIONS (pipe-separated key;value segments),
     e.g. "max_delay;500000|fflags;nobuffer|reorder_queue_size;0".
@@ -55,7 +56,7 @@ def build_rtsp_ffmpeg_options() -> str:
     If RTSP_FFMPEG_EXTRA_OPTIONS is unset, a preset is chosen from RTSP_PROFILE / RTSP_LOW_DELAY /
     RTSP_FFMPEG_OPTIONS (see _default_ffmpeg_extra_segments).
     """
-    segments: list[str] = ["rtsp_transport;tcp"]
+    segments: list[str] = ["rtsp_transport;tcp", "loglevel;error"]
     extra_env = os.getenv("RTSP_FFMPEG_EXTRA_OPTIONS")
     if extra_env is None:
         parts = _default_ffmpeg_extra_segments()
