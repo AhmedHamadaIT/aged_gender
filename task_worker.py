@@ -4,11 +4,12 @@ task_worker.py
 Generic task worker — runs a single task in its own process.
 
 Reads frame payloads from its dedicated queue (fed by FrameBus),
-calls the task, and pushes any resulting events to two destinations:
+calls the task, and emits each resulting event on exactly one path:
 
-  1. result_queue (multiprocessing.Queue) — feeds the existing SSE bridge.
-  2. Redis Pub/Sub channel live:event:{camera_id} — feeds WebSocket clients
-     and any additional FastAPI workers subscribed to Redis.
+  - Redis ``live:event:{camera_id}`` when ``REDIS_URL`` is reachable (SSE via
+    ``DetectionSSEBridge._redis_loop`` and ``WS /cameras/.../events``).
+  - Otherwise ``result_queue`` (multiprocessing.Queue) for the SSE bridge’s
+    ``_bridge_loop`` (no Redis / local dev).
 
 Tasks are responsible for their own local persistence (JSONL, images).
 """
@@ -81,17 +82,17 @@ def run_task_worker(
             continue
 
         for event in events:
-            # ── Path 1: existing SSE bridge (multiprocessing.Queue) ───────────
-            try:
-                result_queue.put_nowait(event)
-            except Exception:
-                pass  # drop if consumer is too slow — never block task processing
-
-            # ── Path 2: Redis Pub/Sub (WebSocket clients + multi-worker SSE) ──
+            # Exactly one outbound path so SSE subscribers are not doubled:
+            # DetectionSSEBridge reads BOTH result_queue and Redis when REDIS_URL is set.
             if redis_client is not None:
                 try:
                     redis_client.publish(redis_channel, json.dumps(event))
                 except Exception:
                     pass  # never block on Redis errors
+            else:
+                try:
+                    result_queue.put_nowait(event)
+                except Exception:
+                    pass  # drop if consumer is too slow — never block task processing
 
     print(f"[{camera_id}/{algorithm}/{task_id}] Worker stopped.")

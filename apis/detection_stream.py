@@ -4,13 +4,12 @@ apis/detection_stream.py
 Detection SSE bridge: fans out detection events to per-client asyncio queues
 so multiple SSE subscribers each receive a copy.
 
-Event sources (both active simultaneously):
-  1. multiprocessing.Queue (result_queue) — in-process path, single uvicorn worker
-  2. Redis Pub/Sub  live:event:*          — multi-worker path; requires REDIS_URL
+Event sources (mutually exclusive from task_worker):
+  1. multiprocessing.Queue (result_queue) — when workers have no Redis client
+  2. Redis Pub/Sub  live:event:*          — when REDIS_URL works in task processes
 
-When Redis is available, both sources deliver events (task_worker publishes to
-both). The multiprocessing.Queue path can be removed in a future cleanup once
-Redis is confirmed stable.
+task_worker sends each event on only one path so the bridge does not duplicate
+delivery to SSE clients.
 
 Used by GET /detection/stream in app.py.
 """
