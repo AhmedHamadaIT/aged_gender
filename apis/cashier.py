@@ -31,6 +31,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -55,6 +56,10 @@ _CASHIER_EVENTS_LIST = "cashier:events"
 
 _redis_sync_lock = threading.Lock()
 _redis_sync_client: Optional[Any] = None
+
+
+def _public_base_url() -> str:
+    return os.getenv("CAMERA_SNAPSHOT_BASE_URL", "http://127.0.0.1:9000").rstrip("/")
 
 
 def get_redis_sync() -> Optional[Any]:
@@ -567,6 +572,7 @@ def list_evidence(
         "files": [
             {
                 "path"    : str(f.relative_to(_evidence_dir)),
+                "url"     : f"{_public_base_url()}/cashier/evidence/{quote(str(f.relative_to(_evidence_dir)), safe='/')}",
                 "size_kb" : round(f.stat().st_size / 1024, 1),
                 "modified": datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).isoformat(),
             }

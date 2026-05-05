@@ -40,11 +40,13 @@ load_dotenv()
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, Query, Request, WebSocket
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Request, WebSocket
+from fastapi.responses import FileResponse, StreamingResponse
 
 from apis.cameras import (
     CameraSetupRequest,
@@ -139,6 +141,35 @@ def camera_add(req: CameraSetupRequest):
 @app.get("/cameras")
 def camera_list():
     return camera_registry.on_get()
+
+
+@app.get("/snapshots/{file_name}")
+def camera_snapshot(file_name: str):
+    return camera_registry.on_snapshot_file_get(file_name)
+
+
+@app.get("/evidence/{file_path:path}")
+def evidence_file(file_path: str):
+    safe_rel = os.path.normpath(file_path).replace("\\", "/").lstrip("/")
+    if safe_rel in (".", "") or safe_rel.startswith("../"):
+        raise HTTPException(status_code=400, detail="Invalid evidence path.")
+
+    roots = [
+        Path(os.getenv("CAPTURE_DIR", "./evidence/capture")).resolve(),
+        Path(os.getenv("SCENE_DIR", "./evidence/scene")).resolve(),
+        Path(os.getenv("CASHIER_EVIDENCE_DIR", "./evidence/cashier")).resolve(),
+    ]
+
+    for root in roots:
+        candidate = (root / safe_rel).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            return FileResponse(str(candidate), media_type="image/jpeg")
+
+    raise HTTPException(status_code=404, detail=f"Evidence not found: {file_path}")
 
 
 @app.delete("/cameras/{cam_id}")

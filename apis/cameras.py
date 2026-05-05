@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import cv2
+from fastapi.responses import FileResponse
 from fastapi import HTTPException
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -148,6 +149,7 @@ class CameraRegistry:
         self._snapshot_max_reads = max(self._snapshot_frame_index + 2, int(os.getenv("CAMERA_SNAPSHOT_MAX_READS", "15")))
         self._snapshot_cache_ttl = max(0.0, float(os.getenv("CAMERA_SNAPSHOT_CACHE_TTL_SEC", "5")))
         self._snapshot_dir = os.path.abspath(os.getenv("CAMERA_SNAPSHOT_DIR", "./outputs/camera_snapshots"))
+        self._snapshot_base_url = os.getenv("CAMERA_SNAPSHOT_BASE_URL", "http://127.0.0.1:9000").rstrip("/")
         os.makedirs(self._snapshot_dir, exist_ok=True)
 
     def add(self, cam_id: str, url: str):
@@ -180,17 +182,30 @@ class CameraRegistry:
     def on_get(self):
         cameras = []
         for cam_id, url in self._cameras.items():
+            snapshot_path = self._capture_snapshot(cam_id, url)
+            snapshot_url = None
+            if snapshot_path:
+                snapshot_url = f"{self._snapshot_base_url}/snapshots/{os.path.basename(snapshot_path)}"
             cameras.append(
                 {
                     "id": cam_id,
                     "url": url,
-                    "snapshot": self._capture_snapshot(cam_id, url),
+                    "snapshot": snapshot_url,
                 }
             )
         return {
             "count"  : len(self._cameras),
             "cameras": cameras,
         }
+
+    def on_snapshot_file_get(self, file_name: str):
+        safe_name = os.path.basename(file_name)
+        if safe_name != file_name:
+            raise HTTPException(status_code=400, detail="Invalid snapshot filename.")
+        path = os.path.join(self._snapshot_dir, safe_name)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail=f"Snapshot '{file_name}' not found.")
+        return FileResponse(path=path, media_type="image/jpeg")
 
     def _capture_snapshot(self, cam_id: str, url: str) -> Optional[str]:
         """

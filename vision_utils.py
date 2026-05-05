@@ -129,8 +129,18 @@ def save_frame(frame: np.ndarray, output_dir: str, frame_count: int, prefix: str
 # ML Image Contract V2
 # ─────────────────────────────────────────────
 def get_base_url() -> str:
-    """Read PUBLIC_ML_BASE_URL at call time (not at import) so runtime changes are picked up."""
-    return (os.getenv("PUBLIC_ML_BASE_URL") or "").rstrip("/")
+    """Resolve public base URL for image links.
+
+    Priority:
+    1) PUBLIC_ML_BASE_URL (legacy contract)
+    2) CAMERA_SNAPSHOT_BASE_URL (shared API base)
+    3) http://127.0.0.1:9000 (safe local default)
+    """
+    return (
+        os.getenv("PUBLIC_ML_BASE_URL")
+        or os.getenv("CAMERA_SNAPSHOT_BASE_URL")
+        or "http://127.0.0.1:9000"
+    ).rstrip("/")
 
 
 def _sanitize_rel_path(path: str) -> str:
@@ -153,7 +163,7 @@ def build_image(path: str, img_type: str) -> dict:
     """Build a standard V2 image object. path is sanitized internally."""
     rel = _sanitize_rel_path(path)
     base = get_base_url()
-    url = f"{base}/evidence/{rel}" if base else f"/evidence/{rel}"
+    url = f"{base}/evidence/{rel}"
     return {
         "url": url,
         "path": rel,
