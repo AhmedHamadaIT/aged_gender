@@ -92,11 +92,15 @@ RUN python3 -m pip install --no-cache-dir --no-deps \
         py-cpuinfo \
         fastapi \
         "uvicorn[standard]" \
+        "python-multipart"\
         qdrant-client \
         gdown \
         python-multipart \
         open_clip_torch \
-        redis
+        redis \
+        insightface \
+        faiss-cpu \
+        lapx
 
 # Jetson Orin / aarch64: PyPI `onnxruntime` is often CPU-only or mismatched CUDA.
 # Jetson AI Lab wheels provide CUDAExecutionProvider (+ TensorRT EP when compatible).
@@ -116,6 +120,7 @@ ENV PYTHONUNBUFFERED=1
 RUN mkdir -p /app/models /app/videos /app/outputs
 
 EXPOSE 9000
+RUN mkdir -p /app/models /app/videos /app/outputs /app/data/face
 
 # ── Default command ──────────────────────────
 CMD ["sleep", "infinity"]

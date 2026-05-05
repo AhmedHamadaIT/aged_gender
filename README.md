@@ -30,15 +30,22 @@ The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detect
 ## Setup & Run
 
 ### Prerequisites
+
 - Python 3.9+
 - CUDA/cuDNN enabled environment (optional but recommended for GPU acceleration)
 
 ### Installation (local)
+
+### Installation
+
 1. Install dependencies:
+
    ```bash
    pip install -r requirements.txt
    ```
+
 2. Start the FastAPI server:
+
    ```bash
    uvicorn app:app --host 0.0.0.0 --port 9000
    ```
@@ -69,9 +76,11 @@ from the directory that contains `docker-compose.yml`.
 - **Redis** ([`docker-compose.yml`](docker-compose.yml) `redis:7-alpine`) — Fire-and-forget Pub/Sub broker. FrameBus publishes binary JPEG frames; FastAPI WebSocket handlers subscribe. No persistence needed (`--appendonly no`).
 
 ### Cameras
+
 - **Multi-camera RTSP** — `POST /cameras`, `GET /cameras`, `DELETE /cameras/{cam_id}`. Many responses use the standardized envelope pattern (`error_codes/response.py`).
 
 ### Tasks (`/api/tasks` CRUD)
+
 - Register work per **`channelId`** (must match a camera **`id`** from `POST /cameras`).
 - **`algorithmType`** must be one of: **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, **`CASHIER_BOX_OPEN`** ([`apis/tasks.py`](apis/tasks.py) `TaskRegistry.SUPPORTED`).
 
@@ -84,17 +93,20 @@ from the directory that contains `docker-compose.yml`.
 **Shared task fields** (see `TaskConfig` in [`apis/tasks.py`](apis/tasks.py)): `taskId`, `taskName`, `channelId`, `enable`, `threshold` (0–100 confidence), `areaPosition` (JSON string: lines or polygons per algorithm), `detailConfig`, `validWeekday`, `validStartTime`, `validEndTime` (ms).
 
 **`detailConfig` per algorithm**
+
 - **CROSS_LINE:** `enableAttrDetect`, `enableReid`
 - **MASK_HAIRNET_CHEF_HAT:** `alarmType` (list of violation keys)
 - **CASHIER_BOX_OPEN:** `drawerOpenLimit`, `serviceWaitLimit`, `enableStaffList`, `staffIds`
 
 ### Detection control, SSE events & live WebSocket stream
+
 - **Runtime** — `POST /detection/start` / `POST /detection/stop` (optional query `camera_id`); `GET /detection/status` (FPS, frame counts, errors per camera).
 - **`GET /detection/stream`** — Server-Sent Events: one JSON **task event** per message (crossings, PPE violations, etc.). Optional filters (AND): `taskId`, `taskName`, `eventType`, `channelId`. Idle `: ping` keepalives; overridable with **`DETECTION_SSE_KEEPALIVE_SEC`**. With `REDIS_URL` set, the bridge also reads from Redis `live:event:*` enabling multi-worker SSE.
 - **`WS /cameras/{camera_id}/live`** — Binary WebSocket stream of **annotated JPEG frames** (YOLO boxes + track IDs drawn by FrameBus). Raw bytes per message — no Base64 overhead. Frames dropped with 50 ms timeout when clients are slow (`WS_SEND_TIMEOUT_MS`). Published at `REDIS_LIVE_FPS` (default 13 fps). See [`apis/ws_live.py`](apis/ws_live.py).
 - **`WS /cameras/{camera_id}/events`** — JSON WebSocket stream of detection events per camera (same shape as SSE events).
 
 ### Cashier monitor (`/cashier/*`)
+
 - Enable with **`POST /api/tasks`** using `algorithmType: "CASHIER_BOX_OPEN"` and matching `channelId`.
 - **HTTP:** `GET /cashier/status`; `GET` / `POST /cashier/zones` (optional body keys: `detail_config`, `task`, `detection_threshold` per [`apis/cashier.py`](apis/cashier.py)); `POST /cashier/zones/reset`; `GET` / `DELETE /cashier/events` (filters: `severity`, `case_id`, `camera_id`, `limit`, `offset`); `GET /cashier/evidence` + download path; **media** routes for latest/event JPG/GIF; `GET .../drawer_count`.
 - **Cashier SSE:** `GET /cashier/stream/{camera_id}` (all events), `GET .../only` (alerts-oriented; skips `frame`-type events). Publisher emits typed SSE (`event:` lines); connect handshake includes `connected`.
@@ -105,6 +117,7 @@ from the directory that contains `docker-compose.yml`.
 - **`pipeline.py` + `REGISTRY`** — Per-frame services: `detector`, `age_gender`, `mood`, `ppe`, `cashier` for offline JSONL, tests, and tooling (not the primary HTTP v2 path).
 
 ### Developer surface
+
 - **OpenAPI** — `/docs`, `/redoc`
 - **Tests** — `tests/` (e.g. `test_detection_stream.py`, `test_cashier_api.py`); run `pytest` from repo root when present
 - **Adding tasks** — See [`services/__init__.py`](services/__init__.py) docstring and [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md)
@@ -420,7 +433,7 @@ For batch / **`pipeline.py`** JSONL that still embeds `data.use_case.cashier`, k
 
 Replace `<user>`, `<jetson-ip>`, and the repo path on the device.
 
-**Batch JSONL** (same logical shape as live SSE bodies, without the `data: ` prefix):
+**Batch JSONL** (same logical shape as live SSE bodies, without the `data:` prefix):
 
 ```bash
 # Full-dataset run (includes summary.json in repo when present)
@@ -449,7 +462,7 @@ More detail: [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Part III �
 
 ---
 
-##  API Endpoints Reference
+## API Endpoints Reference
 
 Typical **v2** lifecycle:
 
@@ -458,15 +471,29 @@ Typical **v2** lifecycle:
 3. *(Optional)* **`POST /cashier/zones`** — tune cashier ROIs/thresholds (`CASHIER_CONFIG`).
 4. **`POST /detection/start`** — spawn FrameBus + task workers for enabled tasks.
 5. **`GET /detection/stream`** — SSE for task events (e.g. crossings). **`GET /cashier/stream/{camera_id}`** — SSE for cashier frames/alerts.
+*(Alternatively, you can run it via Docker Compose if standard deployment is configured).*
+
+---
+
+## 📖 API Endpoints Reference
+
+The application lifecycle works as follows:
+
+1. Register Cameras.
+2. Setup the Pipeline Services.
+3. Start the Pipeline processing.
+4. Consume the Detection Stream (SSE).
 
 ---
 
 ### **Health Check**
 
 #### `GET /`
+
 Returns basic service information.
 
 **Sample Response**
+
 ```json
 {
   "service": "Vision Pipeline API",
@@ -479,9 +506,11 @@ Returns basic service information.
 ### **Camera Management Routes**
 
 #### `POST /cameras`
+
 Configure one or multiple cameras.
 
 **Sample Request**
+
 ```json
 {
   "cameras": [
@@ -495,6 +524,8 @@ Configure one or multiple cameras.
 
 **Sample Response** (envelope may include `"error": null`)
 
+**Sample Response**
+
 ```json
 {
   "status": "configured",
@@ -506,6 +537,7 @@ Configure one or multiple cameras.
 ```
 
 #### `GET /cameras`
+
 List all currently configured cameras.
 
 **Sample Response**
@@ -524,9 +556,11 @@ List all currently configured cameras.
 ```
 
 #### `DELETE /cameras/{cam_id}`
+
 Delete a configured camera.
 
 **Sample Response**
+
 ```json
 {
   "status": "removed",
@@ -557,9 +591,34 @@ Implementation: [`apis/tasks.py`](apis/tasks.py). Worker dispatch: [`task_worker
 
 ### **Detection routes** (runtime + SSE)
 
+### **Detection Pipeline Routes**
+
+#### `POST /detection/setup`
+
+Configure which models/services will run in the pipeline.
+
+**Sample Request**
+
+```json
+{
+  "pipeline": ["detector", "age_gender", "mood","ppe"]
+}
+```
+
+**Sample Response**
+
+```json
+{
+  "status": "configured",
+  "pipeline": ["detector", "age_gender", "mood","ppe"]
+}
+```
+
 #### `POST /detection/start`
 
 Starts **FrameBus** processes (one per channel with enabled tasks) and **task worker** processes. Optional query `camera_id` filters to tasks for that channel only.
+
+Start processing cameras using the configured pipeline. You can optionally specify a `camera_id` as a query parameter string. If not specified, it starts all configured cameras.
 
 **Sample Request**
 
@@ -579,6 +638,8 @@ Starts **FrameBus** processes (one per channel with enabled tasks) and **task wo
 
 Stops running buses/workers. Without `camera_id`, stops all. With `camera_id`, stops that channel only.
 
+Stop camera streams. You can optionally specify a `camera_id` as a query parameter string. If not specified, it stops all running cameras.
+
 **Sample Request**
 
 `POST /detection/stop?camera_id=4`
@@ -595,6 +656,8 @@ Stops running buses/workers. Without `camera_id`, stops all. With `camera_id`, s
 #### `GET /detection/status`
 
 Operational status per camera (FPS, frame counts, errors) from shared state updated by FrameBus.
+
+Returns the operational status, FPS, and detection counts for all cameras.
 
 **Sample Response**
 
@@ -618,9 +681,13 @@ Operational status per camera (FPS, frame counts, errors) from shared state upda
 
 #### `GET /detection/stream`
 
+An SSE (Server-Sent Events) endpoint that yields one JSON payload per frame, combining inferences from all running cameras.
+
 SSE endpoint: each `data:` line is one **task-produced event** (for example a `CROSS_LINE` crossing). Cashier-specific live output is on **`GET /cashier/stream/{camera_id}`**.
 
 **Example `data:` line (illustrative crossing event)**
+
+**Sample Response stream**
 
 ```json
 {
@@ -675,16 +742,19 @@ The following structure applies to **offline or script-driven** runs that use `C
   }
 }
 ```
+
 ### POST `/person_search/search`
 
 Upload an image to find the top **K** similar identities using image-based person re-identification (OSNet) from the Qdrant vector database.  
 This is used to track a specific person across different cameras and frames.
 
 #### Parameters (Multipart Form Data)
+
 - `file`: Image file containing the person to search for (`UploadFile`).
 - `top_k` *(optional)*: Integer — number of top matches to return. Default is `10`.
 
 #### Sample Response
+
 ```json
 {
   "status": "success",
@@ -736,8 +806,8 @@ Upload an image to retrieve the top **K** semantically similar objects or scenes
 
 #### Parameters (Multipart Form Data)
 
-* `file`: Image file to search with (`UploadFile`).
-* `top_k` *(optional)*: Integer — number of top matches to return. Default is `10`.
+- `file`: Image file to search with (`UploadFile`).
+- `top_k` *(optional)*: Integer — number of top matches to return. Default is `10`.
 
 #### Sample Response
 
@@ -783,6 +853,81 @@ Upload an image to retrieve the top **K** semantically similar objects or scenes
     }
   ]
 }
+      "age_gender": [{
+        "bbox": [120, 80, 340, 420],
+        "gender": "Female",
+        "age_group": "MiddleAged",
+        "confidence": 0.87
+      }],
+      "mood": [{
+        "bbox": [120, 80, 340, 420],
+        "mood": "Happy",
+        "confidence": 0.94
+      }],
+      "ppe": [
+      {
+        "person_bbox": [
+          677,
+          305,
+          850,
+          523
+        ],
+        "count": 2,
+        "items": [
+          {
+            "class_id": 2,
+            "class_name": "gloves",
+            "confidence": 0.9647,
+            "x1": 742,
+            "y1": 480,
+            "x2": 805,
+            "y2": 527
+          },
+          {
+            "class_id": 1,
+            "class_name": "hairnet",
+            "confidence": 0.8999,
+            "x1": 769,
+            "y1": 312,
+            "x2": 863,
+            "y2": 374
+          }
+        ]
+    }]
+      }
+    }
+  }
+```
+
+**Sample Response stream (Face Recognition Task Event)**
+
+```json
+data: {
+  "eventId": "a1b2c3d4e5f6...",
+  "eventType": "FACE",
+  "timestamp": 1774310401528,
+  "timestampUTC": "2026-04-02T10:00:01Z",
+  "taskId": 30,
+  "taskName": "attendance",
+  "channelId": 1,
+  "person": {
+    "id": 101,
+    "name": "John Doe",
+    "isStranger": false,
+    "trackingId": "15",
+    "confidence": 88
+  },
+  "face": {
+    "quality": 85.2,
+    "yaw": -5.1,
+    "score": 82.5,
+    "failCount": 0
+  },
+  "evidence": {
+    "captureImage": "/local/storage/captures/2026/04/02/a1b2_crop.jpg",
+    "sceneImage": "/local/storage/scenes/2026/04/02/a1b2_scene.jpg"
+  }
+}
 ```
 
 ---
@@ -792,6 +937,7 @@ Upload an image to retrieve the top **K** semantically similar objects or scenes
 ### Test Results Overview
 
 #### Test 1: Sample Image (zidane.jpg)
+
 - **Detections**: 2 Persons
 - **Inference Time**: ~2 seconds
 - **Confidence Scores**: 81.9% - 83.6%
@@ -799,6 +945,7 @@ Upload an image to retrieve the top **K** semantically similar objects or scenes
 #### Test 2: F1 Image (f1.webp) - Complete Test Results
 
 **Input Image**: `f1.webp` (WebP format, 33 KB)
+
 - **Local annotated version (provided)**: `/home/a7med/Downloads/f1a.png`
 
 **Annotated Output Image with All Detections:**
@@ -806,12 +953,14 @@ Upload an image to retrieve the top **K** semantically similar objects or scenes
 ![F1 Annotated Image with Detections - 500x281 pixels](outputs/f1_test/annotated.jpg)
 
 **Visual Elements in Image:**
+
 - Green bounding boxes around detected persons
 - Blue bounding box around detected chair
 - Labels showing: Class, Confidence %, Gender | Age Group, and Mood/Emotion
 - All coordinates and detection metadata embedded
 
 **Detection Summary:**
+
 ```
 Total Objects Detected: 4
 
@@ -863,6 +1012,7 @@ Chair (Right Side)
 ### Complete JSON Response Example (F1 Test)
 
 **Raw API Response Structure:**
+
 ```json
 {
   "camera_id": "f1_image",
@@ -966,6 +1116,7 @@ Chair (Right Side)
 ```
 
 **JSON Field Reference:**
+
 - **camera_id**: Identifier of the source camera or image
 - **frame_count**: Frame number in stream (1 for single image)
 - **timestamp**: ISO 8601 timestamp of processing
@@ -1087,6 +1238,57 @@ Copy-paste **`curl`**: [Complete cURL reference (all HTTP routes)](#complete-cur
 ### Stream event sources
 
 **Full dataset batch (2026-03-29)** — Line-delimited JSON is archived as [`outputs/cashier_test/20260329T060741_7464/stream.jsonl`](outputs/cashier_test/20260329T060741_7464/stream.jsonl). **Additional batches:** [`outputs/cashier_test/20260329T135320_10106/stream.jsonl`](outputs/cashier_test/20260329T135320_10106/stream.jsonl) (local cashier-YOLO run) and [`outputs/test_70`](outputs/test_70) (first 70 `multiple_persons` frames with updated ROI polygons).
+
+## 🛠️ cURL Testing Examples
+
+### Face Recognition Workflow (v2 API)
+
+#### 1. Setup Face Library and Add Persons
+
+```bash
+# Create Library
+curl -X POST "http://localhost:9000/api/face/lib" -F "lib_id=1" -F "name=Office"
+
+# Register an Employee
+curl -X POST "http://localhost:9000/api/face/lib/1/persons" \
+  -F "person_id=101" -F "name=John Doe" \
+  -F "images=@/path/to/john_face.jpg"
+```
+
+#### 2. Register Face Task
+
+```bash
+curl -X POST "http://localhost:9000/api/tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "taskId": 30,
+    "taskName": "attendance",
+    "algorithmType": "FACE",
+    "channelId": 1,
+    "threshold": 70,
+    "libIds": "1",
+    "enableStranger": true,
+    "detailConfig": {
+      "facePixelSize": 60,
+      "yawThreshold": 35,
+      "pitchThreshold": 25,
+      "failCount": 2
+    }
+  }'
+```
+
+#### 3. Quick Single-Image Testing (No Pipeline)
+
+```bash
+curl -X POST "http://localhost:9000/api/face/recognize" \
+  -F "image=@employee_test.jpg" \
+  -F "lib_ids=1" \
+  -F "threshold=70"
+```
+
+### Quick Start - Test with Image File (Legacy Pipeline)
+
+#### Test Single Image
 
 ```bash
 ssh <user>@<jetson-ip> "tail -f /path/to/ml-server/outputs/cashier_test/20260329T060741_7464/stream.jsonl"
@@ -1299,6 +1501,7 @@ The `cashier` block inside `use_case` follows this structure:
 ```
 
 **Cashier Field Reference:**
+
 - **persons**: Array of all detected persons with their zone assignment and associated items
   - **person_bbox**: `[x1, y1, x2, y2]` bounding box of the person
   - **zone**: Either `ROI_CASHIER` (behind the register) or `ROI_CUSTOMER` (customer-facing side)
@@ -1320,6 +1523,7 @@ The `cashier` block inside `use_case` follows this structure:
 ### Cashier Case IDs (All Cases)
 
 #### Normal Cases
+
 | Case | Severity | Condition |
 |------|----------|-----------|
 | **N1** | NORMAL | Idle register — nothing happening |
@@ -1330,6 +1534,7 @@ The `cashier` block inside `use_case` follows this structure:
 | **N6** | NORMAL | Drawer open, no cash (card transaction / float check) |
 
 #### Alert Cases
+
 | Case | Severity | Condition |
 |------|----------|-----------|
 | **A1** | ALERT / CRITICAL | Unattended open drawer (CRITICAL if customer present) |
@@ -1347,6 +1552,7 @@ The `cashier` block inside `use_case` follows this structure:
 All cashier test cases (both normal operations and anomalies) yield an annotated image mapped to a detailed `result.json` log. The structure below demonstrates exactly how the response block changes for every single case:
 
 #### N1 (Idle register — nothing happening)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_N1.jpg" },
@@ -1377,6 +1583,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### N2 (Cashier on duty, no customer)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_N2.jpg" },
@@ -1407,6 +1614,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### N3 (Active transaction — e.g. frame_097440.jpg)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_097440.jpg" },
@@ -1440,6 +1648,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### N4 (Staff handover / supervisor at register)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_N4.jpg" },
@@ -1473,6 +1682,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### N5 (Customer waiting without transaction)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_N5.jpg" },
@@ -1503,6 +1713,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### N6 (Drawer open, no cash — card transaction)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_N6.jpg" },
@@ -1533,6 +1744,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### A1 (Unattended open drawer)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_A1.jpg" },
@@ -1563,6 +1775,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### A2 (Unexpected person in cashier zone)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_A2.jpg" },
@@ -1593,9 +1806,58 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
     }
   }
 }
+curl -X POST "http://localhost:8000/process" \
+  -H "Content-Type: multipart/form-data" \
+  -F "file=@/path/to/image.jpg" \
+  -F "camera_id=test_camera_1"
+```
+
+#### Test with Result File Output
+
+```bash
+curl -X POST "http://localhost:8000/process" \
+  -F "file=@/home/a7med/Downloads/f1.webp" \
+  -F "camera_id=f1_test" \
+  --output results.json
+
+# View prettified response
+cat results.json | jq '.'
+```
+
+#### Extract & Save Annotated Image from Response
+
+```bash
+# Save full response
+response=$(curl -X POST "http://localhost:8000/process" \
+  -F "file=@image.jpg" \
+  -F "camera_id=test")
+
+# Extract base64 frame and decode
+echo "$response" | jq -r '.frame' | base64 -d > annotated_image.jpg
+
+# View detections summary
+echo "$response" | jq '.data.detection'
+```
+
+### Advanced Testing
+
+#### Batch Process Multiple Images
+
+```bash
+mkdir -p results
+for image in *.jpg *.png *.webp; do
+  [ -f "$image" ] || continue
+  
+  echo "Processing: $image"
+  curl -X POST "http://localhost:8000/process" \
+    -F "file=@$image" \
+    -F "camera_id=batch_$(date +%s%N)" \
+    --output "results/$image.json"
+done
 ```
 
 #### A3 (Cash + open drawer, no cashier - theft signature)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_A3.jpg" },
@@ -1626,6 +1888,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### A4 (Unauthorised person at open register with cash)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_A4.jpg" },
@@ -1653,9 +1916,17 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
     }
   }
 }
+#### Stream Processing
+
+```bash
+curl -X POST "http://localhost:8000/stream" \
+  -F "file=@video.mp4" \
+  -F "camera_id=video_stream" \
+  -N  # No buffering, stream output
 ```
 
 #### A5 (Customer waiting too long >30s)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_A5.jpg" },
@@ -1686,6 +1957,7 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 ```
 
 #### A6 (Drawer open too long >30s)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_A6.jpg" },
@@ -1713,9 +1985,15 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
     }
   }
 }
+#### Test Mood Detection Only
+
+```bash
+curl -X POST "http://localhost:8000/mood" \
+  -F "file=@face_image.jpg" | jq '.data.use_case.mood'
 ```
 
 #### A7 (Cash in customer zone, no cashier present)
+
 ```json
 {
   "input": { "path": "...", "name": "frame_A7.jpg" },
@@ -1745,29 +2023,41 @@ All cashier test cases (both normal operations and anomalies) yield an annotated
 }
 ```
 
-
 ### Full-dataset cashier test (2026-03-29)
+
 - `outputs/cashier_test/20260329T060741_7464/summary.json` — metrics and case table (source of truth for the validation report above)
 - `outputs/cashier_test/20260329T060741_7464/stream.jsonl` — per-frame pipeline JSON
 - `outputs/cashier_test/20260329T060741_7464/annotated/`, `evidence/`, `events/`
 - `outputs/cashier_test/20260329T060741_7464/cashier_test.gif` — optional animated export
 
 ### Production simulation artifacts (earlier reference run)
+
 - `outputs/cashier_production_sim/20260326T050929Z/annotated_sequence.gif`
 - `outputs/cashier_production_sim/20260326T050929Z/stream.jsonl`
 - `outputs/cashier_production_sim/20260326T050929Z/summary.json`
 - `outputs/cashier_production_sim/20260326T050929Z/annotated/`
 
 ### Single-frame test output (cashier + aged-gender)
+
 For the one-off test on `frame_097440`, outputs are saved to:
+
 - Annotated frame: `outputs/cashier_aged_gender_single/20260326T064528Z/annotated/frame_097440.jpg`
 - JSON results: `outputs/cashier_aged_gender_single/20260326T064528Z/result.json`
 
 ### Response processing examples (SSE + jq)
 
-Use `export BASE=http://localhost:9000`. Strip the SSE `data: ` prefix before `jq` (see [Complete cURL reference](#complete-curl-reference-all-http-routes)).
+Use `export BASE=http://localhost:9000`. Strip the SSE `data:` prefix before `jq` (see [Complete cURL reference](#complete-curl-reference-all-http-routes)).
 
 **v2 `GET /detection/stream`** — task events (example: crossing metadata):
+
+#### Test Age/Gender Detection Only
+
+```bash
+curl -X POST "http://localhost:8000/age-gender" \
+  -F "file=@face_image.jpg" | jq '.data.use_case.age_gender'
+```
+
+#### Health Check
 
 ```bash
 curl -sN "$BASE/detection/stream" \
@@ -1776,6 +2066,8 @@ curl -sN "$BASE/detection/stream" \
 ```
 
 **Cashier** — same structured events as **`GET /detection/stream?eventType=CASHIER_BOX_OPEN`**, plus `/cashier/stream` and `/cashier/status`:
+
+#### Extract Detections with jq
 
 ```bash
 curl -sN "$BASE/detection/stream?eventType=CASHIER_BOX_OPEN" | head -n 5
@@ -1794,6 +2086,7 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 ## 🎯 Models & Services
 
 ### 1. YOLO v8 Nano (Object Detection)
+
 - **Model**: `models/yolov8n.pt` (or `models/yolov8n.engine`)
 - **Framework**: PyTorch/TensorRT
 - **Purpose**: Person & object detection with bounding boxes
@@ -1802,6 +2095,7 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 - **Supported Classes**: 80 COCO classes (persons, chairs, tables, etc.)
 
 ### 2. Age/Gender Classification (ONNX)
+
 - **Model**: `models/best_aged_gender_6.onnx`
 - **Framework**: ONNX Runtime
 - **Gender Classes**: `[Female, Male]`
@@ -1810,6 +2104,7 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 - **Output**: Class predictions + confidence scores
 
 ### 3. Mood/Emotion Detection (ONNX)
+
 - **Model**: `models/best_mood.onnx`
 - **Framework**: ONNX Runtime
 - **Classes**: `[Angry, Happy, Neutral]`
@@ -1817,6 +2112,7 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 - **Output**: Mood class + confidence score
 
 ### 4. PPE Detection (ONNX)
+
 - **Model**: `models/best_ppe.onnx`
 - **Framework**: ONNX Runtime
 - **Classes**: `[mask, hairnet, gloves]`
@@ -1824,24 +2120,37 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 - **Output**: PPE class + confidence score
 
 ### 5. Cashier monitor (YOLO + zone logic)
+
 - **Purpose**: Assign persons to `ROI_CASHIER` / `ROI_CUSTOMER`, detect drawers and cash, classify **N1–N6** / **A1–A7**, optional evidence GIFs and logs under `CASHIER_EVIDENCE_DIR`.
 - **Config**: `CASHIER_CONFIG` (default `./config/cashier_zones.yaml`); see [Sample configuration file](#sample-configuration-file-configcashier_zonesyaml).
 
 ---
 
-### 6. Person Search 
+### 6. Person Search
+
 - **Model**: `models/os_net.pt`
 - **Input**: person crops (224×224 pixels)
 - **Output**: embeddings
 
-### 7. Semantic Search 
+### 7. Semantic Search
+
 - **Model**: `models/mobile-clip2-s0.pt`
 - **Framework**: ONNX Runtime
-- **Input**: person crops 
+- **Input**: person crops
 - **Output**: embeddings
 
+---
+
+### 5. Face Recognition (InsightFace)
+
+- **Model**: `buffalo_l` (or configure via `FACE_MODEL`)
+- **Framework**: InsightFace / ONNX Runtime / FAISS
+- **Purpose**: Face detection, pose estimation, and 512-d embeddings for matching
+- **Input**: Person crops
+- **Output**: Bounding boxes, quality/pose metrics, matching scores, and JSONL events
 
 ---
+
 ## 📁 Project Structure
 
 ```
@@ -1887,6 +2196,13 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 ├── store/
 │   └── Identity_manger.py      #handling qdrant embeddings
 
+|   ├── ppe.py                  # PPE detection
+│   ├── mood.py                 # Mood/Emotion detection
+│   ├── face_engine.py          # InsightFace wrapper
+│   ├── face_store.py           # FAISS-backed face embedding store
+│   └── face_recognition.py     # Face Recognition task class
+├── apis/                       # API routers
+│   ├── face_lib.py             # Face library management API endpoints
 ├── scripts/                    # Testing and utility scripts
 │   └── test_image_pipeline.py  # Image inference testing script
 ├── tests/                      # pytest modules when present (`pytest` from repo root)
@@ -1907,6 +2223,8 @@ jq '.data.use_case.cashier.summary | {case_id, severity, alerts}' < stream.jsonl
 
 ## 🔄 Git Workflow
 
+### Current Branch: `mood`
+
 ```bash
 git log --oneline -10
 git status
@@ -1916,7 +2234,9 @@ git push origin <your-branch>
 ```
 
 ### Model Files
+
 Models are excluded from git tracking to reduce repository size:
+
 - `best_aged_gender_6.onnx` (~85 MB)
 - `best_mood.onnx` (~15 MB)
 - `best_ppe.onnx` (~38 MB)
@@ -1929,6 +2249,7 @@ Download separately or configure via environment variables.
 ## ⚙️ Configuration
 
 ### Model Paths
+
 ```bash
 # Environment variables
 export YOLO_MODEL="./models/yolov8n.pt"
@@ -1980,6 +2301,8 @@ export PPE_MODEL="./models/best_PPE.onnx"
 
 ### Detection Thresholds
 - **YOLO Confidence**: 0.35 (configurable via `CONF_THRESHOLD`)
+
+- **YOLO Confidence**: 0.35 (configurable)
 - **Face Detection Minimum Size**: 10×10 pixels
 - **Mood Classification**: All 3 classes enabled
 
@@ -2023,6 +2346,20 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/semantic_search/search` | POST | Image-based semantic search using MobileCLIP2-S0 + Qdrant |
 | `/docs` | GET | Swagger UI |
 | `/redoc` | GET | ReDoc |
+| `/detection/setup` | POST | Configure pipeline services |
+| `/detection/start` | POST | Start processing |
+| `/detection/stop` | POST | Stop processing |
+| `/detection/status` | GET | Get operational status |
+| `/detection/stream` | GET | SSE stream endpoint |
+| `/api/face/lib` | POST | Create face library |
+| `/api/face/lib` | GET | List face libraries |
+| `/api/face/lib/{libId}` | GET/DELETE | Get or delete face library |
+| `/api/face/lib/{libId}/persons` | POST/GET | Add or list persons in a library |
+| `/api/face/lib/{libId}/persons/{pid}`| DELETE | Delete a person from library |
+| `/api/face/recognize` | POST | Single-image face recognition |
+| `/api/face/strangers` | GET/DELETE| List or clear stranger records |
+| `/api/face/strangers/search` | POST | Search strangers by face |
+| `/docs` | GET | Interactive API documentation |
 
 ---
 
@@ -2034,6 +2371,19 @@ After starting the server (`uvicorn` on port **9000** by default):
 - ReDoc: `http://localhost:9000/redoc`
 
 Supplementary docs (in git): [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including live WebSocket), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest, cURL, SSH, cashier `data`/cases/evidence), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`sse_cashier.md`](sse_cashier.md). Ad-hoc run notes (`docs/logs.md`, edge/framing/service test write-ups, `BUG_REPORT.md`) are listed in `.gitignore` so they stay local-only.
+For detailed API documentation and interactive testing:
+
+```bash
+# Access Swagger UI after starting server
+http://localhost:8000/docs
+
+# Access ReDoc documentation
+http://localhost:8000/redoc
+```
 
 ## Models file
-https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link
+<https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link>
+
+## Models file
+
+<https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link>
