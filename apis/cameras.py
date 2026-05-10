@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse
 from fastapi import HTTPException
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from utils.rtsp_ffmpeg import open_rtsp_videocapture
+from utils.rtsp_ffmpeg import normalize_rtsp_source_url, open_rtsp_videocapture
 
 
 # ─────────────────────────────────────────────
@@ -45,6 +45,13 @@ class CameraConfig(BaseModel):
         if isinstance(v, bool):
             raise TypeError("id must be str or int, not bool")
         return str(v)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _normalize_url(cls, v: Any) -> str:
+        if v is None:
+            raise TypeError("url is required")
+        return normalize_rtsp_source_url(str(v))
 
 
 class CameraSetupRequest(BaseModel):
@@ -153,7 +160,7 @@ class CameraRegistry:
         os.makedirs(self._snapshot_dir, exist_ok=True)
 
     def add(self, cam_id: str, url: str):
-        self._cameras[cam_id] = url
+        self._cameras[cam_id] = normalize_rtsp_source_url(url)
 
     def remove(self, cam_id: str):
         if cam_id not in self._cameras:

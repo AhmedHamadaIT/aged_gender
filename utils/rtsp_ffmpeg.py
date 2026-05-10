@@ -4,8 +4,12 @@ RTSP / OpenCV-FFmpeg capture options (TCP-only, shared by stream reader and came
 from __future__ import annotations
 
 import os
+import re
 
 import cv2
+
+# Leading slashes before rtsp:// (e.g. bad join → ``//rtsp://host/...``)
+_MALFORMED_RTSP_PREFIX = re.compile(r"^/+rtsp://", re.IGNORECASE)
 
 # Universal “tolerant” preset when RTSP_FFMPEG_EXTRA_OPTIONS is unset (balanced / unknown codec).
 # TCP is always forced separately via rtsp_transport;tcp.
@@ -159,3 +163,14 @@ def warmup_rtsp_capture(cap: cv2.VideoCapture) -> int:
             break
         ok += 1
     return ok
+
+
+def normalize_rtsp_source_url(url: str) -> str:
+    """
+    Strip stray leading slashes before ``rtsp://`` so callers route to the RTSP
+    reader. Dashboards sometimes produce ``//rtsp://...`` when concatenating URLs.
+    """
+    s = (url or "").strip()
+    if _MALFORMED_RTSP_PREFIX.match(s):
+        return s.lstrip("/")
+    return s

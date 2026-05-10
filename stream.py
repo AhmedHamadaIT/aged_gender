@@ -24,7 +24,12 @@ load_dotenv()
 from logger.logger_config import Logger
 from stream_adapter import AdaptiveStream, StreamProber, profile_health
 from stream_gstreamer import gstreamer_backend_available, open_gstreamer_capture, should_attempt_gstreamer
-from utils.rtsp_ffmpeg import apply_rtsp_ffmpeg_env, open_rtsp_videocapture, warmup_rtsp_capture
+from utils.rtsp_ffmpeg import (
+    apply_rtsp_ffmpeg_env,
+    normalize_rtsp_source_url,
+    open_rtsp_videocapture,
+    warmup_rtsp_capture,
+)
 
 log = Logger.get_logger(__name__)
 
@@ -475,6 +480,8 @@ def frames(
     """
     if source is None:
         source = RTSP_URL if USE_STREAM else INPUT_VIDEO
+
+    source = normalize_rtsp_source_url(source)
 
     m = metrics if metrics is not None else StreamGeneratorMetrics()
 

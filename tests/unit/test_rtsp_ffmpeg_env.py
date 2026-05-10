@@ -29,3 +29,10 @@ def test_legacy_rtsp_ffmpeg_options_split(monkeypatch):
     rtsp_ffmpeg.clear_rtsp_transport_overrides()
     opts = rtsp_ffmpeg.build_rtsp_ffmpeg_options(None)
     assert "max_delay;111" in opts
+
+
+def test_normalize_rtsp_source_url_strips_leading_slashes():
+    raw = "//rtsp://admin:pass@10.0.0.1/stream"
+    assert rtsp_ffmpeg.normalize_rtsp_source_url(raw) == "rtsp://admin:pass@10.0.0.1/stream"
+    assert rtsp_ffmpeg.normalize_rtsp_source_url("  ///rtsp://h/x  ") == "rtsp://h/x"
+    assert rtsp_ffmpeg.normalize_rtsp_source_url("rtsp://ok") == "rtsp://ok"
