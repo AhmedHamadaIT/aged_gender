@@ -18,6 +18,8 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from apis.ws_live import decode_live_frame_message
+
 router = APIRouter(prefix="/stream", tags=["stream"])
 
 
@@ -59,6 +61,42 @@ async def stream_health(request: Request):
     """Per-camera stream health summary, including adaptive FFmpeg probe details."""
     rows = await stream_metrics(request)
     return {"cameras": rows}
+
+
+@router.get("/resilience-stats")
+async def resilience_stats(request: Request):
+    """Per-camera resilience counters (circuit state, buffers, respawns, DLQ)."""
+    detection = getattr(request.app.state, "detection", None)
+    if detection is None:
+        return {}
+    keys = (
+        "reconnects",
+        "frames_dropped",
+        "events_buffered",
+        "events_replayed",
+        "respawn_count",
+        "redis_circuit_state",
+        "task_redis_circuit_state",
+        "stream_metrics",
+        "stopped_reason",
+    )
+    out: dict[str, dict] = {}
+    for cam_id, v in detection._shared_state.items():
+        row = dict(v)
+        cid = str(cam_id)
+        out[cid] = {k: row.get(k) for k in keys}
+    dlq_path = os.getenv("EMBED_DLQ_DB", "./artifacts/embed_dlq.db")
+    dlq_size = 0
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(dlq_path)
+        cur = conn.execute("SELECT COUNT(*) FROM embed_dlq")
+        dlq_size = int(cur.fetchone()[0])
+        conn.close()
+    except Exception:
+        pass
+    return {"cameras": out, "embed_dlq_pending": dlq_size, "embed_dlq_path": dlq_path}
 
 
 @router.get("/health/{camera_id}")
@@ -131,14 +169,16 @@ async def live_stream_sse(camera_id: str, request: Request):
                             break
                         if msg["type"] != "message":
                             continue
-                        raw_jpeg: Any = msg["data"]
-                        if not isinstance(raw_jpeg, (bytes, bytearray)):
+                        raw_msg: Any = msg["data"]
+                        if not isinstance(raw_msg, (bytes, bytearray, str)):
                             continue
+                        jpeg_bytes, seq = decode_live_frame_message(raw_msg)
                         payload = json.dumps(
                             {
                                 "camera_id": camera_id,
-                                "frame_b64": _b64.b64encode(raw_jpeg).decode("ascii"),
+                                "frame_b64": _b64.b64encode(jpeg_bytes).decode("ascii"),
                                 "ts": time.time(),
+                                "_seq": seq,
                             }
                         )
                         yield f"data: {payload}\n\n"

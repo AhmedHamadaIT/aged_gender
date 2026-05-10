@@ -4,7 +4,11 @@
 
 These routes use the **WebSocket** protocol (not shown as separate operations in OpenAPI). They require **`REDIS_URL`** on the server for live fan-out from the frame bus.
 
-Clients should **reconnect** after disconnect (the server does not auto-reconnect for you).
+Clients should **reconnect** after disconnect. The server **does** retry the Redis subscription from inside an open WebSocket session (`WS_REDIS_MAX_RETRIES`, `WS_REDIS_RECONNECT_DELAY_MS`); if Redis stays down, the socket closes with **1011**.
+
+For **live JPEG**, optional query **`last_seq`**: `ws://host/cameras/1/live?last_seq=123` replays a short server-side ring of frames with sequence greater than `123` (best-effort; same ring cap as `SSE_REPLAY_BUFFER` / `WS_FRAME_REPLAY_BUFFER`). Frames on the wire remain **raw JPEG bytes** after decode.
+
+Uvicorn (see [`docker-compose.yml`](../docker-compose.yml)) is configured with **`--ws-ping-interval`** and **`--ws-ping-timeout`** for protocol-level WebSocket pings.
 
 ## Endpoints
 
@@ -20,7 +24,7 @@ Clients should **reconnect** after disconnect (the server does not auto-reconnec
 |------|---------|
 | 4004 | Task name not found |
 | 4009 | Ambiguous task name (multiple tasks share `taskName`) |
-| 1011 | Redis unavailable |
+| 1011 | Redis unavailable, or Redis reconnect attempts exhausted while the socket was open |
 
 ## curl / CLI testing
 

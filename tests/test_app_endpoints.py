@@ -43,6 +43,7 @@ def test_openapi_contains_expected_http_paths(client: TestClient):
         "/semantic_search/search",
         "/semantic_search/health",
         "/stream/metrics",
+        "/stream/resilience-stats",
         "/stream/health",
         "/stream/health/{camera_id}",
         "/stream/quality-events",

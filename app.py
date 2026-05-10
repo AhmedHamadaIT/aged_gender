@@ -64,6 +64,7 @@ from apis.detection_stream import (
 )
 from apis.tasks     import task_registry, TaskConfig
 from apis.ws_live   import live_frames_ws, live_events_ws
+from resilience.watchdog import DetectionWatchdog
 from apis.face_lib  import router as face_router
 from schemas        import DetectionRequest, DetectionStatus
 from apis.person_search import person_search_api
@@ -94,9 +95,16 @@ async def lifespan(app: FastAPI):
     bridge = DetectionSSEBridge(detection.result_queue())
     await bridge.start()
     app.state.detection_sse_bridge = bridge
+    watchdog = DetectionWatchdog(
+        respawn_callback=lambda: detection._watchdog_tick(),
+    )
+    await watchdog.start()
+    app.state.detection_watchdog = watchdog
     try:
         yield
     finally:
+        await watchdog.stop()
+        app.state.detection_watchdog = None
         await bridge.stop()
         app.state.detection_sse_bridge = None
 
@@ -285,6 +293,17 @@ async def detection_stream(
         channel_id=channelId,
     )
     client_q = bridge.subscribe()
+    last_raw = request.headers.get("last-event-id") or request.headers.get("Last-Event-ID")
+    if last_raw:
+        try:
+            lid = int(str(last_raw).strip())
+            for ev in bridge.replay_after(lid):
+                try:
+                    client_q.put_nowait(ev)
+                except asyncio.QueueFull:
+                    break
+        except ValueError:
+            pass
     keepalive_sec = DETECTION_SSE_KEEPALIVE_SEC
 
     def _task_lookup(tid: int):

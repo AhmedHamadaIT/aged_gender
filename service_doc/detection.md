@@ -29,6 +29,8 @@ All filters combine with **AND** semantics:
 
 Idle connections receive SSE comment keepalives (`: ping`) about every 30 seconds.
 
+Optional header **`Last-Event-ID`** (last seen **`_seq`** on events) requests a short replay from the server ring buffer after reconnect; see [API_USAGE.md](../docs/API_USAGE.md) §5. Ops metrics: **`GET /stream/resilience-stats`**.
+
 ## curl — start all
 
 ```bash

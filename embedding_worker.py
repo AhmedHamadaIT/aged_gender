@@ -9,7 +9,9 @@ batches Qdrant upserts to reduce latency spikes.
 
 import os
 import hashlib
+import pickle
 import queue as _queue
+import sqlite3
 import time
 from typing import Any, List, Tuple
 
@@ -21,6 +23,109 @@ load_dotenv()
 
 _BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "8"))
 _FLUSH_TIMEOUT = float(os.getenv("EMBED_FLUSH_TIMEOUT", "3.0"))
+_DLQ_PATH = os.getenv("EMBED_DLQ_DB", os.path.join("artifacts", "embed_dlq.db"))
+_DLQ_RETRY_INTERVAL = float(os.getenv("DLQ_RETRY_INTERVAL_SEC", "60"))
+_DLQ_MAX_RETRIES = max(1, int(os.getenv("DLQ_MAX_RETRIES", "10")))
+
+
+def _dlq_init() -> None:
+    d = os.path.dirname(os.path.abspath(_DLQ_PATH))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    conn = sqlite3.connect(_DLQ_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS embed_dlq (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            payload BLOB NOT NULL,
+            retry_count INTEGER DEFAULT 0,
+            created REAL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def _dlq_enqueue(kind: str, batch: List[Tuple[str, Any, dict]], log) -> None:
+    if not batch:
+        return
+    try:
+        conn = sqlite3.connect(_DLQ_PATH)
+        conn.execute(
+            "INSERT INTO embed_dlq (kind, payload, retry_count, created) VALUES (?,?,0,?)",
+            (kind, sqlite3.Binary(pickle.dumps(batch, protocol=pickle.HIGHEST_PROTOCOL)), time.time()),
+        )
+        conn.commit()
+        conn.close()
+        log.warning("[EmbeddingWorker] queued %d items to DLQ kind=%s", len(batch), kind)
+    except Exception as exc:
+        log.warning("[EmbeddingWorker] DLQ enqueue failed: %s", exc)
+
+
+def _dlq_retry_batch(
+    person_search,
+    semantic_search,
+    person_search_ready: bool,
+    semantic_search_ready: bool,
+    log,
+) -> int:
+    """Replay up to one row from DLQ. Returns number successfully flushed."""
+    try:
+        conn = sqlite3.connect(_DLQ_PATH)
+    except Exception:
+        return 0
+    try:
+        cur = conn.execute(
+            "SELECT id, kind, payload, retry_count FROM embed_dlq ORDER BY id LIMIT 1"
+        )
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return 0
+        rid, kind, payload, rcount = row
+        batch: List[Tuple[str, Any, dict]] = pickle.loads(payload)
+        try:
+            if kind == "reid" and person_search_ready:
+                person_search.identity_manager.upsert_batch(batch, wait=False)
+            elif kind == "semantic" and semantic_search_ready:
+                semantic_search.identity_manager.upsert_batch(batch, wait=False)
+            else:
+                conn.close()
+                return 0
+            conn.execute("DELETE FROM embed_dlq WHERE id=?", (rid,))
+            conn.commit()
+            conn.close()
+            log.info("[EmbeddingWorker] DLQ replay ok id=%s kind=%s n=%d", rid, kind, len(batch))
+            return len(batch)
+        except Exception as exc:
+            r2 = int(rcount) + 1
+            if r2 >= _DLQ_MAX_RETRIES:
+                conn.execute("DELETE FROM embed_dlq WHERE id=?", (rid,))
+                log.error(
+                    "[EmbeddingWorker] DLQ discarded id=%s kind=%s after %s retries: %s",
+                    rid,
+                    kind,
+                    r2,
+                    exc,
+                )
+            else:
+                conn.execute(
+                    "UPDATE embed_dlq SET retry_count=? WHERE id=?",
+                    (r2, rid),
+                )
+                log.warning("[EmbeddingWorker] DLQ retry failed id=%s: %s", rid, exc)
+            conn.commit()
+            conn.close()
+            return 0
+    except Exception as exc:
+        log.warning("[EmbeddingWorker] DLQ retry error: %s", exc)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return 0
 
 
 def _embedding_is_valid(vec: Any) -> bool:
@@ -42,6 +147,7 @@ def run_embedding_worker(embedding_queue, stop_event):
     from logger.logger_config import Logger
 
     log = Logger.get_logger("EmbeddingWorker")
+    _dlq_init()
     log.info("[EmbeddingWorker] Starting up — loading services...")
 
     person_search = PersonSearchService()
@@ -66,6 +172,7 @@ def run_embedding_worker(embedding_queue, stop_event):
     reid_batch: List[Tuple[str, Any, dict]] = []
     semantic_batch: List[Tuple[str, Any, dict]] = []
     last_flush = time.time()
+    last_dlq_retry = time.time()
     processed = 0
     skipped = 0
 
@@ -78,6 +185,7 @@ def run_embedding_worker(embedding_queue, stop_event):
             log.debug(f"[EmbeddingWorker] ReID batch upserted: {len(reid_batch)} points")
         except Exception as e:
             log.warning(f"[EmbeddingWorker] ReID batch upsert failed: {e}")
+            _dlq_enqueue("reid", list(reid_batch), log)
         reid_batch = []
 
     def _flush_semantic():
@@ -89,6 +197,7 @@ def run_embedding_worker(embedding_queue, stop_event):
             log.debug(f"[EmbeddingWorker] CLIP batch upserted: {len(semantic_batch)} points")
         except Exception as e:
             log.warning(f"[EmbeddingWorker] CLIP batch upsert failed: {e}")
+            _dlq_enqueue("semantic", list(semantic_batch), log)
         semantic_batch = []
 
     def _flush_all():
@@ -100,6 +209,17 @@ def run_embedding_worker(embedding_queue, stop_event):
     while not stop_event.is_set():
         if time.time() - last_flush >= _FLUSH_TIMEOUT:
             _flush_all()
+
+        if time.time() - last_dlq_retry >= _DLQ_RETRY_INTERVAL:
+            last_dlq_retry = time.time()
+            while _dlq_retry_batch(
+                person_search,
+                semantic_search,
+                person_search_ready,
+                semantic_search_ready,
+                log,
+            ):
+                pass
 
         try:
             msg = embedding_queue.get(timeout=1.0)

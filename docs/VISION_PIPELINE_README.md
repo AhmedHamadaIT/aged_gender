@@ -9,6 +9,7 @@ Single reference that merges:
 
 | More detail | Doc |
 |-------------|-----|
+| Docker / Compose failures (NVIDIA runtime, image arch, healthcheck, Redis volume) | [stream_test_runbook.md](./stream_test_runbook.md#docker-troubleshooting) |
 | Tests, log paths, curl cheat sheet | Part I of this file; [API_USAGE.md](./API_USAGE.md) for HTTP walkthrough |
 | ML Image V2 — evidence, env, disk, SSH / JSONL | [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md) |
 | Add a FrameBus task | [ADDING_A_SERVICE.md](./ADDING_A_SERVICE.md) |

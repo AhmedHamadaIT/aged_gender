@@ -25,18 +25,21 @@ if _repo_root not in sys.path:
 
 _DEFAULT_TRACKER_YAML = os.path.join(_repo_root, "cfg", "trackers", "botsort_stable.yaml")
 
+import json
 import time
 import base64
 import hashlib
 import queue as _queue
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import cv2
 from ultralytics import YOLO
 
 from utils import resize, save_frame
 from services.detector import Detection
+from resilience.circuit_breaker import CircuitBreaker
+from resilience.sequencer import next_seq
 
 try:
     import redis as _redis_lib
@@ -58,6 +61,9 @@ class FrameBus:
         stop_event,
         task_queues     : Dict[str, object],  # {task_id: Queue}
         embedding_queue = None,                # Queue for EmbeddingWorker
+        frame_seq_counter: Any = None,         # multiprocessing.Value('Q') for live frames
+        frame_seq_lock: Any = None,
+        bus_fatal_event: Any = None,           # multiprocessing.Event — set on fatal error
     ):
         self.camera_id       = camera_id
         self.rtsp_url        = rtsp_url
@@ -65,6 +71,9 @@ class FrameBus:
         self.stop_event      = stop_event
         self.task_queues     = task_queues
         self.embedding_queue = embedding_queue
+        self._frame_seq_counter = frame_seq_counter
+        self._frame_seq_lock = frame_seq_lock
+        self._bus_fatal_event = bus_fatal_event
 
         self.save_output = os.getenv("SAVE_OUTPUT", "True").lower() in ("true", "1", "yes")
         self.out_dir     = os.path.join(os.getenv("OUTPUT_DIR", "./outputs"), camera_id)
@@ -102,15 +111,20 @@ class FrameBus:
         # Publishes annotated JPEG frames to channel  live:frame:{camera_id}
         # so the FastAPI WebSocket endpoint can fan them out to browser clients.
         self._redis: Optional[object] = None
+        self._redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self._redis_connect_retries = max(1, int(os.getenv("REDIS_CONNECT_RETRIES", "5")))
+        self._redis_health_interval = max(1, int(os.getenv("REDIS_HEALTH_INTERVAL_FRAMES", "300")))
+        self._redis_breaker = CircuitBreaker(
+            name=f"framebus_redis:{camera_id}",
+            failure_threshold=max(1, int(os.getenv("REDIS_CIRCUIT_FAILURES", "5"))),
+            reset_timeout_sec=max(1.0, float(os.getenv("REDIS_CIRCUIT_RESET_SEC", "30"))),
+        )
         if _REDIS_AVAILABLE:
-            try:
-                redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-                self._redis = _redis_lib.Redis.from_url(redis_url, socket_connect_timeout=2)
-                self._redis.ping()
-                print(f"[{camera_id}] FrameBus: Redis connected ({redis_url})")
-            except Exception as exc:
-                print(f"[{camera_id}] FrameBus: Redis unavailable — live stream disabled ({exc})")
-                self._redis = None
+            self._redis = self._connect_redis_with_retry()
+            if self._redis is not None:
+                print(f"[{camera_id}] FrameBus: Redis connected ({self._redis_url})")
+            else:
+                print(f"[{camera_id}] FrameBus: Redis unavailable — live stream disabled (will retry)")
 
         # Publish every Nth frame to hit the target REDIS_LIVE_FPS.
         # We don't know the actual camera FPS at init time, so we start with
@@ -161,6 +175,55 @@ class FrameBus:
         self._live_annotation_mode: str = (
             _lam if _lam in ("ultralytics", "opencv", "none") else "ultralytics"
         )
+
+    def _connect_redis_with_retry(self) -> Optional[object]:
+        if not _REDIS_AVAILABLE:
+            return None
+        delay = 0.5
+        for attempt in range(self._redis_connect_retries):
+            try:
+                client = _redis_lib.Redis.from_url(
+                    self._redis_url, socket_connect_timeout=2, socket_timeout=2
+                )
+                client.ping()
+                return client
+            except Exception as exc:
+                print(
+                    f"[{self.camera_id}] FrameBus Redis connect attempt {attempt + 1}/"
+                    f"{self._redis_connect_retries} failed: {exc}"
+                )
+                time.sleep(delay)
+                delay = min(delay * 2, 8.0)
+        return None
+
+    def _try_reconnect_redis(self) -> None:
+        if self._redis is not None:
+            return
+        client = self._connect_redis_with_retry()
+        if client is not None:
+            self._redis = client
+            self._redis_breaker.record_success()
+            print(f"[{self.camera_id}] FrameBus: Redis reconnected")
+
+    def _publish_live_jpeg(self, annotated) -> None:
+        if self._redis is None:
+            return
+        if not self._redis_breaker.allow_request():
+            return
+        seq = next_seq(self._frame_seq_counter, self._frame_seq_lock)
+        try:
+            _, _buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            jpeg_b64 = base64.b64encode(bytes(_buf)).decode("ascii")
+            envelope = json.dumps({"_seq": seq, "jpeg": jpeg_b64}, separators=(",", ":"))
+            self._redis.publish(f"live:frame:{self.camera_id}", envelope)
+            self._redis_breaker.record_success()
+        except Exception:
+            self._redis_breaker.record_failure()
+            try:
+                self._redis.close()
+            except Exception:
+                pass
+            self._redis = None
 
     @staticmethod
     def _env_float_clamped(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -284,7 +347,7 @@ class FrameBus:
         return resized_frame
 
     def run(self):
-        from stream import QUALITY_LADDER, frames
+        from stream import QUALITY_LADDER, StreamExhausted, StreamGeneratorMetrics, frames
 
         fps_counter      = 0
         fps_timer        = time.time()
@@ -333,13 +396,22 @@ class FrameBus:
             "task_queue_coalesced_by_task": dict(self._task_queue_coalesced_by_task),
             "live_annotation_mode": self._live_annotation_mode,
             "rtsp_backend": "unknown",
+            "redis_circuit_state": self._redis_breaker.state_label(),
+            "stream_metrics": {},
+            "events_buffered": 0,
+            "events_replayed": 0,
+            "respawn_count": 0,
+            "task_redis_circuit_state": None,
         }
 
         if self.save_output:
             os.makedirs(self.out_dir, exist_ok=True)
 
         try:
-            for frame in frames(self.rtsp_url, camera_id=self.camera_id):
+            _stream_metrics = StreamGeneratorMetrics()
+            for frame in frames(
+                self.rtsp_url, camera_id=self.camera_id, metrics=_stream_metrics
+            ):
                 now_wall = time.time()
                 if self._metrics_last_wall_t is not None:
                     dt_ms = (now_wall - self._metrics_last_wall_t) * 1000.0
@@ -366,6 +438,9 @@ class FrameBus:
                     # Recalculate publish cadence once we have a real FPS measurement
                     if fps > 0 and self._redis is not None:
                         self._publish_every = max(1, round(fps / self._target_fps))
+
+                if frame_count % self._redis_health_interval == 0:
+                    self._try_reconnect_redis()
 
                 resized_frame = resize(frame, self.width, self.height)
 
@@ -400,15 +475,7 @@ class FrameBus:
 
                 # ── Publish annotated JPEG to Redis (live stream) ──────────────
                 if will_publish:
-                    try:
-                        _, _buf = cv2.imencode(
-                            ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75]
-                        )
-                        self._redis.publish(
-                            f"live:frame:{self.camera_id}", bytes(_buf)
-                        )
-                    except Exception:
-                        pass  # never block inference on Redis errors
+                    self._publish_live_jpeg(annotated)
 
                 payload = {
                     "camera_id" : self.camera_id,
@@ -521,9 +588,27 @@ class FrameBus:
                     "embed_skip_rate" : skip_rate,
                     "state_updated_at": time.time(),
                     "live_annotation_mode": self._live_annotation_mode,
+                    "redis_circuit_state": self._redis_breaker.state_label(),
+                    "stream_metrics": {
+                        "decode_failures": _stream_metrics.decode_failures,
+                        "reconnect_count": _stream_metrics.reconnect_count,
+                    },
                 }
 
+        except StreamExhausted as e:
+            if self._bus_fatal_event is not None:
+                self._bus_fatal_event.set()
+            self.shared_state[self.camera_id] = {
+                **self.shared_state[self.camera_id],
+                "error": str(e),
+                "running": False,
+                "state_updated_at": time.time(),
+                "stopped_reason": "stream_exhausted",
+            }
+            print(f"[{self.camera_id}] FrameBus stream exhausted: {e}")
         except Exception as e:
+            if self._bus_fatal_event is not None:
+                self._bus_fatal_event.set()
             self.shared_state[self.camera_id] = {
                 **self.shared_state[self.camera_id],
                 "error"  : str(e),

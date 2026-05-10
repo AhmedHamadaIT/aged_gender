@@ -448,6 +448,14 @@ curl -N "http://localhost:9000/detection/stream?taskId=10&channelId=1"
 curl -N "http://localhost:9000/detection/stream?eventType=CASHIER_BOX_OPEN"
 ```
 
+### Reconnect / resume (optional)
+
+Task events may include a monotonic **`_seq`** field when sequencing is enabled. On reconnect, clients can send the standard SSE header **`Last-Event-ID`** with the last seen sequence number; the server replays a short ring buffer of newer events before live delivery resumes. This is best-effort and bounded by `SSE_REPLAY_BUFFER` (see [`stream_test_runbook.md`](./stream_test_runbook.md)).
+
+```bash
+curl -N -H 'Last-Event-ID: 42' 'http://localhost:9000/detection/stream?channelId=1'
+```
+
 ### Task events — `evidence` (ML Image Contract V2)
 
 For **`CROSS_LINE`**, **`MASK_HAIRNET_CHEF_HAT`**, and **`PHONE_USAGE`**, `evidence.captureImage` and `evidence.sceneImage` are **structured objects** (`url`, `path`, `type`, `format`, `timestamp`), not bare filesystem strings. On-disk files live under `CAPTURE_DIR` / `SCENE_DIR` with paths like `YYYY-MM-DD/{camera_id}_{event_id}_{uuid8}.jpg` inside each root. Set **`PUBLIC_ML_BASE_URL`** for full `https://…/evidence/…` URLs. See [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
@@ -1320,6 +1328,10 @@ Save as `multi_stream.html` and open while detection is running. Change `HOST` i
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL (required for live stream) |
 | `REDIS_LIVE_FPS` | `13` | Target publish rate in frames per second. FrameBus auto-adjusts cadence to match measured camera FPS. |
 | `WS_SEND_TIMEOUT_MS` | `50` | Max milliseconds to wait for a WebSocket send before dropping the frame. Prevents TCP buffer bloat on slow clients. |
+| `WS_REDIS_MAX_RETRIES` | `5` | WebSocket live/events: Redis subscribe failures before closing with **1011**. |
+| `WS_REDIS_RECONNECT_DELAY_MS` | `1000` | Delay between Redis reconnect attempts inside an open WebSocket session. |
+
+Uvicorn is started in Compose with **`--ws-ping-interval`** / **`--ws-ping-timeout`** so proxies and idle links see WebSocket-level keepalives (see [`docker-compose.yml`](../docker-compose.yml)).
 
 ### Verify Redis is running
 
@@ -1346,9 +1358,11 @@ docker exec -it redis redis-cli SUBSCRIBE live:frame:3
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | WebSocket closes immediately | Redis not reachable | Check `REDIS_URL`; verify `docker compose ps redis` is Up |
+| WebSocket closes with **1011** after working briefly | Redis flapping or repeated subscribe errors | Check Redis logs and network; raise `WS_REDIS_MAX_RETRIES` or fix broker stability |
 | Stream connects but shows nothing | Detection not started | Run `POST /detection/start` first |
 | Very laggy / old frames | `WS_SEND_TIMEOUT_MS` too high | Lower it (e.g. `WS_SEND_TIMEOUT_MS=30`) or check client CPU |
 | WebSocket closes after ~30s idle | Normal — client should reconnect | Implement `ws.onclose = () => setTimeout(connect, 2000)` |
+| `docker compose ps` shows **unhealthy** for `yolo-detect` | API still loading or crash loop | See [stream_test_runbook.md — Docker troubleshooting](./stream_test_runbook.md#docker-troubleshooting) |
 
 ---
 
@@ -1533,10 +1547,18 @@ curl -N http://localhost:9000/stream/quality-events
 
 ### `GET /stream/live/{camera_id}` (SSE)
 
-Subscribes to Redis **`live:frame:{camera_id}`** (raw JPEG bytes as published by the live fan-out). Each event is one JSON object with `camera_id`, `frame_b64` (base64-encoded JPEG), and `ts` (server Unix time). Handy when you cannot use WebSockets but can consume SSE; bandwidth is high.
+Subscribes to Redis **`live:frame:{camera_id}`** (JPEG as published by FrameBus). Each event is one JSON object with `camera_id`, `frame_b64` (base64-encoded JPEG), `ts` (server Unix time), and optional **`_seq`** when frame sequencing is enabled. Handy when you cannot use WebSockets but can consume SSE; bandwidth is high.
 
 ```bash
 curl -N http://localhost:9000/stream/live/1
+```
+
+### `GET /stream/resilience-stats`
+
+JSON summary for operations: per-camera fields such as `redis_circuit_state`, `task_redis_circuit_state`, `events_buffered`, `events_replayed`, `respawn_count`, `stream_metrics`, plus **`embed_dlq_pending`** (rows waiting in the embedding worker SQLite dead-letter queue) and **`embed_dlq_path`**.
+
+```bash
+curl -s http://localhost:9000/stream/resilience-stats | python3 -m json.tool
 ```
 
 ---

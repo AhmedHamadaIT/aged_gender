@@ -174,19 +174,22 @@ def test_bridge_unsubscribe_removes_subscriber():
     asyncio.run(_run())
 
 
-def test_bridge_slow_subscriber_dropped():
-    """A subscriber whose queue is full is silently dropped on next broadcast."""
+def test_bridge_slow_subscriber_dropped(monkeypatch):
+    """A subscriber is dropped once both the asyncio queue and overflow deque are full."""
+    import apis.detection_stream as ds
+
+    monkeypatch.setattr(ds, "SSE_OVERFLOW_BUFFER", 1)
+
     async def _run():
         sq: queue.Queue = queue.Queue()
         bridge = DetectionSSEBridge(sq, subscriber_queue_maxsize=1)
         await bridge.start()
         slow = bridge.subscribe()
-        evt = {"taskId": 1, "eventType": "X", "channelId": 1}
-        # Fill the queue so the next broadcast overflows it
+        evt = {"taskId": 1, "eventType": "X", "channelId": 1, "_seq": 1}
+        # Fill the queue so the next broadcast uses overflow, then exhaust overflow
         slow.put_nowait(evt)
-        sq.put(evt)
-        await asyncio.sleep(0.5)   # let bridge loop run
-        # Slow subscriber should have been removed
+        await bridge._broadcast({**evt, "_seq": 2})
+        await bridge._broadcast({**evt, "_seq": 3})
         assert slow not in bridge._subscribers
         await bridge.stop()
 

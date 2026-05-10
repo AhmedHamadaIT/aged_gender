@@ -17,14 +17,18 @@ Used by GET /detection/stream in app.py.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import queue as queue_std
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 # Default SSE idle keepalive interval (seconds). Override in tests via monkeypatch.
 DETECTION_SSE_KEEPALIVE_SEC = float(os.getenv("DETECTION_SSE_KEEPALIVE_SEC", "30"))
+SSE_REPLAY_BUFFER = max(10, int(os.getenv("SSE_REPLAY_BUFFER", "200")))
+SSE_OVERFLOW_BUFFER = max(1, int(os.getenv("SSE_OVERFLOW_BUFFER", "50")))
 
 
 @dataclass
@@ -84,6 +88,9 @@ class DetectionSSEBridge:
         self._source = source_queue
         self._subscriber_queue_maxsize = subscriber_queue_maxsize
         self._subscribers: List[asyncio.Queue] = []
+        self._overflow: Dict[int, deque] = {}
+        self._replay_ring: deque = deque(maxlen=SSE_REPLAY_BUFFER)
+        self._seen_seq: deque = deque(maxlen=5000)
         self._running = False
         self._bridge_task: Optional[asyncio.Task] = None
         self._redis_task: Optional[asyncio.Task] = None
@@ -110,6 +117,7 @@ class DetectionSSEBridge:
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=self._subscriber_queue_maxsize)
         self._subscribers.append(q)
+        self._overflow[id(q)] = deque(maxlen=SSE_OVERFLOW_BUFFER)
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
@@ -117,6 +125,25 @@ class DetectionSSEBridge:
             self._subscribers.remove(q)
         except ValueError:
             pass
+        self._overflow.pop(id(q), None)
+
+    def replay_after(self, after_seq: int) -> List[dict]:
+        """Return a copy of buffered events with _seq strictly greater than after_seq."""
+        if after_seq <= 0:
+            return [copy.deepcopy(e) for e in self._replay_ring]
+        return [
+            copy.deepcopy(e)
+            for e in self._replay_ring
+            if int(e.get("_seq") or 0) > after_seq
+        ]
+
+    def _record_replay(self, event: dict) -> None:
+        seq = int(event.get("_seq") or 0)
+        if seq and seq in self._seen_seq:
+            return  # de-dupe
+        if seq:
+            self._seen_seq.append(seq)
+        self._replay_ring.append(copy.deepcopy(event))
 
     def _get_one_blocking(self, timeout: float) -> Optional[Any]:
         """Blocking get with timeout so executor threads are not stuck forever."""
@@ -124,6 +151,20 @@ class DetectionSSEBridge:
             return self._source.get(timeout=timeout)
         except queue_std.Empty:
             return None
+
+    async def _drain_overflow_to_main(self, q: asyncio.Queue) -> None:
+        ov = self._overflow.get(id(q))
+        if not ov:
+            return
+        while ov:
+            try:
+                item = ov.popleft()
+                q.put_nowait(item)
+            except asyncio.QueueFull:
+                ov.appendleft(item)
+                break
+            except Exception:
+                break
 
     async def _bridge_loop(self) -> None:
         loop = asyncio.get_event_loop()
@@ -147,12 +188,18 @@ class DetectionSSEBridge:
             await self._broadcast(event)
 
     async def _broadcast(self, event: dict) -> None:
+        self._record_replay(event)
         stale: List[asyncio.Queue] = []
         for q in list(self._subscribers):
+            await self._drain_overflow_to_main(q)
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                stale.append(q)
+                ov = self._overflow.get(id(q))
+                if ov is None or len(ov) >= ov.maxlen:
+                    stale.append(q)
+                else:
+                    ov.append(event)
             except Exception:
                 stale.append(q)
         for q in stale:
@@ -192,6 +239,10 @@ class DetectionSSEBridge:
                 break
             except Exception as exc:
                 if self._running:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "detection_sse_redis reconnect after error: %s", exc
+                    )
                     await asyncio.sleep(3)  # back off before reconnecting
             finally:
                 if client is not None:

@@ -9,8 +9,12 @@ frames(video_path) → reads from local video file
 frames()           → uses USE_STREAM / RTSP_URL_1 from .env
 """
 
+import json
 import os
+import random
 import time
+from dataclasses import dataclass
+from typing import Any, Optional
 
 import cv2
 from dotenv import load_dotenv
@@ -32,6 +36,8 @@ INPUT_VIDEO = os.getenv("INPUT_VIDEO",  "./videos/sample.mp4")
 RTSP_MAX_CONSECUTIVE_FAILS = max(1, int(os.getenv("RTSP_MAX_CONSECUTIVE_READ_FAILS", "10")))
 STREAM_RECONNECT_BASE_SEC  = max(0.1, float(os.getenv("STREAM_RECONNECT_BASE_SEC", "2")))
 STREAM_RECONNECT_MAX_SEC   = max(STREAM_RECONNECT_BASE_SEC, float(os.getenv("STREAM_RECONNECT_MAX_SEC", "30")))
+RTSP_MAX_RECONNECT_STREAK = max(1, int(os.getenv("RTSP_MAX_RECONNECT_STREAK", "50")))
+RECONNECT_JITTER_RATIO = max(0.0, min(0.5, float(os.getenv("STREAM_RECONNECT_JITTER_RATIO", "0.2"))))
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -134,6 +140,47 @@ _current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
 _current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
 _current_stream_health = {}
 _current_rtsp_backend = "unknown"
+
+
+class StreamExhausted(Exception):
+    """Raised when RTSP reconnect streak exceeds RTSP_MAX_RECONNECT_STREAK."""
+
+
+@dataclass
+class StreamGeneratorMetrics:
+    """Per-generator counters (avoids sharing globals across concurrent streams)."""
+
+    decode_failures: int = 0
+    reconnect_count: int = 0
+    last_reconnect_streak: int = 0
+
+
+def _publish_stream_quality_event(
+    camera_id: Optional[str],
+    kind: str,
+    detail: dict[str, Any],
+) -> None:
+    """Best-effort publish to stream:quality_events for SSE /stream/quality-events."""
+    url = os.getenv("REDIS_URL", "").strip()
+    if not url:
+        return
+    try:
+        import redis as redis_lib  # type: ignore
+    except ImportError:
+        return
+    payload = {
+        "source": "stream",
+        "kind": kind,
+        "camera_id": camera_id,
+        "ts": time.time(),
+        **detail,
+    }
+    try:
+        client = redis_lib.Redis.from_url(url, socket_connect_timeout=1, socket_timeout=1)
+        client.publish("stream:quality_events", json.dumps(payload, default=str))
+        client.close()
+    except Exception:
+        pass
 
 
 def _rtsp_backend_mode() -> str:
@@ -407,10 +454,18 @@ def _reconnect_delay_seconds(attempt_index: int) -> float:
     # attempt_index: 0 after first failure batch, then increases
     exp = min(attempt_index, 8)
     delay = STREAM_RECONNECT_BASE_SEC * (2**exp)
-    return min(STREAM_RECONNECT_MAX_SEC, delay)
+    base = min(STREAM_RECONNECT_MAX_SEC, delay)
+    if RECONNECT_JITTER_RATIO > 0:
+        jitter = base * RECONNECT_JITTER_RATIO * (2.0 * random.random() - 1.0)
+        base = max(STREAM_RECONNECT_BASE_SEC * 0.25, base + jitter)
+    return base
 
 
-def frames(source: str = None, camera_id: str = None):
+def frames(
+    source: str = None,
+    camera_id: str = None,
+    metrics: Optional[StreamGeneratorMetrics] = None,
+):
     """
     Generator yielding BGR numpy frames.
 
@@ -418,10 +473,10 @@ def frames(source: str = None, camera_id: str = None):
         source: RTSP URL, video file path, or None (uses .env defaults)
         camera_id: optional caller context for compatibility with FrameBus.
     """
-    global _current_decode_failures, _rtsp_reconnect_count
-
     if source is None:
         source = RTSP_URL if USE_STREAM else INPUT_VIDEO
+
+    m = metrics if metrics is not None else StreamGeneratorMetrics()
 
     is_rtsp = source.startswith("rtsp://")
     reader  = _RTSPReader(source, camera_id=camera_id) if is_rtsp else _VideoReader(source)
@@ -438,20 +493,44 @@ def frames(source: str = None, camera_id: str = None):
             throttle.frame_skip,
             throttle.target_fps,
         )
+    global _current_decode_failures, _rtsp_reconnect_count
     try:
         while True:
             frame = reader.read_frame()
             if frame is None:
                 consecutive_fails += 1
-                _current_decode_failures += 1
+                m.decode_failures += 1
+                _current_decode_failures = m.decode_failures
                 if consecutive_fails >= RTSP_MAX_CONSECUTIVE_FAILS:
                     if is_rtsp:
+                        if reconnect_streak >= RTSP_MAX_RECONNECT_STREAK:
+                            m.last_reconnect_streak = reconnect_streak
+                            _publish_stream_quality_event(
+                                camera_id,
+                                "stream_exhausted",
+                                {
+                                    "reconnect_streak": reconnect_streak,
+                                    "message": "max reconnect streak exceeded",
+                                },
+                            )
+                            raise StreamExhausted(
+                                f"RTSP reconnect streak {reconnect_streak} >= {RTSP_MAX_RECONNECT_STREAK}"
+                            )
                         wait = _reconnect_delay_seconds(reconnect_streak)
                         log.info(
                             "[STREAM] %d consecutive read failures — reconnecting in %.1fs (streak=%d)",
                             consecutive_fails,
                             wait,
                             reconnect_streak,
+                        )
+                        _publish_stream_quality_event(
+                            camera_id,
+                            "reconnect_scheduled",
+                            {
+                                "wait_sec": round(wait, 2),
+                                "streak": reconnect_streak,
+                                "consecutive_fails": consecutive_fails,
+                            },
                         )
                         if getattr(reader, "_adaptive", None) is not None:
                             reader._adaptive.log_stderr_tail("reconnect_after_read_failures")
@@ -477,12 +556,23 @@ def frames(source: str = None, camera_id: str = None):
                         time.sleep(wait)
                         try:
                             reader.connect()
-                            _rtsp_reconnect_count += 1
+                            m.reconnect_count += 1
+                            _rtsp_reconnect_count = m.reconnect_count
                             if is_rtsp and getattr(reader, "_adaptive_profile", None) is not None:
-                                reader._adaptive_profile.reconnects = _rtsp_reconnect_count
+                                reader._adaptive_profile.reconnects = m.reconnect_count
+                            _publish_stream_quality_event(
+                                camera_id,
+                                "reconnected",
+                                {"reconnect_count": m.reconnect_count, "streak_after": reconnect_streak},
+                            )
                         except Exception as exc:  # noqa: BLE001
                             log.warning(
                                 "[STREAM] Reconnect failed: %s — will retry with backoff", exc
+                            )
+                            _publish_stream_quality_event(
+                                camera_id,
+                                "reconnect_failed",
+                                {"error": str(exc), "streak": reconnect_streak},
                             )
                         reconnect_streak += 1
                         consecutive_fails = 0

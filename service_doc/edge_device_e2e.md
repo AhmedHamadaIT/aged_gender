@@ -19,8 +19,10 @@ This guide is for a **small computer, NVR, or gateway** that orchestrates the ML
 | 4 | Register each analytics task (`channelId` = camera `id`) | `POST /api/tasks` |
 | 5 | Confirm tasks | `GET /api/tasks` |
 | 6 | Start processing | `POST /detection/start` (optional `?camera_id=` for one camera) |
-| 7 | Monitor | `GET /detection/status` and/or `GET /detection/stream` (SSE) and/or WebSockets |
+| 7 | Monitor | `GET /detection/status`, `GET /stream/metrics`, `GET /stream/resilience-stats`, `GET /detection/stream` (SSE), and/or WebSockets |
 | 8 | Stop | `POST /detection/stop` or `POST /detection/stop/all` |
+
+**Resilience:** `GET /stream/resilience-stats` surfaces circuit breaker state, buffered events, respawn counts, and embedding DLQ depth. Docker-specific failures (NVIDIA runtime, image arch, healthcheck) are covered in [../docs/stream_test_runbook.md](../docs/stream_test_runbook.md#docker-troubleshooting).
 
 ## Step 1 — Health
 

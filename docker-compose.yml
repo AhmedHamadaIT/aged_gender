@@ -17,7 +17,10 @@ services:
     restart: unless-stopped
     ports:
       - "6379:6379"
-    command: redis-server --save "" --appendonly no   # memory-only, no disk persistence needed
+    # AOF under /data (official image workdir) so pub/sub metadata survives container recreate
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
 
   # ── Qdrant vector DB (ReID identity store) ──
   qdrant:
@@ -36,7 +39,19 @@ services:
     build:
       context: .
       dockerfile: dockerfile
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9000"]
+    command:
+      [
+        "uvicorn",
+        "app:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9000",
+        "--ws-ping-interval",
+        "20",
+        "--ws-ping-timeout",
+        "10",
+      ]
     runtime: nvidia
     stdin_open: true
     tty: true
@@ -106,6 +121,10 @@ services:
       - TASK_QUEUE_INCLUDE_FRAME=false
       # Throttle "task queue saturated" stderr lines per task id.
       - FRAMEBUS_QUEUE_WARN_INTERVAL_SEC=15
+      # Resilience (stream / SSE / task events) — see docs/stream_test_runbook.md
+      - WATCHDOG_ENABLED=true
+      - EVENT_BUFFER_MAX=1000
+      - SSE_REPLAY_BUFFER=200
 
     volumes:
       - .:/app                  # mount entire project directory
@@ -126,7 +145,19 @@ services:
               count: 1
               capabilities: [gpu, compute, utility, video]
 
-    restart: "no"
+    restart: unless-stopped
+    # CMD-SHELL: more reliable than JSON exec form across Compose versions; matches L4T `python3`
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request; urllib.request.urlopen(\\\"http://127.0.0.1:9000/health\\\", timeout=5).read()\" || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
 
 volumes:
+  redis_data:
   qdrant_data:
