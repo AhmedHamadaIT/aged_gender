@@ -74,6 +74,8 @@ services:
       # or disable TRT: ONNX_ALLOW_TENSORRT=0
       # Default for in-compose Redis (avoids localhost:6379 inside the container)
       - REDIS_URL=redis://redis:6379/0
+      # Same pattern as Redis: inside the stack, localhost is the app container — use the service name.
+      - QDRANT_URL=http://qdrant:6333
       # RTSP defaults favor decode stability (HEVC/H.264, jittery Wi‑Fi, substreams).
       # For lowest latency on a clean LAN + H.264, set RTSP_PROFILE=performance and RTSP_LOW_DELAY=true.
       - RTSP_PROFILE=balanced
