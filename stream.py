@@ -45,6 +45,11 @@ RTSP_MAX_RECONNECT_STREAK = max(1, int(os.getenv("RTSP_MAX_RECONNECT_STREAK", "5
 RECONNECT_JITTER_RATIO = max(0.0, min(0.5, float(os.getenv("STREAM_RECONNECT_JITTER_RATIO", "0.2"))))
 
 
+def media_pts_ingest_enabled() -> bool:
+    """Return True when STREAM_INGEST is set to a PyAV-based backend."""
+    return os.getenv("STREAM_INGEST", "opencv").lower() in ("pyav", "av")
+
+
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
     try:
         return max(minimum, int(os.getenv(name, str(default))))

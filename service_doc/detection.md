@@ -15,6 +15,10 @@ Crossing, PPE, phone, and cashier task events share the SSE channel. Payload sha
 | POST | `/detection/stop/all` | Alias for stop-all |
 | GET | `/detection/status` | Per-camera FPS, frame counts, errors |
 | GET | `/detection/stream` | SSE stream of JSON events (optional query filters) |
+| GET | `/stream/metrics` | Per-camera pipeline stats (fps, drop rate, task-queue depth, frame count, annotation mode) |
+| GET | `/stream/health` | Same as `/stream/metrics` wrapped under `{"cameras": [...]}` |
+| GET | `/stream/resilience-stats` | Reconnect counters, circuit-breaker state, DLQ pending count |
+| GET | `/stream/debug/annotation-state` | FrameBus annotation + Redis publish diagnostics per camera |
 
 ### SSE query parameters (`GET /detection/stream`)
 
@@ -88,8 +92,34 @@ curl -sS -X POST "${BASE}/detection/stop/all"
 |------|----------------|
 | 400 | No cameras or no enabled tasks before start |
 | 404 | `camera_id` on start/stop does not match any task/camera |
-| 409 | Start called while that camera’s bus is already running; or stop when nothing running |
+| 409 | Start called while that camera's bus is already running; or stop when nothing running (including when a local video file has been exhausted and the process exited naturally) |
+
+## Worker process lifecycle
+
+`DetectionResource` manages FrameBus and task-worker `multiprocessing.Process` objects.
+
+- **Start** (`POST /detection/start`): spawns one FrameBus + N task-worker processes per camera channel. Calls `_reap_finished_processes()` first to join any naturally-exited processes before the new ones are created.
+- **Stop** (`POST /detection/stop`): sets the per-camera `stop_event`, drains task queues (up to `STOP_DRAIN_TIMEOUT_SEC`, default `3`), then `join(timeout=5)` on all workers.
+- **Zombie prevention**: `_reap_finished_processes()` is called at the start of every `_start()` and `_stop()`. It calls `join(timeout=0)` on any process whose `exitcode is not None` — this prevents OS zombies from accumulating when a local-file FrameBus finishes before an explicit stop is issued.
+- **Watchdog** (optional, `WATCHDOG_ENABLED=true`): detects unexpectedly dead FrameBus processes and calls `_restart_channel()`. Off by default to avoid unintentional restarts on edge devices where stream exhaustion is expected.
+
+## Stream metrics curl
+
+```bash
+export BASE="http://localhost:9000"
+
+# Per-camera pipeline stats (fps, drop_rate, frame_count, annotation_mode, etc.)
+curl -sS "${BASE}/stream/metrics"
+
+# Annotation + Redis publish diagnostics
+curl -sS "${BASE}/stream/debug/annotation-state"
+
+# Resilience counters + DLQ size
+curl -sS "${BASE}/stream/resilience-stats"
+```
 
 ## Edge device note
 
 For **reliable long-lived SSE**, implement client reconnect with `Last-Event-ID` only if you add that server-side; the current server does not resume history. Poll `GET /detection/status` alongside SSE to detect stalled RTSP or process death.
+
+When running a **local video file** (non-RTSP URL), the FrameBus process exits when the file ends. `GET /detection/status` will show `running: false` and `stopped_reason: "stream_exhausted"`. A subsequent `POST /detection/start` will restart the pipeline from the beginning of the file.

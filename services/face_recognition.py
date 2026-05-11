@@ -57,6 +57,8 @@ from typing import Dict, List, Optional
 import cv2
 import numpy as np
 
+from utils import build_image, draw_evidence_scene, make_evidence_paths
+
 # ── Schedule helpers ──────────────────────────────────────────────────────────
 
 _WEEKDAY_MAP = {
@@ -248,9 +250,8 @@ class FaceRecognitionTask:
             f"{self.task_id}_{person_det.track_id}_{now_ms}".encode()
         ).hexdigest()
 
-        date_str     = datetime.now().strftime("%Y/%m/%d")
-        capture_path = os.path.join(self._capture_dir, date_str, f"{event_id}_crop.jpg")
-        scene_path   = os.path.join(self._scene_dir, date_str, f"{event_id}_scene.jpg")
+        cam_key = str(self.channel_id or "unknown")
+        cap_rel, scene_rel = make_evidence_paths(cam_key, event_id)
 
         x1, y1, x2, y2 = face_det.bbox
         return {
@@ -285,8 +286,8 @@ class FaceRecognitionTask:
                 "failCount": 0,
             },
             "evidence": {
-                "captureImage": capture_path,
-                "sceneImage"  : scene_path,
+                "captureImage": build_image(cap_rel, "capture"),
+                "sceneImage"  : build_image(scene_rel, "scene"),
             },
         }
 
@@ -296,9 +297,8 @@ class FaceRecognitionTask:
             f"{self.task_id}_stranger_{stranger_id}_{now_ms}".encode()
         ).hexdigest()
 
-        date_str     = datetime.now().strftime("%Y/%m/%d")
-        capture_path = os.path.join(self._capture_dir, date_str, f"{event_id}_crop.jpg")
-        scene_path   = os.path.join(self._scene_dir, date_str, f"{event_id}_scene.jpg")
+        cam_key = str(self.channel_id or "unknown")
+        cap_rel, scene_rel = make_evidence_paths(cam_key, event_id)
 
         x1, y1, x2, y2 = face_det.bbox
         return {
@@ -333,26 +333,32 @@ class FaceRecognitionTask:
                 "failCount": self.fail_count,
             },
             "evidence": {
-                "captureImage": capture_path,
-                "sceneImage"  : scene_path,
+                "captureImage": build_image(cap_rel, "capture"),
+                "sceneImage"  : build_image(scene_rel, "scene"),
             },
         }
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
     def _persist(self, event: dict, frame: np.ndarray, face_det):
-        """Save evidence images and append JSONL log — same pattern as CrossLineTask."""
-        # Face crop
-        crop = self._crop_face(frame, face_det)
-        capture_path = event["evidence"]["captureImage"]
-        scene_path   = event["evidence"]["sceneImage"]
+        """Save evidence images and append JSONL log."""
+        rel_cap = event["evidence"]["captureImage"]["path"]
+        rel_sce = event["evidence"]["sceneImage"]["path"]
+        capture_path = os.path.join(self._capture_dir, *rel_cap.split("/"))
+        scene_path   = os.path.join(self._scene_dir,   *rel_sce.split("/"))
         os.makedirs(os.path.dirname(capture_path), exist_ok=True)
         os.makedirs(os.path.dirname(scene_path),   exist_ok=True)
+
+        crop = self._crop_face(frame, face_det)
         if crop is not None and crop.size > 0:
             cv2.imwrite(capture_path, crop)
-        cv2.imwrite(scene_path, frame)
 
-        # JSONL
+        person_info = event.get("person", {})
+        name  = person_info.get("name", "")
+        label = f"{name} id{person_info.get('trackingId', '')}"
+        scene_vis = draw_evidence_scene(frame, subject_bbox=face_det.bbox, label=label)
+        cv2.imwrite(scene_path, scene_vis)
+
         with open(self._jsonl_path, "a") as f:
             f.write(json.dumps(event) + "\n")
 

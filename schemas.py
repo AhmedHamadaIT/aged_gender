@@ -5,7 +5,7 @@ Pydantic models for request/response validation.
 """
 
 from typing import Optional, Dict, List
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class DetectionRequest(BaseModel):
@@ -16,6 +16,8 @@ class DetectionRequest(BaseModel):
 
 
 class CameraStatus(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     camera_id        : str
     rtsp_url         : str
     running          : bool
@@ -29,6 +31,15 @@ class CameraStatus(BaseModel):
     framebus_process_alive: Optional[bool] = None
     stopped_reason         : Optional[str] = None
     last_state_update_age_sec: Optional[float] = None
+    # FrameBus live annotation / Redis (optional; present when detection is running)
+    save_output               : Optional[bool] = None
+    redis_connected           : Optional[bool] = None
+    last_live_publish_seq     : Optional[int] = None
+    last_live_frame_had_boxes : Optional[bool] = None
+    live_annotation_mode      : Optional[str] = None
+    live_jpeg_quality         : Optional[int] = None
+    task_queue_jpeg_quality   : Optional[int] = None
+    redis_circuit_state       : Optional[str] = None
 
 
 class DetectionStatus(BaseModel):

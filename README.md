@@ -70,10 +70,13 @@ from the directory that contains `docker-compose.yml`.
 ## Features (complete inventory)
 
 ### Architecture (v2 runtime)
-- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`, `LIVE_ANNOTATION_MODE` (`ultralytics` / `opencv` / `none`). Ingest path: `RTSP_BACKEND` (`auto` / `gstreamer` / `ffmpeg` / `opencv`) — see [`stream.py`](stream.py) / [`stream_gstreamer.py`](stream_gstreamer.py) on Jetson.
+- **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`, `LIVE_ANNOTATION_MODE` (`opencv` / `ultralytics` / `none`). Ingest path: `RTSP_BACKEND` (`auto` / `gstreamer` / `ffmpeg` / `opencv`) — see [`stream.py`](stream.py) / [`stream_gstreamer.py`](stream_gstreamer.py) on Jetson.
 - **Task workers** ([`task_worker.py`](task_worker.py)) — One worker process per enabled task; looks up `algorithmType` in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`, emits events to the shared result queue **and** publishes them to Redis `live:event:{camera_id}`.
-- **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` (subscribes from both the multiprocessing queue and Redis `live:event:*` so multiple uvicorn workers can all serve SSE). Serves **WebSocket** live frame stream at `WS /cameras/{id}/live` via [`apis/ws_live.py`](apis/ws_live.py).
+- **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` (subscribes from both the multiprocessing queue and Redis `live:event:*` so multiple uvicorn workers can all serve SSE). Serves **WebSocket** live frame stream at `WS /cameras/{id}/live` via [`apis/ws_live.py`](apis/ws_live.py). Camera IDs are validated by `apis.ws_live.validate_camera_id()` (rejects reserved JS sentinels and invalid characters).
 - **Redis** ([`docker-compose.yml`](docker-compose.yml) `redis:7-alpine`) — Fire-and-forget Pub/Sub broker. FrameBus publishes binary JPEG frames; FastAPI WebSocket handlers subscribe. No persistence needed (`--appendonly no`).
+- **Zombie-process reaping** ([`apis/detection.py`](apis/detection.py)) — `DetectionResource._reap_finished_processes()` is called at the start of every `_start()` and `_stop()` invocation. It joins any FrameBus or task-worker process that has already exited (e.g. a local video file that was exhausted), preventing OS zombie accumulation.
+- **RTSP transport override** ([`utils/rtsp_ffmpeg.py`](utils/rtsp_ffmpeg.py)) — `set_rtsp_transport(cam_id, transport)` / `get_rtsp_transport(cam_id)` / `clear_rtsp_transport_overrides()` allow per-camera RTSP transport selection at runtime (`tcp` / `udp`). The global default is `RTSP_TRANSPORT` env var (default `tcp`).
+- **Stream ingest probe** ([`stream.py`](stream.py), [`utils/stream_pyav.py`](utils/stream_pyav.py)) — `media_pts_ingest_enabled()` returns `True` when `STREAM_INGEST=pyav|av`. `utils.stream_pyav.pyav_available()` safely probes whether the optional `av` package is installed.
 
 ### Cameras
 
@@ -119,7 +122,10 @@ from the directory that contains `docker-compose.yml`.
 ### Developer surface
 
 - **OpenAPI** — `/docs`, `/redoc`
-- **Tests** — `tests/` (e.g. `test_detection_stream.py`, `test_cashier_api.py`); run `pytest` from repo root when present
+- **Tests** — `tests/` (unit, contract, integration, e2e); run `pytest` from repo root.
+  - **Unit / contract** (`tests/unit/`, `tests/contract/`, flat `tests/test_*.py`): fast, no external services.  141 tests pass with just `pytest -q`.
+  - **E2E system validation** (`tests/e2e/test_final_system_validation.py`): spins up a real uvicorn process with the 15-second test clip; validates server lifecycle, annotated frame persistence, stream metrics, memory stability, zombie prevention, and graceful shutdown.  Run with `DEVICE=cpu LIVE_ANNOTATION_MODE=opencv SAVE_OUTPUT=true pytest tests/e2e/test_final_system_validation.py -v --timeout=300`.
+  - **Integration** (`tests/integration/`): require `INTEGRATION_STACK=1` and a running docker-compose stack (Redis, Qdrant, MediaMTX).
 - **Adding tasks** — See [`services/__init__.py`](services/__init__.py) docstring and [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md)
 
 ### Cashier + FrameBus model
@@ -308,7 +314,7 @@ connect("cam1");   // change to your camera id
 |---|---|---|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
 | `REDIS_LIVE_FPS` | `13` | Target publish rate (fps); FrameBus auto-adjusts per measured camera FPS |
-| `LIVE_ANNOTATION_MODE` | `ultralytics` | `ultralytics` (full `plot()`), `opencv` (fast boxes), or `none` (no overlay) for live Redis JPEGs; still uses full plot when `SAVE_OUTPUT` is on |
+| `LIVE_ANNOTATION_MODE` | `opencv` | `opencv` (fast boxes, code default), `ultralytics` (full `plot()`), or `none` (no overlay) for live Redis JPEGs; Compose may override (e.g. `docker-compose.yml`) |
 | `RTSP_BACKEND` | `auto` | `auto` (GStreamer NVDEC on Jetson if available, else Adaptive FFmpeg, else OpenCV), or force `gstreamer` / `ffmpeg` / `opencv` |
 | `WS_SEND_TIMEOUT_MS` | `50` | Drop frame if client cannot receive within this many ms |
 
@@ -2267,7 +2273,7 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `DEVICE` | `0` | CUDA device index or device string |
 | `FILTER_CLASSES` | *(empty)* | Comma-separated class IDs to restrict detection |
 | `WIDTH` / `HEIGHT` | `1280` / `0` | Capture resize |
-| `SAVE_OUTPUT` | `True` | Persist frames under `OUTPUT_DIR` when true |
+| `SAVE_OUTPUT` | `false` | Persist every annotated frame under `OUTPUT_DIR/{camera_id}` when true (disk-heavy; enable only for debugging) |
 | `OUTPUT_DIR` | `./outputs` | Base directory for saved runs |
 | `DETECTION_SSE_KEEPALIVE_SEC` | `30` | Idle ping interval for `GET /detection/stream` |
 | `CASHIER_CONFIG` | `./config/cashier_zones.yaml` | Cashier YAML path |
@@ -2282,7 +2288,9 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `RTSP_HWDECODER` | *(unset)* | Legacy fallback decoder when per-codec vars are unset (same name is passed for the probed codec — use only if you know your stream matches). |
 | `STREAM_ADAPTER_FFMPEG_STDERR_MAX` | `8192` | Max bytes of ffmpeg stderr retained for logging on RTSP reconnect ([`stream_adapter.py`](stream_adapter.py)). |
 | `RTSP_ADAPTIVE_FAILOVER_AFTER` | `4` | If Adaptive FFmpeg reconnect fails this many cycles consecutively, `stream.py` switches that camera process to OpenCV RTSP fallback. |
-| `RTSP_FFMPEG_EXTRA_OPTIONS` | *(see `utils/rtsp_ffmpeg.py`)* | Extra OpenCV-FFmpeg options (pipe-separated `key;value` segments); `rtsp_transport;tcp` is always applied |
+| `RTSP_TRANSPORT` | `tcp` | Default RTSP transport for OpenCV-FFmpeg capture (`tcp` / `udp` / `udp_multicast`). Override per-camera at runtime via `utils.rtsp_ffmpeg.set_rtsp_transport(cam_id, transport)`. |
+| `RTSP_FFMPEG_EXTRA_OPTIONS` | *(see `utils/rtsp_ffmpeg.py`)* | Extra OpenCV-FFmpeg options (pipe-separated `key;value` segments). The `rtsp_transport` segment is merged from `RTSP_TRANSPORT` / per-camera override. |
+| `STREAM_INGEST` | `opencv` | Frame ingest backend: `opencv` (default) \| `pyav` / `av` (PyAV-based; requires `pip install av`). Probe availability with `utils.stream_pyav.pyav_available()`. |
 | `RTSP_MAX_CONSECUTIVE_READ_FAILS` | `10` | Fails before stream reconnect in `stream.py` |
 | `STREAM_RECONNECT_BASE_SEC` / `STREAM_RECONNECT_MAX_SEC` | `2` / `30` | Exponential reconnect backoff (capped) |
 | `RTSP_OPENCV_BUFFER_SIZE` / `RTSP_OPEN_TIMEOUT_MSEC` / `RTSP_READ_TIMEOUT_MSEC` | `1` / `15000` / `0` | OpenCV capture tuning |
@@ -2370,20 +2378,9 @@ After starting the server (`uvicorn` on port **9000** by default):
 - Swagger UI: `http://localhost:9000/docs`
 - ReDoc: `http://localhost:9000/redoc`
 
-Supplementary docs (in git): [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including live WebSocket), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest, cURL, SSH, cashier `data`/cases/evidence), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`sse_cashier.md`](sse_cashier.md). Ad-hoc run notes (`docs/logs.md`, edge/framing/service test write-ups, `BUG_REPORT.md`) are listed in `.gitignore` so they stay local-only.
-For detailed API documentation and interactive testing:
+Supplementary docs (in git): [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including live WebSocket), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest, cURL, SSH, cashier `data`/cases/evidence), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`docs/pipeline-architecture.md`](docs/pipeline-architecture.md) (process model, annotation flow, RTSP transport API, zombie reaping, E2E test guide), [`sse_cashier.md`](sse_cashier.md).
 
-```bash
-# Access Swagger UI after starting server
-http://localhost:8000/docs
+## Models
 
-# Access ReDoc documentation
-http://localhost:8000/redoc
-```
-
-## Models file
-<https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link>
-
-## Models file
-
+Weights for all task models are available at:
 <https://drive.google.com/drive/folders/1oAROlqkBo8C3rzTe4hAcS7abaIKC_Ugq?usp=drive_link>

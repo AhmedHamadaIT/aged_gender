@@ -43,7 +43,8 @@ async def stream_metrics(request: Request):
     - ``framebus_process_alive`` / ``last_state_update_age_sec`` — reconciled with the parent
       FrameBus process when available.
     - ``rtsp_backend`` — active ingest: ``gstreamer``, ``adaptive_ffmpeg``, ``opencv_ffmpeg``, etc.
-    - ``live_annotation_mode`` — ``ultralytics`` / ``opencv`` / ``none`` for Redis live JPEGs.
+    - ``live_annotation_mode`` — ``opencv`` / ``ultralytics`` / ``none`` for Redis live JPEGs.
+    - ``GET /stream/debug/annotation-state`` — annotation + Redis diagnostics per camera.
     """
     detection = getattr(request.app.state, "detection", None)
     if detection is None:
@@ -97,6 +98,35 @@ async def resilience_stats(request: Request):
     except Exception:
         pass
     return {"cameras": out, "embed_dlq_pending": dlq_size, "embed_dlq_path": dlq_path}
+
+
+@router.get("/debug/annotation-state")
+async def debug_annotation_state(request: Request):
+    """Per-camera FrameBus annotation / live-publish diagnostics (from shared_state)."""
+    detection = getattr(request.app.state, "detection", None)
+    if detection is None:
+        return {"error": "detection service not initialized", "cameras": {}}
+    out: dict[str, dict] = {}
+    for cam_id, v in detection._shared_state.items():
+        row = dict(v)
+        cid = str(cam_id)
+        out[cid] = {
+            "camera_id": cid,
+            "live_annotation_mode": row.get("live_annotation_mode"),
+            "save_output": row.get("save_output"),
+            "redis_connected": row.get("redis_connected"),
+            "redis_circuit_state": row.get("redis_circuit_state"),
+            "last_live_publish_seq": row.get("last_live_publish_seq"),
+            "last_live_frame_had_boxes": row.get("last_live_frame_had_boxes"),
+            "live_jpeg_quality": row.get("live_jpeg_quality"),
+            "task_queue_jpeg_quality": row.get("task_queue_jpeg_quality"),
+            "frame_count": row.get("frame_count"),
+            "last_detections": row.get("last_detections"),
+            "running": row.get("running"),
+            "state_updated_at": row.get("state_updated_at"),
+        }
+        out[cid] = detection.enrich_shared_camera_row(cid, out[cid])
+    return {"cameras": out}
 
 
 @router.get("/health/{camera_id}")

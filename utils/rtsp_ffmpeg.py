@@ -5,11 +5,36 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Optional
 
 import cv2
 
 # Leading slashes before rtsp:// (e.g. bad join → ``//rtsp://host/...``)
 _MALFORMED_RTSP_PREFIX = re.compile(r"^/+rtsp://", re.IGNORECASE)
+
+# Per-camera transport overrides: {camera_id: transport_string}
+_transport_overrides: dict[str, str] = {}
+
+
+def set_rtsp_transport(camera_id: str, transport: str) -> None:
+    """Set a per-camera RTSP transport override (e.g. "udp", "tcp")."""
+    _transport_overrides[camera_id] = transport
+
+
+def get_rtsp_transport(camera_id: Optional[str] = None) -> str:
+    """
+    Return the effective RTSP transport for *camera_id*.
+
+    Priority: per-camera override → RTSP_TRANSPORT env var → "tcp".
+    """
+    if camera_id is not None and camera_id in _transport_overrides:
+        return _transport_overrides[camera_id]
+    return os.getenv("RTSP_TRANSPORT", "tcp")
+
+
+def clear_rtsp_transport_overrides() -> None:
+    """Remove all per-camera transport overrides (resets to global default)."""
+    _transport_overrides.clear()
 
 # Universal “tolerant” preset when RTSP_FFMPEG_EXTRA_OPTIONS is unset (balanced / unknown codec).
 # TCP is always forced separately via rtsp_transport;tcp.
@@ -46,12 +71,13 @@ def _default_ffmpeg_extra_segments() -> list[str]:
     return [p for p in _STABLE_EXTRA_DEFAULT.split("|") if p]
 
 
-def build_rtsp_ffmpeg_options() -> str:
+def build_rtsp_ffmpeg_options(camera_id: Optional[str] = None) -> str:
     """
-    Build OPENCV_FFMPEG_CAPTURE_OPTIONS for RTSP over TCP.
+    Build OPENCV_FFMPEG_CAPTURE_OPTIONS for RTSP.
 
     Format (OpenCV FFmpeg backend): key;value|key2;value2|...
-    Always includes rtsp_transport;tcp (project default: TCP-only).
+    Always includes rtsp_transport;<transport> (default tcp, controlled by
+    RTSP_TRANSPORT env var or per-camera override via set_rtsp_transport).
     Always includes loglevel;error to suppress decoder warning noise.
 
     Override or extend with RTSP_FFMPEG_EXTRA_OPTIONS (pipe-separated key;value segments),
@@ -60,7 +86,8 @@ def build_rtsp_ffmpeg_options() -> str:
     If RTSP_FFMPEG_EXTRA_OPTIONS is unset, a preset is chosen from RTSP_PROFILE / RTSP_LOW_DELAY /
     RTSP_FFMPEG_OPTIONS (see _default_ffmpeg_extra_segments).
     """
-    segments: list[str] = ["rtsp_transport;tcp", "loglevel;error"]
+    transport = get_rtsp_transport(camera_id)
+    segments: list[str] = [f"rtsp_transport;{transport}", "loglevel;error"]
     extra_env = os.getenv("RTSP_FFMPEG_EXTRA_OPTIONS")
     if extra_env is None:
         parts = _default_ffmpeg_extra_segments()
@@ -118,9 +145,9 @@ def build_rtsp_ffmpeg_options() -> str:
     return "|".join(segments)
 
 
-def apply_rtsp_ffmpeg_env() -> str:
+def apply_rtsp_ffmpeg_env(camera_id: Optional[str] = None) -> str:
     """Set OPENCV_FFMPEG_CAPTURE_OPTIONS and return the options string used."""
-    opts = build_rtsp_ffmpeg_options()
+    opts = build_rtsp_ffmpeg_options(camera_id)
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = opts
     return opts
 

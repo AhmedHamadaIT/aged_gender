@@ -36,10 +36,13 @@ from typing import Any, Dict, Optional
 import cv2
 from ultralytics import YOLO
 
+from logger.logger_config import Logger
 from utils import resize, save_frame
 from services.detector import Detection
 from resilience.circuit_breaker import CircuitBreaker
 from resilience.sequencer import next_seq
+
+log = Logger.get_logger(__name__)
 
 try:
     import redis as _redis_lib
@@ -75,7 +78,8 @@ class FrameBus:
         self._frame_seq_lock = frame_seq_lock
         self._bus_fatal_event = bus_fatal_event
 
-        self.save_output = os.getenv("SAVE_OUTPUT", "True").lower() in ("true", "1", "yes")
+        # Default off: per-frame disk writes fill storage quickly; enable explicitly for debugging.
+        self.save_output = os.getenv("SAVE_OUTPUT", "false").lower() in ("true", "1", "yes")
         self.out_dir     = os.path.join(os.getenv("OUTPUT_DIR", "./outputs"), camera_id)
         self.width       = int(os.getenv("WIDTH",  "1280"))
         self.height      = int(os.getenv("HEIGHT", "0"))
@@ -122,9 +126,14 @@ class FrameBus:
         if _REDIS_AVAILABLE:
             self._redis = self._connect_redis_with_retry()
             if self._redis is not None:
-                print(f"[{camera_id}] FrameBus: Redis connected ({self._redis_url})")
+                log.info(
+                    "[%s] FrameBus: Redis connected (%s)", camera_id, self._redis_url
+                )
             else:
-                print(f"[{camera_id}] FrameBus: Redis unavailable — live stream disabled (will retry)")
+                log.warning(
+                    "[%s] FrameBus: Redis unavailable — live stream disabled (will retry)",
+                    camera_id,
+                )
 
         # Publish every Nth frame to hit the target REDIS_LIVE_FPS.
         # We don't know the actual camera FPS at init time, so we start with
@@ -171,9 +180,46 @@ class FrameBus:
             str(k): 0 for k in self.task_queues
         }
 
-        _lam = os.getenv("LIVE_ANNOTATION_MODE", "ultralytics").lower().strip()
+        # Default opencv: lighter than ultralytics plot(); set LIVE_ANNOTATION_MODE=ultralytics for rich labels.
+        _lam = os.getenv("LIVE_ANNOTATION_MODE", "opencv").lower().strip()
         self._live_annotation_mode: str = (
-            _lam if _lam in ("ultralytics", "opencv", "none") else "ultralytics"
+            _lam if _lam in ("ultralytics", "opencv", "none") else "opencv"
+        )
+
+        try:
+            self._task_jpeg_quality = max(
+                1, min(100, int(os.getenv("TASK_QUEUE_JPEG_QUALITY", "85")))
+            )
+        except ValueError:
+            self._task_jpeg_quality = 85
+        try:
+            self._live_jpeg_quality = max(
+                1, min(100, int(os.getenv("LIVE_JPEG_QUALITY", "75")))
+            )
+        except ValueError:
+            self._live_jpeg_quality = 75
+
+        self._state_update_every_n = max(
+            1, int(os.getenv("STATE_UPDATE_INTERVAL", "10"))
+        )
+        try:
+            self._state_update_min_sec = max(
+                0.1, float(os.getenv("STATE_UPDATE_MIN_SEC", "1.0"))
+            )
+        except ValueError:
+            self._state_update_min_sec = 1.0
+
+        self._perf_log_every = max(1, int(os.getenv("PERF_LOG_INTERVAL", "300")))
+        self._need_draw_warn_interval = max(
+            1.0, float(os.getenv("FRAMEBUS_NEED_DRAW_WARN_SEC", "60.0"))
+        )
+        self._last_need_draw_warn_wall = 0.0
+
+        self._last_live_publish_seq: int = 0
+        self._last_live_frame_had_boxes: bool = False
+
+        self._annotation_debug_every = max(
+            1, int(os.getenv("ANNOTATION_DEBUG_LOG_INTERVAL", "1"))
         )
 
     def _connect_redis_with_retry(self) -> Optional[object]:
@@ -188,9 +234,12 @@ class FrameBus:
                 client.ping()
                 return client
             except Exception as exc:
-                print(
-                    f"[{self.camera_id}] FrameBus Redis connect attempt {attempt + 1}/"
-                    f"{self._redis_connect_retries} failed: {exc}"
+                log.warning(
+                    "[%s] FrameBus Redis connect attempt %d/%d failed: %s",
+                    self.camera_id,
+                    attempt + 1,
+                    self._redis_connect_retries,
+                    exc,
                 )
                 time.sleep(delay)
                 delay = min(delay * 2, 8.0)
@@ -203,27 +252,55 @@ class FrameBus:
         if client is not None:
             self._redis = client
             self._redis_breaker.record_success()
-            print(f"[{self.camera_id}] FrameBus: Redis reconnected")
+            log.info("[%s] FrameBus: Redis reconnected", self.camera_id)
 
-    def _publish_live_jpeg(self, annotated) -> None:
+    def _publish_live_jpeg(
+        self,
+        annotated,
+        *,
+        task_encode_buf=None,
+        reuse_task_encode: bool = False,
+    ) -> float:
+        """Publish annotated frame to Redis. Returns wall seconds spent in publish path."""
         if self._redis is None:
-            return
+            return 0.0
         if not self._redis_breaker.allow_request():
-            return
+            log.warning(
+                "[%s] live frame publish skipped: redis circuit %s",
+                self.camera_id,
+                self._redis_breaker.state_label(),
+            )
+            return 0.0
+        t0 = time.perf_counter()
         seq = next_seq(self._frame_seq_counter, self._frame_seq_lock)
         try:
-            _, _buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if (
+                reuse_task_encode
+                and task_encode_buf is not None
+                and self._task_jpeg_quality == self._live_jpeg_quality
+            ):
+                _buf = task_encode_buf
+            else:
+                _, _buf = cv2.imencode(
+                    ".jpg",
+                    annotated,
+                    [cv2.IMWRITE_JPEG_QUALITY, self._live_jpeg_quality],
+                )
             jpeg_b64 = base64.b64encode(bytes(_buf)).decode("ascii")
             envelope = json.dumps({"_seq": seq, "jpeg": jpeg_b64}, separators=(",", ":"))
             self._redis.publish(f"live:frame:{self.camera_id}", envelope)
             self._redis_breaker.record_success()
+            if seq is not None:
+                self._last_live_publish_seq = int(seq)
         except Exception:
             self._redis_breaker.record_failure()
+            log.exception("[%s] live frame publish failed", self.camera_id)
             try:
                 self._redis.close()
             except Exception:
                 pass
             self._redis = None
+        return time.perf_counter() - t0
 
     @staticmethod
     def _env_float_clamped(name: str, default: float, minimum: float, maximum: float) -> float:
@@ -299,9 +376,13 @@ class FrameBus:
                 "lower-resolution RTSP substream, or keep TASK_QUEUE_COALESCE=true "
                 "(drops oldest queued frame for freshest)."
             )
-            print(
-                f"[{self.camera_id}] Task queue saturated; dropping frame for "
-                f"task {tid} (TASK_QUEUE_MAXSIZE={self._task_queue_maxsize}). {hint}"
+            log.warning(
+                "[%s] Task queue saturated; dropping frame for task %s "
+                "(TASK_QUEUE_MAXSIZE=%s). %s",
+                self.camera_id,
+                tid,
+                self._task_queue_maxsize,
+                hint,
             )
 
     def _draw_boxes_opencv(self, frame, detections: list):
@@ -328,23 +409,43 @@ class FrameBus:
         return out
 
     def _annotate_for_stream(
-        self, resized_frame, results, detections: list, need_draw: bool
+        self,
+        resized_frame,
+        results,
+        detections: list,
+        need_draw: bool,
+        frame_count: int,
     ):
         """
-        Build frame with boxes for live Redis / optional disk save.
-        Skips heavy Ultralytics ``plot()`` when not needed (see need_draw).
+        Return ``(annotated_frame, had_boxes)`` for every consumer
+        (Redis live publish, disk save, scene evidence).
+
+        Rule: **if detections > 0, always annotate — no exceptions**.
+
+        * ``LIVE_ANNOTATION_MODE=ultralytics`` → Ultralytics ``plot()`` (rich).
+        * ``LIVE_ANNOTATION_MODE=opencv`` or ``none``      → lightweight OpenCV overlay.
+        * No detections → raw frame returned as-is (no draw cost, no stale buf risk).
+        * ``need_draw=False`` (no Redis, no SAVE_OUTPUT) → skip draw only when
+          there are genuinely no detections; if there *are* detections we still draw
+          so any future publish/save path never receives a raw frame.
         """
-        if not need_draw:
-            return resized_frame
-        if self._live_annotation_mode == "none":
-            return resized_frame
-        if self._live_annotation_mode == "opencv":
-            if not detections:
-                return resized_frame
-            return self._draw_boxes_opencv(resized_frame, detections)
-        if results:
-            return results[0].plot()
-        return resized_frame
+        if frame_count % self._annotation_debug_every == 0:
+            log.debug(
+                "[%s] annotation: frame=%s detections=%d need_draw=%s mode=%s",
+                self.camera_id,
+                frame_count,
+                len(detections),
+                need_draw,
+                self._live_annotation_mode,
+            )
+
+        if not detections:
+            return resized_frame, False
+
+        # Detections present — always annotate.
+        if self._live_annotation_mode == "ultralytics" and results:
+            return results[0].plot(), True
+        return self._draw_boxes_opencv(resized_frame, detections), True
 
     def run(self):
         from stream import QUALITY_LADDER, StreamExhausted, StreamGeneratorMetrics, frames
@@ -355,8 +456,14 @@ class FrameBus:
         frame_count      = 0
         total_detections = 0
         fps              = 0.0
+        last_state_push_frame = 0
+        last_state_push_wall = 0.0
 
-        print(f"[{self.camera_id}] FrameBus started — tasks: {list(self.task_queues.keys())}")
+        log.info(
+            "[%s] FrameBus started — tasks: %s",
+            self.camera_id,
+            list(self.task_queues.keys()),
+        )
 
         _q0 = QUALITY_LADDER[0]["label"] if QUALITY_LADDER else "live"
         self.shared_state[self.camera_id] = {
@@ -402,7 +509,12 @@ class FrameBus:
             "events_replayed": 0,
             "respawn_count": 0,
             "task_redis_circuit_state": None,
+            "save_output": self.save_output,
+            "redis_connected": self._redis is not None,
+            "last_live_publish_seq": 0,
+            "last_live_frame_had_boxes": False,
         }
+        state_carry: Dict[str, Any] = dict(self.shared_state[self.camera_id])
 
         if self.save_output:
             os.makedirs(self.out_dir, exist_ok=True)
@@ -412,6 +524,7 @@ class FrameBus:
             for frame in frames(
                 self.rtsp_url, camera_id=self.camera_id, metrics=_stream_metrics
             ):
+                t_iter0 = time.perf_counter()
                 now_wall = time.time()
                 if self._metrics_last_wall_t is not None:
                     dt_ms = (now_wall - self._metrics_last_wall_t) * 1000.0
@@ -443,9 +556,15 @@ class FrameBus:
                     self._try_reconnect_redis()
 
                 resized_frame = resize(frame, self.width, self.height)
+                t_after_resize = time.perf_counter()
 
-                _, buf    = cv2.imencode(".jpg", resized_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                _, buf = cv2.imencode(
+                    ".jpg",
+                    resized_frame,
+                    [cv2.IMWRITE_JPEG_QUALITY, self._task_jpeg_quality],
+                )
                 frame_b64 = base64.b64encode(buf).decode("utf-8")
+                t_after_task_enc = time.perf_counter()
 
                 # ── BoT-SORT tracking ──────────────────────────────────────────
                 results = self._model.track(
@@ -458,6 +577,7 @@ class FrameBus:
                     verbose  = False,
                 )
 
+                t_after_yolo = time.perf_counter()
                 detections = self._parse_tracks(results)
                 last_det   = len(detections)
                 total_detections += last_det
@@ -468,14 +588,32 @@ class FrameBus:
                 will_publish = self._redis is not None and (
                     frame_count % self._publish_every == 0
                 )
-                need_draw   = self.save_output or will_publish
-                annotated   = self._annotate_for_stream(
-                    resized_frame, results, detections, need_draw
-                )
+                need_draw = self.save_output or will_publish
 
-                # ── Publish annotated JPEG to Redis (live stream) ──────────────
+                # Single annotated frame used everywhere: Redis, disk, scene evidence.
+                # detections > 0  → always returns an annotated copy (rule enforced in helper).
+                # detections == 0 → returns raw frame; JPEG reuse is safe.
+                annotated, had_boxes = self._annotate_for_stream(
+                    resized_frame,
+                    results,
+                    detections,
+                    need_draw,
+                    frame_count,
+                )
+                t_after_ann = time.perf_counter()
+
+                # Reuse the pre-track JPEG only when the annotated frame IS the raw
+                # frame (no detections, no overlay drawn).
+                reuse_live_buf = will_publish and not had_boxes
+
+                publish_sec = 0.0
                 if will_publish:
-                    self._publish_live_jpeg(annotated)
+                    publish_sec = self._publish_live_jpeg(
+                        annotated,
+                        task_encode_buf=buf,
+                        reuse_task_encode=reuse_live_buf,
+                    )
+                    self._last_live_frame_had_boxes = had_boxes
 
                 payload = {
                     "camera_id" : self.camera_id,
@@ -496,6 +634,24 @@ class FrameBus:
 
                 if self.save_output:
                     save_frame(annotated, self.out_dir, frame_count)
+
+                t_iter_end = time.perf_counter()
+                if frame_count % self._perf_log_every == 0:
+                    log.info(
+                        "[%s] perf frame=%s total_ms=%.1f yolo_ms=%.1f "
+                        "task_encode_ms=%.1f annotate_ms=%.1f publish_ms=%.1f "
+                        "detections=%d mode=%s reuse_live_buf=%s",
+                        self.camera_id,
+                        frame_count,
+                        (t_iter_end - t_iter0) * 1000.0,
+                        (t_after_yolo - t_after_task_enc) * 1000.0,
+                        (t_after_task_enc - t_after_resize) * 1000.0,
+                        (t_after_ann - t_after_yolo) * 1000.0,
+                        publish_sec * 1000.0,
+                        last_det,
+                        self._live_annotation_mode,
+                        reuse_live_buf,
+                    )
 
                 embed_total = self._embed_passed + self._embed_skipped
                 skip_rate = (
@@ -550,79 +706,111 @@ class FrameBus:
                 )
                 uptime_sec = round(time.time() - started_at, 1)
 
-                self.shared_state[self.camera_id] = {
-                    **self.shared_state[self.camera_id],
-                    "frame_count"     : frame_count,
-                    "fps"             : fps,
-                    "fps_actual"      : fps,
-                    "last_detections" : last_det,
-                    "total_detections": total_detections,
-                    "uptime_seconds"  : uptime_sec,
-                    "uptime_sec"      : uptime_sec,
-                    "stream_quality"  : quality_label,
-                    "frames_dropped"  : self._frames_dropped,
-                    "drop_rate"       : decode_error_rate,
-                    "decode_error_rate": decode_error_rate,
-                    "task_queue_drops": self._frames_dropped,
-                    "task_queue_drop_rate": task_queue_drop_rate,
-                    "task_queue_drops_by_task": dict(
-                        self._task_queue_drops_by_task
-                    ),
-                    "task_queue_coalesced_by_task": dict(
-                        self._task_queue_coalesced_by_task
-                    ),
-                    "reconnects"      : reconnects,
-                    "latency_estimate_ms": round(self._metrics_inter_frame_ema_ms, 2),
-                    "stream_read_failures": decode_failures,
-                    "decode_failures" : decode_failures,
-                    "decoder"         : decoder,
-                    "hw_decoder_requested": hw_decoder_requested,
-                    "hw_decoder_active": hw_decoder_active,
-                    "stream_codec"    : stream_health.get("codec"),
-                    "stream_native"   : stream_health.get("native"),
-                    "stream_target"   : stream_health.get("target"),
-                    "stream_health"   : stream_health,
-                    "profile"         : profile,
-                    "transport"       : transport,
-                    "rtsp_backend"    : rtsp_backend,
-                    "embed_skip_rate" : skip_rate,
-                    "state_updated_at": time.time(),
-                    "live_annotation_mode": self._live_annotation_mode,
-                    "redis_circuit_state": self._redis_breaker.state_label(),
-                    "stream_metrics": {
-                        "decode_failures": _stream_metrics.decode_failures,
-                        "reconnect_count": _stream_metrics.reconnect_count,
-                    },
-                }
+                state_carry.update(
+                    {
+                        "frame_count"     : frame_count,
+                        "fps"             : fps,
+                        "fps_actual"      : fps,
+                        "last_detections" : last_det,
+                        "total_detections": total_detections,
+                        "uptime_seconds"  : uptime_sec,
+                        "uptime_sec"      : uptime_sec,
+                        "stream_quality"  : quality_label,
+                        "frames_dropped"  : self._frames_dropped,
+                        "drop_rate"       : decode_error_rate,
+                        "decode_error_rate": decode_error_rate,
+                        "task_queue_drops": self._frames_dropped,
+                        "task_queue_drop_rate": task_queue_drop_rate,
+                        "task_queue_drops_by_task": dict(
+                            self._task_queue_drops_by_task
+                        ),
+                        "task_queue_coalesced_by_task": dict(
+                            self._task_queue_coalesced_by_task
+                        ),
+                        "reconnects"      : reconnects,
+                        "latency_estimate_ms": round(
+                            self._metrics_inter_frame_ema_ms, 2
+                        ),
+                        "stream_read_failures": decode_failures,
+                        "decode_failures" : decode_failures,
+                        "decoder"         : decoder,
+                        "hw_decoder_requested": hw_decoder_requested,
+                        "hw_decoder_active": hw_decoder_active,
+                        "stream_codec"    : stream_health.get("codec"),
+                        "stream_native"   : stream_health.get("native"),
+                        "stream_target"   : stream_health.get("target"),
+                        "stream_health"   : stream_health,
+                        "profile"         : profile,
+                        "transport"       : transport,
+                        "rtsp_backend"    : rtsp_backend,
+                        "embed_skip_rate" : skip_rate,
+                        "state_updated_at": time.time(),
+                        "live_annotation_mode": self._live_annotation_mode,
+                        "redis_circuit_state": self._redis_breaker.state_label(),
+                        "stream_metrics": {
+                            "decode_failures": _stream_metrics.decode_failures,
+                            "reconnect_count": _stream_metrics.reconnect_count,
+                        },
+                        "save_output": self.save_output,
+                        "redis_connected": self._redis is not None,
+                        "last_live_publish_seq": self._last_live_publish_seq,
+                        "last_live_frame_had_boxes": self._last_live_frame_had_boxes,
+                        "task_queue_jpeg_quality": self._task_jpeg_quality,
+                        "live_jpeg_quality": self._live_jpeg_quality,
+                    }
+                )
+                push_state = (
+                    frame_count - last_state_push_frame >= self._state_update_every_n
+                    or now_wall - last_state_push_wall >= self._state_update_min_sec
+                )
+                if push_state:
+                    self.shared_state[self.camera_id] = state_carry
+                    last_state_push_frame = frame_count
+                    last_state_push_wall = now_wall
 
         except StreamExhausted as e:
             if self._bus_fatal_event is not None:
                 self._bus_fatal_event.set()
-            self.shared_state[self.camera_id] = {
-                **self.shared_state[self.camera_id],
-                "error": str(e),
-                "running": False,
-                "state_updated_at": time.time(),
-                "stopped_reason": "stream_exhausted",
-            }
-            print(f"[{self.camera_id}] FrameBus stream exhausted: {e}")
+            state_carry.update(
+                {
+                    "error": str(e),
+                    "running": False,
+                    "state_updated_at": time.time(),
+                    "stopped_reason": "stream_exhausted",
+                }
+            )
+            self.shared_state[self.camera_id] = state_carry
+            log.warning("[%s] FrameBus stream exhausted: %s", self.camera_id, e)
         except Exception as e:
             if self._bus_fatal_event is not None:
                 self._bus_fatal_event.set()
-            self.shared_state[self.camera_id] = {
-                **self.shared_state[self.camera_id],
-                "error"  : str(e),
-                "running": False,
-                "state_updated_at": time.time(),
-            }
-            print(f"[{self.camera_id}] FrameBus error: {e}")
+            state_carry.update(
+                {
+                    "error"  : str(e),
+                    "running": False,
+                    "state_updated_at": time.time(),
+                }
+            )
+            self.shared_state[self.camera_id] = state_carry
+            log.exception("[%s] FrameBus error: %s", self.camera_id, e)
         finally:
-            self.shared_state[self.camera_id] = {
-                **self.shared_state[self.camera_id],
-                "running": False,
-                "state_updated_at": time.time(),
-            }
-            print(f"[{self.camera_id}] FrameBus stopped. Frames: {frame_count}")
+            try:
+                state_carry.update(
+                    {
+                        "running": False,
+                        "state_updated_at": time.time(),
+                    }
+                )
+                self.shared_state[self.camera_id] = state_carry
+            except Exception:
+                self.shared_state[self.camera_id] = {
+                    "camera_id": self.camera_id,
+                    "running": False,
+                    "state_updated_at": time.time(),
+                }
+            log.info(
+                "[%s] FrameBus stopped. Frames: %s", self.camera_id, frame_count
+            )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Best-crop-per-track: progressive overwrite

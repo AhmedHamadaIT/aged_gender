@@ -4,14 +4,17 @@
 
 Registers **analytics tasks**: algorithm type, target camera (`channelId`), thresholds, schedule windows, and algorithm-specific JSON (`areaPosition`, `detailConfig`). Only **enabled** tasks are started when you call `POST /detection/start`.
 
-Supported `algorithmType` values (from `apis/tasks.py`):
+Supported `algorithmType` values (from `apis/tasks.py` `TaskRegistry.SUPPORTED`):
 
-- `CROSS_LINE` — line crossing / counting — full guide: [cross_line.md](./cross_line.md)
-- `MASK_HAIRNET_CHEF_HAT` — PPE / headwear — full guide: [mask_hairnet_chef_hat.md](./mask_hairnet_chef_hat.md)
-- `CASHIER_BOX_OPEN` — cashier drawer / zone logic — HTTP monitor routes: [cashier.md](./cashier.md)
-- `PHONE_USAGE` — phone-in-hand usage inside zones — full guide: [phone_usage.md](./phone_usage.md)
+| `algorithmType` | Description | Guide |
+|---|---|---|
+| `CROSS_LINE` | Line crossing / counting with direction tracking | [cross_line.md](./cross_line.md) |
+| `MASK_HAIRNET_CHEF_HAT` | PPE / headwear compliance (mask, hairnet, chef hat) | [mask_hairnet_chef_hat.md](./mask_hairnet_chef_hat.md) |
+| `PHONE_USAGE` | Phone-in-hand usage inside configurable zones | [phone_usage.md](./phone_usage.md) |
+| `CASHIER_BOX_OPEN` | Cashier drawer open / zone dwell monitoring | [cashier.md](./cashier.md) |
+| `FACE` | Face recognition — known persons + stranger detection | `services/face_recognition.py` |
 
-Evidence metadata for all of the above follows **ML Image Contract V2** (structured `captureImage` / `sceneImage` on task events). See [ml_image_v2.md](./ml_image_v2.md).
+Evidence metadata for all task types follows **ML Image Contract V2** (structured `captureImage` / `sceneImage` on task events). See [ml_image_v2.md](./ml_image_v2.md).
 
 Each algorithm uses the **same** HTTP surface (`/cameras`, `/api/tasks`, `/detection/*`, `/detection/stream`). There are no extra paths only for cross-line or PPE; the guides above document **config and event behaviour** per algorithm.
 

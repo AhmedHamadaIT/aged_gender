@@ -42,12 +42,18 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from collections import defaultdict, deque
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
+
+# Valid camera IDs: alphanumeric, underscore, hyphen — no spaces or special chars.
+# Reserved JS sentinel values are explicitly rejected.
+_RESERVED_CAMERA_IDS = frozenset({"null", "undefined", "none", "nan"})
+_VALID_CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +66,22 @@ _FRAME_RING_MAX = max(10, int(os.getenv("WS_FRAME_REPLAY_BUFFER", os.getenv("SSE
 
 # Per-camera ring of (seq, jpeg_bytes) for optional ?last_seq= replay
 _frame_ring: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_FRAME_RING_MAX))
+
+
+def validate_camera_id(camera_id: str) -> Optional[str]:
+    """
+    Validate a camera_id string.
+
+    Returns None if the ID is acceptable, or a short rejection reason string
+    if the ID is invalid (so callers can do ``if validate_camera_id(cid): reject``).
+    """
+    if not camera_id or not camera_id.strip():
+        return "empty camera_id"
+    if camera_id.lower() in _RESERVED_CAMERA_IDS:
+        return f"reserved sentinel value: {camera_id!r}"
+    if not _VALID_CAMERA_ID_RE.match(camera_id):
+        return f"camera_id contains invalid characters: {camera_id!r}"
+    return None
 
 
 def decode_live_frame_message(data: bytes | str | memoryview) -> Tuple[bytes, int]:

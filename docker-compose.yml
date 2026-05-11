@@ -87,7 +87,7 @@ services:
       # gstreamer | ffmpeg | opencv to force one path (see stream.py / stream_gstreamer.py).
       - RTSP_BACKEND=${RTSP_BACKEND:-auto}
       - RTSP_GSTREAMER=${RTSP_GSTREAMER:-true}
-      - LIVE_ANNOTATION_MODE=${LIVE_ANNOTATION_MODE:-ultralytics}
+      - LIVE_ANNOTATION_MODE=${LIVE_ANNOTATION_MODE:-opencv}
       # Hardware decode (Jetson): auto uses /etc/nv_tegra_release or device-tree; true forces hw map; false = CPU.
       # Override decoder names if your ffmpeg build uses nvmpi instead of v4l2m2m (see .env.example).
       - RTSP_ENABLE_GPU_DECODE=${RTSP_ENABLE_GPU_DECODE:-auto}

@@ -320,6 +320,8 @@ class DetectionResource(BaseResource):
         started_cameras = []
         started_tasks   = []
 
+        self._reap_finished_processes()
+
         for chan_id, chan_tasks in channel_tasks.items():
             if chan_id not in cameras:
                 _detection_http_error(
@@ -411,9 +413,26 @@ class DetectionResource(BaseResource):
             "tasks"  : started_tasks,
         }
 
+    # ── Zombie reaper ─────────────────────────────────────────────────────────
+
+    def _reap_finished_processes(self) -> None:
+        """
+        Join (reap) any FrameBus or task-worker processes that have already
+        exited so they do not linger as OS zombies.  Called opportunistically
+        before start/stop operations.
+        """
+        for proc in list(self._bus_processes.values()):
+            if not proc.is_alive() and proc.exitcode is not None:
+                proc.join(timeout=0)
+        for task_procs in list(self._task_processes.values()):
+            for proc in list(task_procs.values()):
+                if not proc.is_alive() and proc.exitcode is not None:
+                    proc.join(timeout=0)
+
     # ── Stop ──────────────────────────────────────────────────────────────────
 
     def _stop(self, camera_id: Optional[str] = None):
+        self._reap_finished_processes()
         running = {k: v for k, v in self._bus_processes.items() if v.is_alive()}
         if not running:
             _detection_http_error(409, "No cameras are currently running.")

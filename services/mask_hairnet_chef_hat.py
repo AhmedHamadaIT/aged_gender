@@ -45,7 +45,7 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from utils import build_image, make_evidence_paths
+from utils import build_image, draw_evidence_scene, make_evidence_paths
 from utils.task_payload import task_frame_bgr
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -266,7 +266,16 @@ class MaskHairnetChefHatTask:
         os.makedirs(os.path.dirname(scene_path),   exist_ok=True)
         if crop.size > 0:
             cv2.imwrite(capture_path, crop)
-        cv2.imwrite(scene_path, frame)
+
+        alarm_type   = event.get("alert", {}).get("type", "")
+        zone_points  = event.get("person", {}).get("areaPoints") or []
+        scene_vis = draw_evidence_scene(
+            frame,
+            subject_bbox=det.bbox,
+            label=f"{alarm_type} id{det.track_id}",
+            zone_points=zone_points if zone_points else None,
+        )
+        cv2.imwrite(scene_path, scene_vis)
 
         with open(self._jsonl_path, "a") as f:
             f.write(json.dumps(event) + "\n")

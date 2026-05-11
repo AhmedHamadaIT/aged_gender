@@ -2,8 +2,11 @@
 
 venv/
 .venv/
-.env
-.env.*
+# .env is committed (no secrets — safe defaults only).
+# Put real credentials in .env.local (gitignored, never committed).
+.env.local
+.env.*.local
+!.env
 !.env.example
 
 # Python
@@ -43,6 +46,8 @@ mediamtx*.yml
 store/
 # Test / QA artifacts
 test_logs/
+# Runtime test + pipeline output artifacts (videos, crops, JSONL events, logs)
+artifacts/
 # Local export trees (e.g. batch image+json dumps; not under outputs/)
 output*/
 videos/

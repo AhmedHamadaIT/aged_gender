@@ -33,7 +33,7 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-from utils import build_image, make_evidence_paths
+from utils import build_image, draw_evidence_scene, make_evidence_paths
 from utils.task_payload import task_frame_bgr
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -232,7 +232,22 @@ class PhoneUsageTask:
         os.makedirs(os.path.dirname(scene_path),   exist_ok=True)
         if crop.size > 0:
             cv2.imwrite(capture_path, crop)
-        cv2.imwrite(scene_path, frame)
+
+        zone_points = event.get("person", {}).get("areaPoints") or []
+        phone_bb    = event.get("phone", {}).get("boundingBox")
+        sec_bbox    = None
+        if phone_bb:
+            px, py = int(phone_bb["x"]), int(phone_bb["y"])
+            sec_bbox = (px, py, px + int(phone_bb["width"]), py + int(phone_bb["height"]))
+        scene_vis = draw_evidence_scene(
+            frame,
+            subject_bbox=det.bbox,
+            label=f"phone_usage id{det.track_id}",
+            secondary_bbox=sec_bbox,
+            secondary_label="phone" if sec_bbox else "",
+            zone_points=zone_points if zone_points else None,
+        )
+        cv2.imwrite(scene_path, scene_vis)
 
         with open(self._jsonl_path, "a") as f:
             f.write(json.dumps(event) + "\n")

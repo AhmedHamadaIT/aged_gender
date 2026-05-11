@@ -48,7 +48,7 @@ from typing import Optional, Dict, Tuple
 
 import cv2
 
-from utils import build_image, make_evidence_paths
+from utils import build_image, draw_evidence_scene, make_evidence_paths
 
 # ── Schedule helpers ──────────────────────────────────────────────────────────
 
@@ -169,7 +169,7 @@ class CrossLineTask:
                     payload["timestamp"],
                     str(payload.get("camera_id") or ""),
                 )
-                self._persist(event, _frame_bgr(), det)
+                self._persist(event, _frame_bgr(), det, line, crossing_dir)
                 events.append(event)
 
         # Purge side-state for tracks no longer in the frame
@@ -275,7 +275,7 @@ class CrossLineTask:
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
-    def _persist(self, event: dict, frame, det):
+    def _persist(self, event: dict, frame, det, line: dict, crossing_dir: int):
         x1, y1, x2, y2 = det.bbox
         h, w  = frame.shape[:2]
         PAD   = 10
@@ -291,7 +291,17 @@ class CrossLineTask:
         os.makedirs(os.path.dirname(scene_path),   exist_ok=True)
         if crop.size > 0:
             cv2.imwrite(capture_path, crop)
-        cv2.imwrite(scene_path, frame)
+        pts = line["point"]
+        scene_vis = draw_evidence_scene(
+            frame,
+            subject_bbox=det.bbox,
+            label=f"{line.get('line_name') or line.get('line_id','')} dir{crossing_dir} id{det.track_id}",
+            line_endpoints=(
+                (int(pts[0]["x"]), int(pts[0]["y"])),
+                (int(pts[1]["x"]), int(pts[1]["y"])),
+            ),
+        )
+        cv2.imwrite(scene_path, scene_vis)
 
         with open(self._jsonl_path, "a") as f:
             f.write(json.dumps(event) + "\n")

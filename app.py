@@ -40,6 +40,7 @@ load_dotenv()
 
 import asyncio
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -69,6 +70,8 @@ from apis.face_lib  import router as face_router
 from schemas        import DetectionRequest, DetectionStatus
 from apis.person_search import person_search_api
 from apis.semantic_search import semantic_search_api
+from utils.storage_cleanup import start_storage_cleanup_thread
+from vision_utils import log_evidence_dirs_disk_usage
 
 
 _API_DESCRIPTION = """
@@ -91,6 +94,9 @@ Requires `REDIS_URL` for live fan-out. Clients should reconnect after disconnect
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start one SSE bridge per process; stop on shutdown."""
+    log = logging.getLogger(__name__)
+    log_evidence_dirs_disk_usage(log, label="startup")
+    app.state.storage_cleanup_thread = start_storage_cleanup_thread()
     app.state.detection = detection
     bridge = DetectionSSEBridge(detection.result_queue())
     await bridge.start()
@@ -107,6 +113,7 @@ async def lifespan(app: FastAPI):
         app.state.detection_watchdog = None
         await bridge.stop()
         app.state.detection_sse_bridge = None
+        app.state.storage_cleanup_thread = None
 
 
 app = FastAPI(

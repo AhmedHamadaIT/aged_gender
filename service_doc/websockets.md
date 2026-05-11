@@ -10,6 +10,17 @@ For **live JPEG**, optional query **`last_seq`**: `ws://host/cameras/1/live?last
 
 Uvicorn (see [`docker-compose.yml`](../docker-compose.yml)) is configured with **`--ws-ping-interval`** and **`--ws-ping-timeout`** for protocol-level WebSocket pings.
 
+### Camera-ID validation
+
+`camera_id` path parameters are validated by `apis.ws_live.validate_camera_id()` before the socket is accepted.  Invalid IDs cause an immediate close:
+
+| Rejected value | Reason |
+|---|---|
+| `null`, `undefined`, `none`, `nan` | Reserved JavaScript / JSON sentinel values |
+| Any ID containing characters outside `[A-Za-z0-9_\-]` | Invalid character set (e.g. spaces, `!`, `@`) |
+
+Valid examples: `cam1`, `cam_01`, `entrance-left`, `42`.
+
 ## Endpoints
 
 | Protocol | Path | Payload |
