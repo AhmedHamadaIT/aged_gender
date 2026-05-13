@@ -30,10 +30,12 @@ import time
 import base64
 import hashlib
 import queue as _queue
+from collections import deque
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import cv2
+import numpy as np
 from ultralytics import YOLO
 
 from logger.logger_config import Logger
@@ -53,6 +55,126 @@ except ImportError:
 # Minimum confidence / variance to emit crop to embedding worker
 _EMBED_CONF_THRESHOLD = float(os.getenv("EMBED_CONF_THRESHOLD", "0.45"))
 _EMBED_MIN_VARIANCE = float(os.getenv("FRAME_MIN_VARIANCE", "8.0"))
+
+# Live JPEG / preview scale tiers (corrupt rate + optional WS backpressure).
+LIVE_QUALITY_LADDER = (
+    (85, 1.0, "high"),
+    (75, 0.75, "medium"),
+    (60, 0.5, "low"),
+    (50, 0.4, "minimal"),
+)
+
+
+class CorruptionDetector:
+    """Fast multi-check gate for HEVC decode glitches before JPEG / YOLO."""
+
+    def __init__(self, threshold_ratio: float = 0.35):
+        self.threshold = threshold_ratio
+        self._last_good_frame = None
+        self._corrupt_streak = 0
+        self._consecutive_corrupt_all = 0
+
+    @property
+    def consecutive_corrupt_all(self) -> int:
+        return self._consecutive_corrupt_all
+
+    def is_corrupted(self, frame: np.ndarray) -> bool:
+        if frame is None or frame.size == 0:
+            return True
+        h, w = frame.shape[:2]
+        if h < 16 or w < 16:
+            return True
+
+        mean_lum = float(frame.mean())
+        if mean_lum < 5.0 or mean_lum > 250.0:
+            return True
+
+        if frame.ndim == 3 and frame.shape[2] >= 3:
+            samples = [
+                frame[h // 8, w // 8],
+                frame[h // 8, 7 * w // 8],
+                frame[7 * h // 8, w // 8],
+                frame[7 * h // 8, 7 * w // 8],
+                frame[h // 2, w // 2],
+            ]
+            for px in samples:
+                b, g, r = int(px[0]), int(px[1]), int(px[2])
+                if g > 180 and g > r * 3 and g > b * 3:
+                    return True
+                if r > 150 and b > 150 and g < 50:
+                    return True
+
+        if self._last_good_frame is not None and self._last_good_frame.shape == frame.shape:
+            cy, cx = h // 2, w // 2
+            dy, dx = max(1, h // 10), max(1, w // 10)
+            patch_curr = frame[cy - dy : cy + dy, cx - dx : cx + dx]
+            patch_prev = self._last_good_frame[cy - dy : cy + dy, cx - dx : cx + dx]
+            diff = np.abs(patch_curr.astype(np.int16) - patch_prev.astype(np.int16)).mean()
+            if diff > 120.0:
+                self._corrupt_streak += 1
+                if self._corrupt_streak >= 2:
+                    return True
+            else:
+                self._corrupt_streak = 0
+
+        return False
+
+    def process(self, frame: np.ndarray) -> Tuple[Optional[np.ndarray], bool]:
+        """
+        Returns (frame to use, was_corrupt_input).
+        On corrupt input returns last good copy (or None if none yet) and was_corrupt_input True.
+        """
+        if self.is_corrupted(frame):
+            self._consecutive_corrupt_all += 1
+            return self._last_good_frame, True
+        self._consecutive_corrupt_all = 0
+        self._last_good_frame = frame
+        self._corrupt_streak = 0
+        return frame, False
+
+
+class PublishCircuitBreaker:
+    """Redis publish backpressure: buffer a short burst while circuit is open."""
+
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 10.0):
+        self.failures = 0
+        self.threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.last_failure_time = 0.0
+        self.state = "closed"
+        self._buffer: deque[str] = deque(maxlen=30)
+
+    def record_failure(self) -> None:
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.threshold:
+            self.state = "open"
+            log.warning(
+                "Redis publish circuit OPEN — buffering frames locally (max %d)",
+                self._buffer.maxlen,
+            )
+
+    def record_success(self) -> None:
+        self.failures = 0
+        self.state = "closed"
+
+    def should_publish(self) -> bool:
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "half-open"
+                return True
+            return False
+        return True
+
+    def buffer_envelope(self, envelope: str) -> None:
+        self._buffer.append(envelope)
+
+    def drain_buffer(self) -> list[str]:
+        out = list(self._buffer)
+        self._buffer.clear()
+        return out
 
 
 class FrameBus:
@@ -135,6 +257,12 @@ class FrameBus:
                     camera_id,
                 )
 
+        if self._redis is not None:
+            try:
+                self._publish_quality_tier_redis()
+            except Exception:
+                pass
+
         # Publish every Nth frame to hit the target REDIS_LIVE_FPS.
         # We don't know the actual camera FPS at init time, so we start with
         # a conservative default and recalculate after the first FPS measurement.
@@ -194,10 +322,36 @@ class FrameBus:
             self._task_jpeg_quality = 85
         try:
             self._live_jpeg_quality = max(
-                1, min(100, int(os.getenv("LIVE_JPEG_QUALITY", "75")))
+                1, min(100, int(os.getenv("LIVE_JPEG_QUALITY", "85")))
             )
         except ValueError:
-            self._live_jpeg_quality = 75
+            self._live_jpeg_quality = 85
+
+        self._corruption = CorruptionDetector(
+            threshold_ratio=float(os.getenv("CORRUPTION_DETECTOR_THRESHOLD", "0.35"))
+        )
+        self._integrity_events: deque = deque(maxlen=512)
+        self._last_idr_signal_wall = 0.0
+        self._last_keyframe_only_signal_wall = 0.0
+        self._live_quality_tier = 0
+        self._live_scale = 1.0
+        self._above_bad_since: Optional[float] = None
+        self._below_good_since: Optional[float] = None
+        self._publish_frame_breaker = PublishCircuitBreaker(
+            failure_threshold=max(1, int(os.getenv("REDIS_PUBLISH_CB_FAILURES", "5"))),
+            recovery_timeout=float(os.getenv("REDIS_PUBLISH_CB_RECOVERY_SEC", "10.0")),
+        )
+        best_i = 0
+        best_d = 999
+        for i, row in enumerate(LIVE_QUALITY_LADDER):
+            d = abs(int(row[0]) - self._live_jpeg_quality)
+            if d < best_d:
+                best_d = d
+                best_i = i
+        self._live_quality_tier = best_i
+        _r0 = LIVE_QUALITY_LADDER[self._live_quality_tier]
+        self._live_jpeg_quality = int(_r0[0])
+        self._live_scale = float(_r0[1])
 
         self._state_update_every_n = max(
             1, int(os.getenv("STATE_UPDATE_INTERVAL", "10"))
@@ -221,6 +375,120 @@ class FrameBus:
         self._annotation_debug_every = max(
             1, int(os.getenv("ANNOTATION_DEBUG_LOG_INTERVAL", "1"))
         )
+
+        # Optional MP4: same annotated BGR as Redis/WebSocket live preview (see _annotate_for_stream).
+        self._save_annotated_video = os.getenv("SAVE_ANNOTATED_VIDEO", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        self._annotated_video_path_raw = os.getenv("SAVE_ANNOTATED_VIDEO_PATH", "").strip()
+        try:
+            self._annotated_video_fps_env = float(os.getenv("SAVE_ANNOTATED_VIDEO_FPS", "0") or 0.0)
+        except ValueError:
+            self._annotated_video_fps_env = 0.0
+        self._annotated_video_codec = os.getenv("SAVE_ANNOTATED_VIDEO_CODEC", "mp4v").strip().lower()
+        self._annotated_video_writer: Optional[Any] = None
+        self._annotated_video_open_path: Optional[str] = None
+        self._annotated_video_failed = False
+        # When true, append only on frames that would be published to Redis (same cadence as WS viewers).
+        # If Redis is unavailable, every processed frame is written so local/test runs still get a file.
+        self._annotated_video_match_ws = os.getenv(
+            "SAVE_ANNOTATED_VIDEO_MATCH_WS", "false"
+        ).lower() in ("true", "1", "yes")
+
+    def _resolve_annotated_video_fps(self, fps_measured: float) -> float:
+        if self._annotated_video_fps_env > 0.0:
+            return max(1.0, min(self._annotated_video_fps_env, 120.0))
+        try:
+            stf = float(os.getenv("STREAM_TARGET_FPS", "0") or 0.0)
+        except ValueError:
+            stf = 0.0
+        if stf > 0.0:
+            return max(1.0, min(stf, 120.0))
+        if fps_measured > 0.5:
+            return max(1.0, min(fps_measured, 120.0))
+        return 25.0
+
+    def _annotated_video_fourcc(self) -> int:
+        c = (self._annotated_video_codec or "mp4v").strip()
+        if len(c) == 4:
+            return cv2.VideoWriter_fourcc(*c)
+        return cv2.VideoWriter_fourcc(*"mp4v")
+
+    def _ensure_annotated_video_writer(self, frame_bgr: Any, fps_measured: float) -> None:
+        if (
+            not self._save_annotated_video
+            or self._annotated_video_failed
+            or self._annotated_video_writer is not None
+        ):
+            return
+        h, w = frame_bgr.shape[:2]
+        if h <= 0 or w <= 0:
+            return
+        if self._annotated_video_path_raw:
+            out_mp4 = self._annotated_video_path_raw
+            if not os.path.isabs(out_mp4):
+                out_mp4 = os.path.join(_repo_root, out_mp4)
+        else:
+            os.makedirs(self.out_dir, exist_ok=True)
+            out_mp4 = os.path.join(self.out_dir, "annotated_stream.mp4")
+        parent = os.path.dirname(os.path.abspath(out_mp4))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fps = self._resolve_annotated_video_fps(fps_measured)
+        fourcc = self._annotated_video_fourcc()
+        writer = cv2.VideoWriter(out_mp4, fourcc, fps, (w, h))
+        if not writer.isOpened():
+            log.error(
+                "[%s] SAVE_ANNOTATED_VIDEO: could not open VideoWriter for %s "
+                "(codec=%s fps=%.2f). Try SAVE_ANNOTATED_VIDEO_CODEC=mp4v",
+                self.camera_id,
+                out_mp4,
+                self._annotated_video_codec,
+                fps,
+            )
+            self._annotated_video_failed = True
+            try:
+                writer.release()
+            except Exception:
+                pass
+            return
+        self._annotated_video_writer = writer
+        self._annotated_video_open_path = out_mp4
+        log.info(
+            "[%s] SAVE_ANNOTATED_VIDEO writing %s @ %.2f fps (%dx%d)",
+            self.camera_id,
+            out_mp4,
+            fps,
+            w,
+            h,
+        )
+
+    def _annotated_video_write_frame(self, annotated_bgr: Any, fps_measured: float) -> None:
+        if not self._save_annotated_video or self._annotated_video_failed:
+            return
+        self._ensure_annotated_video_writer(annotated_bgr, fps_measured)
+        if self._annotated_video_writer is None:
+            return
+        try:
+            self._annotated_video_writer.write(annotated_bgr)
+        except Exception:
+            log.exception("[%s] SAVE_ANNOTATED_VIDEO write failed", self.camera_id)
+            self._annotated_video_failed = True
+
+    def _close_annotated_video_writer(self) -> None:
+        if self._annotated_video_writer is None:
+            return
+        path = self._annotated_video_open_path
+        try:
+            self._annotated_video_writer.release()
+        except Exception:
+            log.exception("[%s] SAVE_ANNOTATED_VIDEO release failed", self.camera_id)
+        self._annotated_video_writer = None
+        self._annotated_video_open_path = None
+        if path:
+            log.info("[%s] SAVE_ANNOTATED_VIDEO closed %s", self.camera_id, path)
 
     def _connect_redis_with_retry(self) -> Optional[object]:
         if not _REDIS_AVAILABLE:
@@ -273,26 +541,54 @@ class FrameBus:
             return 0.0
         t0 = time.perf_counter()
         seq = next_seq(self._frame_seq_counter, self._frame_seq_lock)
+
+        to_encode = annotated
+        if self._live_scale < 0.999:
+            h0, w0 = to_encode.shape[:2]
+            nw = max(2, int(w0 * self._live_scale))
+            nh = max(2, int(h0 * self._live_scale))
+            to_encode = cv2.resize(to_encode, (nw, nh), interpolation=cv2.INTER_AREA)
+
+        reuse_ok = (
+            reuse_task_encode
+            and task_encode_buf is not None
+            and self._task_jpeg_quality == self._live_jpeg_quality
+            and self._live_scale >= 0.999
+        )
         try:
-            if (
-                reuse_task_encode
-                and task_encode_buf is not None
-                and self._task_jpeg_quality == self._live_jpeg_quality
-            ):
+            if reuse_ok:
                 _buf = task_encode_buf
             else:
                 _, _buf = cv2.imencode(
                     ".jpg",
-                    annotated,
+                    to_encode,
                     [cv2.IMWRITE_JPEG_QUALITY, self._live_jpeg_quality],
                 )
             jpeg_b64 = base64.b64encode(bytes(_buf)).decode("ascii")
             envelope = json.dumps({"_seq": seq, "jpeg": jpeg_b64}, separators=(",", ":"))
-            self._redis.publish(f"live:frame:{self.camera_id}", envelope)
+        except Exception:
+            log.exception("[%s] live JPEG encode failed", self.camera_id)
+            return time.perf_counter() - t0
+
+        if not self._publish_frame_breaker.should_publish():
+            self._publish_frame_breaker.buffer_envelope(envelope)
+            return time.perf_counter() - t0
+
+        def _pub_one(env: str) -> None:
+            self._redis.publish(f"live:frame:{self.camera_id}", env)
+
+        try:
+            pending = self._publish_frame_breaker.drain_buffer()
+            for env in pending:
+                _pub_one(env)
+            _pub_one(envelope)
+            self._publish_frame_breaker.record_success()
             self._redis_breaker.record_success()
             if seq is not None:
                 self._last_live_publish_seq = int(seq)
         except Exception:
+            self._publish_frame_breaker.record_failure()
+            self._publish_frame_breaker.buffer_envelope(envelope)
             self._redis_breaker.record_failure()
             log.exception("[%s] live frame publish failed", self.camera_id)
             try:
@@ -302,13 +598,96 @@ class FrameBus:
             self._redis = None
         return time.perf_counter() - t0
 
-    @staticmethod
-    def _env_float_clamped(name: str, default: float, minimum: float, maximum: float) -> float:
+    def _env_float_clamped(self, name: str, default: float, minimum: float, maximum: float) -> float:
         try:
             value = float(os.getenv(name, str(default)))
         except ValueError:
             value = default
         return min(max(value, minimum), maximum)
+
+    def _record_integrity(self, corrupt: bool) -> None:
+        t = time.time()
+        self._integrity_events.append((t, corrupt))
+        while self._integrity_events and t - self._integrity_events[0][0] > 5.0:
+            self._integrity_events.popleft()
+
+    def _corrupt_rate_5s(self) -> float:
+        if not self._integrity_events:
+            return 0.0
+        bad = sum(1 for _, c in self._integrity_events if c)
+        return bad / len(self._integrity_events)
+
+    def _ws_backpressure_flag(self) -> bool:
+        if self._redis is None:
+            return False
+        try:
+            v = self._redis.get(f"stream:ws_backpressure:{self.camera_id}")
+            if v is None:
+                return False
+            if isinstance(v, bytes):
+                return v not in (b"0", b"", b"false")
+            return str(v).lower() not in ("0", "", "false")
+        except Exception:
+            return False
+
+    def _publish_quality_tier_redis(self) -> None:
+        row = LIVE_QUALITY_LADDER[self._live_quality_tier]
+        self._live_jpeg_quality = int(row[0])
+        self._live_scale = float(row[1])
+        label = str(row[2])
+        if self._redis is None:
+            return
+        try:
+            self._redis.set(f"stream:quality:{self.camera_id}", label, ex=86400)
+        except Exception:
+            log.warning("[%s] stream:quality Redis SET failed", self.camera_id)
+
+    def _maybe_adjust_live_quality_tier(self, corrupt_rate: float, ws_bp: bool) -> None:
+        now = time.time()
+        stressed = corrupt_rate > 0.2 or ws_bp
+        relaxed = corrupt_rate < 0.05 and not ws_bp
+
+        if stressed:
+            if self._above_bad_since is None:
+                self._above_bad_since = now
+            self._below_good_since = None
+        else:
+            self._above_bad_since = None
+            if relaxed:
+                if self._below_good_since is None:
+                    self._below_good_since = now
+            else:
+                self._below_good_since = None
+
+        idx = self._live_quality_tier
+        if (
+            self._above_bad_since is not None
+            and now - self._above_bad_since >= 3.0
+            and idx < len(LIVE_QUALITY_LADDER) - 1
+        ):
+            self._live_quality_tier = idx + 1
+            self._above_bad_since = now
+            log.info(
+                "[%s] Live quality stepped down to tier %s",
+                self.camera_id,
+                LIVE_QUALITY_LADDER[self._live_quality_tier][2],
+            )
+            self._publish_quality_tier_redis()
+            return
+
+        if (
+            self._below_good_since is not None
+            and now - self._below_good_since >= 10.0
+            and idx > 0
+        ):
+            self._live_quality_tier = idx - 1
+            self._below_good_since = now
+            log.info(
+                "[%s] Live quality stepped up to tier %s",
+                self.camera_id,
+                LIVE_QUALITY_LADDER[self._live_quality_tier][2],
+            )
+            self._publish_quality_tier_redis()
 
     def _coalesce_oldest_task_payload(self, q, tid: str, force: bool = False) -> bool:
         if not self._task_queue_coalesce:
@@ -510,14 +889,21 @@ class FrameBus:
             "respawn_count": 0,
             "task_redis_circuit_state": None,
             "save_output": self.save_output,
+            "save_annotated_video": self._save_annotated_video,
+            "annotated_video_path": None,
             "redis_connected": self._redis is not None,
             "last_live_publish_seq": 0,
             "last_live_frame_had_boxes": False,
+            "live_quality_tier": LIVE_QUALITY_LADDER[self._live_quality_tier][2],
+            "live_scale": self._live_scale,
+            "corrupt_rate_5s": 0.0,
         }
         state_carry: Dict[str, Any] = dict(self.shared_state[self.camera_id])
 
         if self.save_output:
             os.makedirs(self.out_dir, exist_ok=True)
+
+        corrupt_warn_last_wall = 0.0
 
         try:
             _stream_metrics = StreamGeneratorMetrics()
@@ -556,6 +942,61 @@ class FrameBus:
                     self._try_reconnect_redis()
 
                 resized_frame = resize(frame, self.width, self.height)
+                use_frame, was_corrupt = self._corruption.process(resized_frame)
+                self._record_integrity(was_corrupt)
+                corrupt_rate = self._corrupt_rate_5s()
+                ws_bp = self._ws_backpressure_flag()
+                self._maybe_adjust_live_quality_tier(corrupt_rate, ws_bp)
+
+                if use_frame is None:
+                    if now_wall - corrupt_warn_last_wall >= 5.0:
+                        corrupt_warn_last_wall = now_wall
+                        log.warning(
+                            "[%s] Skipping frame (corruption heuristics, no prior good)",
+                            self.camera_id,
+                        )
+                    continue
+                resized_frame = use_frame
+
+                if was_corrupt and now_wall - corrupt_warn_last_wall >= 5.0:
+                    corrupt_warn_last_wall = now_wall
+                    log.warning(
+                        "[%s] Decode corruption heuristics: holding last good frame "
+                        "(corrupt_rate_5s=%.2f)",
+                        self.camera_id,
+                        corrupt_rate,
+                    )
+
+                cc = self._corruption.consecutive_corrupt_all
+                if cc > 10 and now_wall - self._last_idr_signal_wall >= 5.0:
+                    self._last_idr_signal_wall = now_wall
+                    try:
+                        import stream as _sm
+
+                        _sm.signal_adaptive_corruption_action(self.camera_id, idr=True)
+                    except Exception:
+                        log.debug("[%s] IDR signal skipped (stream module)", self.camera_id)
+
+                if (
+                    corrupt_rate > 0.3
+                    and len(self._integrity_events) >= 20
+                    and now_wall - self._last_keyframe_only_signal_wall >= 60.0
+                ):
+                    self._last_keyframe_only_signal_wall = now_wall
+                    try:
+                        import stream as _sm2
+
+                        _sm2.signal_adaptive_corruption_action(
+                            self.camera_id, keyframe_only=True
+                        )
+                    except Exception:
+                        log.debug("[%s] keyframe-only signal skipped", self.camera_id)
+                    log.warning(
+                        "[%s] High corruption (%.0f%% over ~5s) — keyframe-only FFmpeg requested",
+                        self.camera_id,
+                        corrupt_rate * 100.0,
+                    )
+
                 t_after_resize = time.perf_counter()
 
                 _, buf = cv2.imencode(
@@ -588,7 +1029,7 @@ class FrameBus:
                 will_publish = self._redis is not None and (
                     frame_count % self._publish_every == 0
                 )
-                need_draw = self.save_output or will_publish
+                need_draw = self.save_output or will_publish or self._save_annotated_video
 
                 # Single annotated frame used everywhere: Redis, disk, scene evidence.
                 # detections > 0  → always returns an annotated copy (rule enforced in helper).
@@ -634,6 +1075,15 @@ class FrameBus:
 
                 if self.save_output:
                     save_frame(annotated, self.out_dir, frame_count)
+
+                if self._save_annotated_video:
+                    if self._annotated_video_match_ws:
+                        if self._redis is not None and will_publish:
+                            self._annotated_video_write_frame(annotated, fps)
+                        elif self._redis is None:
+                            self._annotated_video_write_frame(annotated, fps)
+                    else:
+                        self._annotated_video_write_frame(annotated, fps)
 
                 t_iter_end = time.perf_counter()
                 if frame_count % self._perf_log_every == 0:
@@ -752,11 +1202,16 @@ class FrameBus:
                             "reconnect_count": _stream_metrics.reconnect_count,
                         },
                         "save_output": self.save_output,
+                        "save_annotated_video": self._save_annotated_video,
+                        "annotated_video_path": self._annotated_video_open_path,
                         "redis_connected": self._redis is not None,
                         "last_live_publish_seq": self._last_live_publish_seq,
                         "last_live_frame_had_boxes": self._last_live_frame_had_boxes,
                         "task_queue_jpeg_quality": self._task_jpeg_quality,
                         "live_jpeg_quality": self._live_jpeg_quality,
+                        "live_quality_tier": LIVE_QUALITY_LADDER[self._live_quality_tier][2],
+                        "live_scale": self._live_scale,
+                        "corrupt_rate_5s": round(corrupt_rate, 4),
                     }
                 )
                 push_state = (
@@ -794,6 +1249,12 @@ class FrameBus:
             self.shared_state[self.camera_id] = state_carry
             log.exception("[%s] FrameBus error: %s", self.camera_id, e)
         finally:
+            try:
+                if self._annotated_video_open_path:
+                    state_carry["annotated_video_path"] = self._annotated_video_open_path
+            except Exception:
+                pass
+            self._close_annotated_video_writer()
             try:
                 state_carry.update(
                     {

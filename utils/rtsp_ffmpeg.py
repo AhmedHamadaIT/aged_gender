@@ -39,7 +39,10 @@ def clear_rtsp_transport_overrides() -> None:
 # Universal “tolerant” preset when RTSP_FFMPEG_EXTRA_OPTIONS is unset (balanced / unknown codec).
 # TCP is always forced separately via rtsp_transport;tcp.
 _STABLE_EXTRA_DEFAULT = (
-    "fflags;+genpts+discardcorrupt|max_delay;3000000|reorder_queue_size;512"
+    "fflags;+genpts+discardcorrupt"
+    "|max_delay;3000000"
+    "|reorder_queue_size;1024"
+    "|err_detect;ignore_err"
 )
 _LOW_LATENCY_EXTRA_DEFAULT = (
     "max_delay;500000|fflags;nobuffer|reorder_queue_size;0"

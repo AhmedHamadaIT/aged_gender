@@ -8,6 +8,8 @@ Clients should **reconnect** after disconnect. The server **does** retry the Red
 
 For **live JPEG**, optional query **`last_seq`**: `ws://host/cameras/1/live?last_seq=123` replays a short server-side ring of frames with sequence greater than `123` (best-effort; same ring cap as `SSE_REPLAY_BUFFER` / `WS_FRAME_REPLAY_BUFFER`). Frames on the wire remain **raw JPEG bytes** after decode.
 
+**Frontend implementation** (blob URLs, rAF, `ImageBitmap`, reconnect, optional seq header): see [`docs/frontend-live-stream-guide.md`](../docs/frontend-live-stream-guide.md).
+
 Uvicorn (see [`docker-compose.yml`](../docker-compose.yml)) is configured with **`--ws-ping-interval`** and **`--ws-ping-timeout`** for protocol-level WebSocket pings.
 
 ### Camera-ID validation

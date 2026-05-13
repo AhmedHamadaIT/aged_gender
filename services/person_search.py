@@ -25,7 +25,10 @@ from dotenv import load_dotenv
 
 from logger.logger_config import Logger
 from store.identity_manager import IdentityManager
-from utils.ml_backend import require_gpu_device_if_configured
+from utils.ml_backend import (
+    require_gpu_device_if_configured,
+    resolve_ultralytics_device,
+)
 
 load_dotenv()
 log = Logger.get_logger(__name__)
@@ -67,18 +70,16 @@ class PersonSearchService:
                         f"The provided filename {model_path} does not exist "
                         f"(or set REID_MODEL_ONNX to a valid OSNet export)"
                     )
-                _d = os.getenv("DEVICE", "cpu")
-                if _d.isdigit():
+                _d = resolve_ultralytics_device()
+                if isinstance(_d, int):
                     self.device = torch.device(f"cuda:{_d}")
                 else:
-                    self.device = torch.device(_d)
+                    self.device = torch.device(str(_d))
                 self.model = torch.jit.load(
                     model_path, map_location=str(self.device)
                 )
                 self.model.eval()
-                require_gpu_device_if_configured(
-                    int(_d) if _d.isdigit() else str(self.device), "PersonSearchService"
-                )
+                require_gpu_device_if_configured(_d, "PersonSearchService")
                 log.info(
                     "[PersonSearchService] Ready — OSNet TorchScript: %s | device=%s",
                     model_path,

@@ -12,9 +12,10 @@ frames()           → uses USE_STREAM / RTSP_URL_1 from .env
 import json
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import cv2
 from dotenv import load_dotenv
@@ -150,6 +151,34 @@ _current_profile = os.getenv("RTSP_PROFILE", "balanced").lower()
 _current_transport = os.getenv("RTSP_TRANSPORT", "tcp")
 _current_stream_health = {}
 _current_rtsp_backend = "unknown"
+
+# Same-process signals from FrameBus → AdaptiveStream (worker process only).
+_corruption_signal_lock = threading.Lock()
+_corruption_signals: dict[str, dict[str, bool]] = {}
+
+
+def signal_adaptive_corruption_action(
+    camera_id: str,
+    *,
+    idr: bool = False,
+    keyframe_only: bool = False,
+) -> None:
+    """Queue a one-shot action for the RTSP reader loop (same process as FrameBus)."""
+    if not camera_id or not (idr or keyframe_only):
+        return
+    with _corruption_signal_lock:
+        slot = _corruption_signals.setdefault(camera_id, {})
+        if idr:
+            slot["idr"] = True
+        if keyframe_only:
+            slot["keyframe_only"] = True
+
+
+def pop_adaptive_corruption_actions(camera_id: Optional[str]) -> Dict[str, bool]:
+    if not camera_id:
+        return {}
+    with _corruption_signal_lock:
+        return dict(_corruption_signals.pop(camera_id, {}) or {})
 
 
 class StreamExhausted(Exception):
@@ -508,6 +537,14 @@ def frames(
     global _current_decode_failures, _rtsp_reconnect_count
     try:
         while True:
+            if is_rtsp and camera_id:
+                actions = pop_adaptive_corruption_actions(camera_id)
+                ad = getattr(reader, "_adaptive", None)
+                if ad is not None:
+                    if actions.get("idr"):
+                        ad.request_idr_via_reconnect()
+                    if actions.get("keyframe_only"):
+                        ad.force_keyframe_only_mode()
             frame = reader.read_frame()
             if frame is None:
                 consecutive_fails += 1

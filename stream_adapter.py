@@ -219,15 +219,27 @@ class StreamProber:
 
 
 class AdaptiveStream:
+    # Low-latency RTSP/HEVC ingest: small max_delay + reorder_queue_size=0 avoids
+    # long B-frame buffering; nobuffer + low_delay reduce end-to-end latency.
     BASE_INPUT_OPTS = (
         "-rtsp_transport",
         os.getenv("RTSP_TRANSPORT", "tcp"),
+        "-timeout",
+        os.getenv("RTSP_TIMEOUT_US", "5000000"),
+        "-stimeout",
+        os.getenv("RTSP_STIMEOUT_US", "5000000"),
         "-fflags",
-        "genpts+discardcorrupt",
+        "genpts+discardcorrupt+nobuffer",
+        "-flags",
+        "low_delay",
         "-max_delay",
-        os.getenv("RTSP_MAX_DELAY_US", "3000000"),
+        os.getenv("RTSP_MAX_DELAY_US", "500000"),
         "-reorder_queue_size",
-        os.getenv("RTSP_REORDER_QUEUE_SIZE", "512"),
+        os.getenv("RTSP_REORDER_QUEUE_SIZE", "0"),
+        "-analyzeduration",
+        os.getenv("RTSP_ANALYZEDURATION_US", "100000"),
+        "-probesize",
+        os.getenv("RTSP_PROBESIZE", "32768"),
     )
 
     def __init__(self, profile: CameraProfile):
@@ -237,6 +249,7 @@ class AdaptiveStream:
         self._stderr_tail = bytearray()
         self._stderr_thread: threading.Thread | None = None
         self._stderr_max = max(1024, int(os.getenv("STREAM_ADAPTER_FFMPEG_STDERR_MAX", "8192")))
+        self._keyframe_only = _env_flag("RTSP_KEYFRAME_ONLY", "false")
 
     def _build_ffmpeg_cmd(self) -> list[str]:
         p = self.profile
@@ -244,11 +257,15 @@ class AdaptiveStream:
         if p.hw_decoder_requested:
             cmd += ["-c:v", p.hw_decoder_requested]
         cmd += list(self.BASE_INPUT_OPTS)
+        if self._keyframe_only:
+            cmd += ["-skip_frame", "noref"]
         cmd += ["-i", p.url]
         vf = f"fps={p.target_fps:.2f},scale={p.target_width}:{p.target_height}:flags=fast_bilinear"
         cmd += [
             "-vf",
             vf,
+            "-vsync",
+            "drop",
             "-an",
             "-sn",
             "-dn",
@@ -259,6 +276,25 @@ class AdaptiveStream:
             "pipe:1",
         ]
         return cmd
+
+    def force_keyframe_only_mode(self) -> None:
+        """Restart FFmpeg with -skip_frame noref (keyframes only) to break prediction-chain corruption."""
+        if self._keyframe_only:
+            return
+        logger.warning(
+            "[%s] Switching to keyframe-only mode due to high corruption",
+            self.profile.camera_id,
+        )
+        self._keyframe_only = True
+        self.close()
+        self.open()
+
+    def request_idr_via_reconnect(self) -> None:
+        """Fast reconnect to encourage a new IDR from the camera (RTCP FIR not exposed in FFmpeg)."""
+        logger.info("[%s] Requesting IDR via fast reconnect", self.profile.camera_id)
+        self.close()
+        time.sleep(0.1)
+        self.open()
 
     def _stderr_drainer(self, fh: BinaryIO) -> None:
         try:

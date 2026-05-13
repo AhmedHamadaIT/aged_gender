@@ -33,6 +33,9 @@ class CameraStatus(BaseModel):
     last_state_update_age_sec: Optional[float] = None
     # FrameBus live annotation / Redis (optional; present when detection is running)
     save_output               : Optional[bool] = None
+    # Local/test: MP4 of the same annotated BGR as live Redis/WebSocket (see SAVE_ANNOTATED_VIDEO).
+    save_annotated_video      : Optional[bool] = None
+    annotated_video_path      : Optional[str] = None
     redis_connected           : Optional[bool] = None
     last_live_publish_seq     : Optional[int] = None
     last_live_frame_had_boxes : Optional[bool] = None

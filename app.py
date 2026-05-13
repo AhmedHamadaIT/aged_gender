@@ -352,14 +352,18 @@ async def camera_live_stream(websocket: WebSocket, camera_id: str):
     """
     Binary WebSocket stream of annotated JPEG frames for one camera.
 
-    Each message is raw JPEG bytes — display in a browser with:
+    Each message is raw JPEG bytes (or 4-byte LE ``_seq`` + JPEG when
+    ``WS_INCLUDE_SEQ_HEADER=true``). Display in a browser with rAF-throttled
+    updates and ``URL.revokeObjectURL`` for the previous blob URL, e.g.:
 
         const ws = new WebSocket("ws://host/cameras/cam1/live");
         ws.binaryType = "arraybuffer";
-        ws.onmessage = e => {
-            img.src = URL.createObjectURL(new Blob([e.data], {type:"image/jpeg"}));
-        };
-        ws.onclose = () => setTimeout(() => connect("cam1"), 2000);  // must reconnect manually
+        let currentUrl = null, pending = null, rafOn = false;
+        ws.onmessage = e => { pending = e.data; if (!rafOn) { rafOn = true;
+          requestAnimationFrame(() => { rafOn = false; if (!pending) return;
+            if (currentUrl) URL.revokeObjectURL(currentUrl);
+            currentUrl = URL.createObjectURL(new Blob([pending],{type:"image/jpeg"}));
+            img.src = currentUrl; pending = null; }); }};
 
     Frames are dropped (never queued) when the client is slower than
     WS_SEND_TIMEOUT_MS (default 50 ms) — this prevents memory growth on
@@ -400,14 +404,8 @@ async def task_live_stream(websocket: WebSocket, task_name: str):
       - 1011 — Redis is unavailable
 
     Clients must implement a reconnect loop — the WebSocket does not
-    auto-reconnect:
-
-        const ws = new WebSocket("ws://host/tasks/mainentrance1/live");
-        ws.binaryType = "arraybuffer";
-        ws.onmessage = e => {
-            img.src = URL.createObjectURL(new Blob([e.data], {type:"image/jpeg"}));
-        };
-        ws.onclose = () => setTimeout(() => connect(), 2000);
+    auto-reconnect. Prefer exponential backoff and revoke prior object URLs
+    when rendering JPEG blobs.
     """
     from fastapi import HTTPException as _HTTPException
 

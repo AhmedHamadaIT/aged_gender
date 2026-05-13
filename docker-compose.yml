@@ -1,5 +1,7 @@
 # ============================================
 # Docker Compose — YOLO Object Detection
+# Jetson: Dockerfile uses L4T JP6 (Orin / Orin Nano class). Original Jetson Nano
+# needs a JetPack-matched image; env vars below still apply for YOLO + ONNX ORT.
 # ============================================
 # Start:  docker compose up -d --build
 # Logs:   docker compose logs -f yolo-detect   (Compose v2 plugin)
@@ -67,11 +69,13 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
       - NVIDIA_VISIBLE_DEVICES=all
-      # Include `video` for NVDEC/NVENC when RTSP_ENABLE_GPU_DECODE=true (Jetson Orin).
+      # Include `video` for NVDEC/NVENC / GStreamer hw decode on Jetson.
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
-      # Jetson / ONNX: if TensorRT EP errors (e.g. vendor/card quirks), try:
-      #   ONNX_EXECUTION_PROVIDERS_ORDER=cuda_first
-      # or disable TRT: ONNX_ALLOW_TENSORRT=0
+      # ONNX on Jetson: cuda_first + smaller TRT workspace avoids OOM on 4GB-class boards.
+      - ONNX_EXECUTION_PROVIDERS_ORDER=${ONNX_EXECUTION_PROVIDERS_ORDER:-cuda_first}
+      - ONNX_TENSORRT_CACHE_PATH=${ONNX_TENSORRT_CACHE_PATH:-/app/trt_cache}
+      - ONNX_TENSORRT_MAX_WORKSPACE=${ONNX_TENSORRT_MAX_WORKSPACE:-536870912}
+      # If TensorRT EP fails, set ONNX_ALLOW_TENSORRT=0 (CUDA EP only).
       # Default for in-compose Redis (avoids localhost:6379 inside the container)
       - REDIS_URL=redis://redis:6379/0
       # Same pattern as Redis: inside the stack, localhost is the app container — use the service name.
@@ -89,6 +93,9 @@ services:
       # gstreamer | ffmpeg | opencv to force one path (see stream.py / stream_gstreamer.py).
       - RTSP_BACKEND=${RTSP_BACKEND:-auto}
       - RTSP_GSTREAMER=${RTSP_GSTREAMER:-true}
+      # YOLO / BoT-SORT in FrameBus: 0 = first NVIDIA GPU (see .env.example). Use cpu without a GPU.
+      - DEVICE=${DEVICE:-0}
+      - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
       - LIVE_ANNOTATION_MODE=${LIVE_ANNOTATION_MODE:-opencv}
       # Hardware decode (Jetson): auto uses /etc/nv_tegra_release or device-tree; true forces hw map; false = CPU.
       # Override decoder names if your ffmpeg build uses nvmpi instead of v4l2m2m (see .env.example).
@@ -132,6 +139,7 @@ services:
       - .:/app                  # mount entire project directory
       - ./models:/app/models    # model files
       - ./outputs:/app/outputs  # saved frames
+      - trt_engine_cache:/app/trt_cache  # ONNX TensorRT engine cache (Jetson)
 
     ports:
       - "9000:9000"    # YOLO Detection API
@@ -163,3 +171,4 @@ services:
 volumes:
   redis_data:
   qdrant_data:
+  trt_engine_cache:

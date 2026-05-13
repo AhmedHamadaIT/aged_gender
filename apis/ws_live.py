@@ -7,7 +7,9 @@ Endpoints (registered in app.py):
 
   WS  /cameras/{camera_id}/live
       Binary stream of annotated JPEG frames for one camera.
-      Each WebSocket message is raw JPEG bytes — no base64, no JSON wrapper.
+      Each WebSocket message is raw JPEG bytes by default (no base64 wrapper).
+      Optional ``WS_INCLUDE_SEQ_HEADER=true``: each message is 4-byte little-endian
+      ``uint32`` sequence (Redis ``_seq``) followed by JPEG bytes (for gap detection).
 
   WS  /cameras/{camera_id}/events
       JSON stream of detection events for one camera (task results).
@@ -17,22 +19,48 @@ Transport rules
   - Events:  Redis channel  live:event:{camera_id}   → text WS message (JSON)
   - Backpressure: if send() takes > SEND_TIMEOUT_MS the frame is dropped and
     the loop continues — the client is never queued, the server never blocks.
-  - Reconnect: WebSocket does not auto-reconnect. The browser must implement
-    a reconnect loop (ws.onclose = () => setTimeout(connect, 2000)).
+  - Reconnect: WebSocket does not auto-reconnect. The browser should implement
+    exponential backoff (see example below).
 
-Browser usage (frames):
+Browser usage (frames) — memory-safe + rAF-throttled preview:
+
     const ws = new WebSocket("ws://host/cameras/cam1/live");
     ws.binaryType = "arraybuffer";
-    ws.onmessage = e => {
-        const blob = new Blob([e.data], { type: "image/jpeg" });
-        document.getElementById("stream").src = URL.createObjectURL(blob);
+    let currentUrl = null;
+    let pendingFrame = null;
+    let rafScheduled = false;
+    function renderLoop() {
+      rafScheduled = false;
+      if (pendingFrame) {
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        currentUrl = URL.createObjectURL(
+          new Blob([pendingFrame], { type: "image/jpeg" })
+        );
+        document.getElementById("stream").src = currentUrl;
+        pendingFrame = null;
+      }
+    }
+    ws.onmessage = (e) => {
+      pendingFrame = e.data;
+      if (!rafScheduled) {
+        rafScheduled = true;
+        requestAnimationFrame(renderLoop);
+      }
     };
-    ws.onclose = () => setTimeout(() => connect("cam1"), 2000);
-
-Browser usage (events):
-    const ws = new WebSocket("ws://host/cameras/cam1/events");
-    ws.onmessage = e => console.log(JSON.parse(e.data));
-    ws.onclose = () => setTimeout(() => connect("cam1"), 2000);
+    function connect(cameraId) {
+      const ws = new WebSocket(`ws://${location.host}/cameras/${cameraId}/live`);
+      ws.binaryType = "arraybuffer";
+      let retryDelay = 1000;
+      const maxDelay = 30000;
+      ws.onopen = () => { retryDelay = 1000; };
+      ws.onclose = () => {
+        setTimeout(() => connect(cameraId), retryDelay);
+        retryDelay = Math.min(retryDelay * 2, maxDelay);
+      };
+      ws.onerror = () => ws.close();
+      ws.onmessage = (e) => { /* attach render logic */ };
+      return ws;
+    }
 """
 
 from __future__ import annotations
@@ -43,6 +71,7 @@ import json
 import logging
 import os
 import re
+import struct
 import time
 from collections import defaultdict, deque
 from typing import Dict, Optional, Tuple
@@ -60,12 +89,39 @@ log = logging.getLogger(__name__)
 # Backpressure timeout: drop the frame if the client cannot receive within this
 # many milliseconds. This prevents TCP buffer bloat on slow or hidden browser tabs.
 _SEND_TIMEOUT_S = float(os.getenv("WS_SEND_TIMEOUT_MS", "50")) / 1000.0
-_WS_REDIS_RECONNECT_DELAY_MS = max(100, int(os.getenv("WS_REDIS_RECONNECT_DELAY_MS", "1000")))
+_WS_REDIS_RECONNECT_BASE_MS = max(100, int(os.getenv("WS_REDIS_RECONNECT_DELAY_MS", "1000")))
+_WS_REDIS_RECONNECT_MAX_MS = max(
+    _WS_REDIS_RECONNECT_BASE_MS, int(os.getenv("WS_REDIS_RECONNECT_MAX_MS", "30000"))
+)
 _WS_REDIS_MAX_RETRIES = max(1, int(os.getenv("WS_REDIS_MAX_RETRIES", "5")))
 _FRAME_RING_MAX = max(10, int(os.getenv("WS_FRAME_REPLAY_BUFFER", os.getenv("SSE_REPLAY_BUFFER", "200"))))
 
+_WS_MAX_FPS = float(os.getenv("WS_MAX_FPS", "15"))
+_WS_MIN_FRAME_INTERVAL = 1.0 / _WS_MAX_FPS if _WS_MAX_FPS > 0 else 0.0
+
+_WS_QUALITY_REFRESH_SEC = float(os.getenv("WS_QUALITY_REFRESH_SEC", "1.0"))
+_WS_TIER_MAX_FPS = {
+    "high": float(os.getenv("WS_TIER_HIGH_FPS", "15")),
+    "medium": float(os.getenv("WS_TIER_MEDIUM_FPS", "10")),
+    "low": float(os.getenv("WS_TIER_LOW_FPS", "8")),
+    "minimal": float(os.getenv("WS_TIER_MINIMAL_FPS", "5")),
+}
+
+_WS_BP_REDIS_INTERVAL_SEC = float(os.getenv("WS_BP_REDIS_INTERVAL_SEC", "2.0"))
+_ws_bp_last_wall: Dict[str, float] = {}
+
+_WS_INCLUDE_SEQ_HEADER = os.getenv("WS_INCLUDE_SEQ_HEADER", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+    "on",
+)
+
 # Per-camera ring of (seq, jpeg_bytes) for optional ?last_seq= replay
 _frame_ring: Dict[str, deque] = defaultdict(lambda: deque(maxlen=_FRAME_RING_MAX))
+
+# Per-camera rate limit for WebSocket lifecycle warnings (not per-frame).
+_last_ws_warn: Dict[str, float] = {}
 
 
 def validate_camera_id(camera_id: str) -> Optional[str]:
@@ -82,6 +138,49 @@ def validate_camera_id(camera_id: str) -> Optional[str]:
     if not _VALID_CAMERA_ID_RE.match(camera_id):
         return f"camera_id contains invalid characters: {camera_id!r}"
     return None
+
+
+def _sync_redis_get_stream_quality(camera_id: str) -> Optional[str]:
+    try:
+        import redis as r
+
+        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        c = r.Redis.from_url(url, socket_connect_timeout=0.3, socket_timeout=0.3)
+        v = c.get(f"stream:quality:{camera_id}")
+        c.close()
+        if v is None:
+            return None
+        return v.decode() if isinstance(v, bytes) else str(v)
+    except Exception:
+        return None
+
+
+def _tier_to_min_frame_interval(tier: Optional[str]) -> float:
+    if not tier:
+        return _WS_MIN_FRAME_INTERVAL
+    key = str(tier).strip().lower()
+    cap = _WS_TIER_MAX_FPS.get(key, _WS_MAX_FPS)
+    return 1.0 / cap if cap > 0 else 0.0
+
+
+def _sync_set_ws_backpressure(camera_id: str) -> None:
+    try:
+        import redis as r
+
+        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        c = r.Redis.from_url(url, socket_connect_timeout=0.3, socket_timeout=0.3)
+        c.setex(f"stream:ws_backpressure:{camera_id}", 8, "1")
+        c.close()
+    except Exception:
+        pass
+
+
+async def _maybe_publish_ws_backpressure(camera_id: str) -> None:
+    now = time.time()
+    if now - _ws_bp_last_wall.get(camera_id, 0.0) < _WS_BP_REDIS_INTERVAL_SEC:
+        return
+    _ws_bp_last_wall[camera_id] = now
+    await asyncio.to_thread(_sync_set_ws_backpressure, camera_id)
 
 
 def decode_live_frame_message(data: bytes | str | memoryview) -> Tuple[bytes, int]:
@@ -113,6 +212,25 @@ def _record_frame_ring(camera_id: str, seq: int, jpeg: bytes) -> None:
     _frame_ring[camera_id].append((seq, jpeg))
 
 
+def _ws_redis_backoff_sec(attempt: int) -> float:
+    """Exponential backoff with ±20% jitter for Redis reconnect delays."""
+    import random
+
+    delay_ms = min(
+        _WS_REDIS_RECONNECT_BASE_MS * (2**attempt),
+        _WS_REDIS_RECONNECT_MAX_MS,
+    )
+    jitter = delay_ms * 0.2 * (2.0 * random.random() - 1.0)
+    return max(_WS_REDIS_RECONNECT_BASE_MS / 1000.0, (delay_ms + jitter) / 1000.0)
+
+
+def _rate_limited_ws_warn(camera_id: str, fmt: str, *args: object) -> None:
+    now = time.time()
+    if now - _last_ws_warn.get(camera_id, 0.0) > 5.0:
+        _last_ws_warn[camera_id] = now
+        log.warning(fmt, *args)
+
+
 async def _get_redis_async():
     """Return a new async Redis client, or None if redis is unavailable."""
     try:
@@ -124,6 +242,12 @@ async def _get_redis_async():
     except Exception as exc:
         print(f"[ws_live] Redis unavailable: {exc}")
         return None
+
+
+def _frame_ws_payload(jpeg_bytes: bytes, seq: int) -> bytes:
+    if _WS_INCLUDE_SEQ_HEADER:
+        return struct.pack("<I", seq & 0xFFFFFFFF) + jpeg_bytes
+    return jpeg_bytes
 
 
 async def _replay_frames(
@@ -140,10 +264,14 @@ async def _replay_frames(
         if seq > last_seq or seq == 0:
             try:
                 await asyncio.wait_for(
-                    websocket.send_bytes(jpeg),
+                    websocket.send_bytes(_frame_ws_payload(jpeg, seq)),
                     timeout=_SEND_TIMEOUT_S,
                 )
-            except (asyncio.TimeoutError, WebSocketDisconnect):
+            except asyncio.TimeoutError:
+                break
+            except WebSocketDisconnect:
+                break
+            except RuntimeError:
                 break
 
 
@@ -151,9 +279,8 @@ async def live_frames_ws(websocket: WebSocket, camera_id: str) -> None:
     """
     Stream annotated JPEG frames for *camera_id* over a binary WebSocket.
 
-    Each message sent to the client is raw JPEG bytes.
-    Frames are dropped (not queued) if the client cannot receive within
-    WS_SEND_TIMEOUT_MS (default 50 ms).
+    Each message sent to the client is raw JPEG bytes (or 4-byte seq + JPEG when
+    WS_INCLUDE_SEQ_HEADER=true). Per-connection send rate is capped by WS_MAX_FPS.
 
     Query param ``last_seq`` (optional): replay buffered frames with sequence
     greater than this value after connect (best-effort ring buffer).
@@ -166,48 +293,116 @@ async def live_frames_ws(websocket: WebSocket, camera_id: str) -> None:
         last_seq = int(q)
     await _replay_frames(websocket, camera_id, last_seq)
 
+    last_sent_at = 0.0
+    min_interval = _WS_MIN_FRAME_INTERVAL
+    last_qos_check = 0.0
     redis_attempt = 0
-    while redis_attempt < _WS_REDIS_MAX_RETRIES and websocket.client_state == WebSocketState.CONNECTED:
+    while True:
+        if websocket.client_state != WebSocketState.CONNECTED:
+            break
+
         redis_client = await _get_redis_async()
         if redis_client is None:
+            if redis_attempt >= _WS_REDIS_MAX_RETRIES:
+                break
+            delay = _ws_redis_backoff_sec(redis_attempt)
             redis_attempt += 1
-            await asyncio.sleep(_WS_REDIS_RECONNECT_DELAY_MS / 1000.0)
+            await asyncio.sleep(delay)
             continue
+
         redis_attempt = 0
         channel = f"live:frame:{camera_id}"
+        _ws_dead = False
         try:
             async with redis_client.pubsub() as ps:
                 await ps.subscribe(channel)
                 async for msg in ps.listen():
                     if websocket.client_state != WebSocketState.CONNECTED:
+                        _ws_dead = True
                         break
                     if msg["type"] != "message":
                         continue
                     jpeg_bytes, seq = decode_live_frame_message(msg["data"])
                     _record_frame_ring(camera_id, seq, jpeg_bytes)
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        _ws_dead = True
+                        break
+                    nowm = time.monotonic()
+                    if nowm - last_qos_check >= _WS_QUALITY_REFRESH_SEC:
+                        last_qos_check = nowm
+                        tier = await asyncio.to_thread(_sync_redis_get_stream_quality, camera_id)
+                        min_interval = _tier_to_min_frame_interval(tier)
+                    if min_interval > 0:
+                        now = time.monotonic()
+                        if now - last_sent_at < min_interval:
+                            continue
+                        last_sent_at = now
                     try:
                         await asyncio.wait_for(
-                            websocket.send_bytes(jpeg_bytes),
+                            websocket.send_bytes(_frame_ws_payload(jpeg_bytes, seq)),
                             timeout=_SEND_TIMEOUT_S,
                         )
                     except asyncio.TimeoutError:
-                        pass
+                        await _maybe_publish_ws_backpressure(camera_id)
                     except WebSocketDisconnect:
+                        _ws_dead = True
+                        _rate_limited_ws_warn(
+                            camera_id,
+                            "ws_live/%s frames: WebSocket disconnected during send",
+                            camera_id,
+                        )
+                        break
+                    except RuntimeError as exc:
+                        _ws_dead = True
+                        _rate_limited_ws_warn(
+                            camera_id,
+                            "ws_live/%s frames: WebSocket send failed (%s)",
+                            camera_id,
+                            exc,
+                        )
                         break
         except WebSocketDisconnect:
-            break
+            _ws_dead = True
+            _rate_limited_ws_warn(
+                camera_id,
+                "ws_live/%s frames: WebSocket disconnected in pubsub loop",
+                camera_id,
+            )
         except Exception as exc:
-            log.warning("ws_live/%s frames redis loop: %s — reconnecting", camera_id, exc)
-            redis_attempt += 1
-            await asyncio.sleep(_WS_REDIS_RECONNECT_DELAY_MS / 1000.0)
+            if websocket.client_state != WebSocketState.CONNECTED:
+                _ws_dead = True
+                _rate_limited_ws_warn(
+                    camera_id,
+                    "ws_live/%s frames: Redis loop stopped (client not connected): %s",
+                    camera_id,
+                    exc,
+                )
+            else:
+                delay = _ws_redis_backoff_sec(redis_attempt)
+                log.warning(
+                    "ws_live/%s frames redis error: %s — reconnecting in %.1fs (attempt %d/%d)",
+                    camera_id,
+                    exc,
+                    delay,
+                    redis_attempt + 1,
+                    _WS_REDIS_MAX_RETRIES,
+                )
+                redis_attempt += 1
+                await asyncio.sleep(delay)
         finally:
             try:
                 await redis_client.aclose()
             except Exception:
                 pass
 
+        if _ws_dead:
+            break
+
     if websocket.client_state == WebSocketState.CONNECTED:
-        await websocket.close(code=1011, reason="Redis unavailable or max retries")
+        try:
+            await websocket.close(code=1011, reason="Redis unavailable or max retries")
+        except Exception:
+            pass
 
 
 async def live_events_ws(websocket: WebSocket, camera_id: str) -> None:
@@ -220,23 +415,35 @@ async def live_events_ws(websocket: WebSocket, camera_id: str) -> None:
     await websocket.accept()
 
     redis_attempt = 0
-    while redis_attempt < _WS_REDIS_MAX_RETRIES and websocket.client_state == WebSocketState.CONNECTED:
+    while True:
+        if websocket.client_state != WebSocketState.CONNECTED:
+            break
+
         redis_client = await _get_redis_async()
         if redis_client is None:
+            if redis_attempt >= _WS_REDIS_MAX_RETRIES:
+                break
+            delay = _ws_redis_backoff_sec(redis_attempt)
             redis_attempt += 1
-            await asyncio.sleep(_WS_REDIS_RECONNECT_DELAY_MS / 1000.0)
+            await asyncio.sleep(delay)
             continue
+
         redis_attempt = 0
         channel = f"live:event:{camera_id}"
+        _ws_dead = False
         try:
             async with redis_client.pubsub() as ps:
                 await ps.subscribe(channel)
                 async for msg in ps.listen():
                     if websocket.client_state != WebSocketState.CONNECTED:
+                        _ws_dead = True
                         break
                     if msg["type"] != "message":
                         continue
                     json_str: str = msg["data"].decode("utf-8") if isinstance(msg["data"], bytes) else msg["data"]
+                    if websocket.client_state != WebSocketState.CONNECTED:
+                        _ws_dead = True
+                        break
                     try:
                         await asyncio.wait_for(
                             websocket.send_text(json_str),
@@ -245,18 +452,61 @@ async def live_events_ws(websocket: WebSocket, camera_id: str) -> None:
                     except asyncio.TimeoutError:
                         pass
                     except WebSocketDisconnect:
+                        _ws_dead = True
+                        _rate_limited_ws_warn(
+                            camera_id,
+                            "ws_live/%s events: WebSocket disconnected during send",
+                            camera_id,
+                        )
+                        break
+                    except RuntimeError as exc:
+                        _ws_dead = True
+                        _rate_limited_ws_warn(
+                            camera_id,
+                            "ws_live/%s events: WebSocket send failed (%s)",
+                            camera_id,
+                            exc,
+                        )
                         break
         except WebSocketDisconnect:
-            break
+            _ws_dead = True
+            _rate_limited_ws_warn(
+                camera_id,
+                "ws_live/%s events: WebSocket disconnected in pubsub loop",
+                camera_id,
+            )
         except Exception as exc:
-            log.warning("ws_live/%s events redis loop: %s — reconnecting", camera_id, exc)
-            redis_attempt += 1
-            await asyncio.sleep(_WS_REDIS_RECONNECT_DELAY_MS / 1000.0)
+            if websocket.client_state != WebSocketState.CONNECTED:
+                _ws_dead = True
+                _rate_limited_ws_warn(
+                    camera_id,
+                    "ws_live/%s events: Redis loop stopped (client not connected): %s",
+                    camera_id,
+                    exc,
+                )
+            else:
+                delay = _ws_redis_backoff_sec(redis_attempt)
+                log.warning(
+                    "ws_live/%s events redis error: %s — reconnecting in %.1fs (attempt %d/%d)",
+                    camera_id,
+                    exc,
+                    delay,
+                    redis_attempt + 1,
+                    _WS_REDIS_MAX_RETRIES,
+                )
+                redis_attempt += 1
+                await asyncio.sleep(delay)
         finally:
             try:
                 await redis_client.aclose()
             except Exception:
                 pass
 
+        if _ws_dead:
+            break
+
     if websocket.client_state == WebSocketState.CONNECTED:
-        await websocket.close(code=1011, reason="Redis unavailable or max retries")
+        try:
+            await websocket.close(code=1011, reason="Redis unavailable or max retries")
+        except Exception:
+            pass

@@ -1,7 +1,9 @@
 # ============================================
 # YOLO Object Detection — Dockerfile
 # ============================================
-# Base: dustynv PyTorch for Jetson R36.4 / JetPack 6 (ARM64).
+# Base: dustynv PyTorch for Jetson R36.4 / JetPack 6 (ARM64) — Orin / Orin Nano class.
+# Original Jetson Nano (Maxwell) is not JetPack 6; use an L4T base that matches your board
+# and the same app deps. See .env.example "NVIDIA Jetson" for YOLO .engine + ONNX ORT settings.
 # OS/Python track the upstream tag; see hub.docker.com/r/dustynv/l4t-pytorch.
 #
 # This image ships with a fully working CUDA torch.

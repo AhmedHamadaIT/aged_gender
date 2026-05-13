@@ -294,14 +294,32 @@ docker compose logs yolo-detect | grep "FrameBus: Redis"
 function connect(id) {
   const ws = new WebSocket(`ws://localhost:9000/cameras/${id}/live`);
   ws.binaryType = "arraybuffer";
-  ws.onopen  = () => document.getElementById("st").textContent = "Connected ✓";
-  ws.onclose = () => { document.getElementById("st").textContent = "Reconnecting…";
-                       setTimeout(() => connect(id), 2000); };
+  let currentUrl = null;
+  let pendingFrame = null;
+  let rafScheduled = false;
+  let retryDelay = 1000;
+  const maxDelay = 30000;
+  ws.onopen  = () => { retryDelay = 1000; document.getElementById("st").textContent = "Connected ✓"; };
+  ws.onclose = () => {
+    document.getElementById("st").textContent = "Reconnecting in " + (retryDelay/1000) + "s…";
+    setTimeout(() => connect(id), retryDelay);
+    retryDelay = Math.min(retryDelay * 2, maxDelay);
+  };
   ws.onerror = () => ws.close();
   ws.onmessage = e => {
-    const img = document.getElementById("img");
-    URL.revokeObjectURL(img.src);
-    img.src = URL.createObjectURL(new Blob([e.data], {type:"image/jpeg"}));
+    pendingFrame = e.data;
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(() => {
+        rafScheduled = false;
+        if (!pendingFrame) return;
+        const img = document.getElementById("img");
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        currentUrl = URL.createObjectURL(new Blob([pendingFrame], {type:"image/jpeg"}));
+        img.src = currentUrl;
+        pendingFrame = null;
+      });
+    }
   };
 }
 connect("cam1");   // change to your camera id
@@ -317,6 +335,9 @@ connect("cam1");   // change to your camera id
 | `LIVE_ANNOTATION_MODE` | `opencv` | `opencv` (fast boxes, code default), `ultralytics` (full `plot()`), or `none` (no overlay) for live Redis JPEGs; Compose may override (e.g. `docker-compose.yml`) |
 | `RTSP_BACKEND` | `auto` | `auto` (GStreamer NVDEC on Jetson if available, else Adaptive FFmpeg, else OpenCV), or force `gstreamer` / `ffmpeg` / `opencv` |
 | `WS_SEND_TIMEOUT_MS` | `50` | Drop frame if client cannot receive within this many ms |
+| `WS_MAX_FPS` | `15` | Per-WebSocket-client send cap (each tab has its own limiter) |
+| `WS_INCLUDE_SEQ_HEADER` | `false` | If `true`, each binary message is 4-byte LE seq + JPEG |
+| `LIVE_JPEG_QUALITY` | `85` | Redis live JPEG quality (1–100); lower on CPU-bound Jetson if encode >5ms |
 
 ### Cashier — zones (`GET` / `POST` / `POST …/reset`)
 

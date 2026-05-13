@@ -1029,6 +1029,8 @@ Polygon needs at least 3 points. Persons whose centroid falls outside all zones 
 
 ## 11. Live Stream WebSocket (`/cameras/{id}/live`)
 
+**Frontend dashboard guide** (blob URLs vs `ImageBitmap`, rAF throttling, memory, multi-tile, optional seq header): [`frontend-live-stream-guide.md`](./frontend-live-stream-guide.md).
+
 **Stream annotation** here means **visually annotated JPEG frames**: FrameBus runs YOLO + BoT-SORT on each RTSP frame, draws bounding boxes and track IDs, encodes JPEG, and publishes to Redis. Clients consume that stream only via **`WS /cameras/{camera_id}/live`** (binary JPEG messages). Task workers may draw extra overlays (lines, cashier zones) on their own copies for evidence; the live WebSocket feed is the FrameBus-annotated frame.
 
 **Related (not the painted live video):** JSON **detection events** (crossings, PPE alerts, phone usage, cashier payloads) are available on **`GET /detection/stream`** (SSE, all cameras, optional filters) and **`WS /cameras/{camera_id}/events`** (one camera, same JSON shape as SSE). Those carry metadata and V2 **evidence** objects (`captureImage` / `sceneImage`) — not a full-motion annotated video stream. Evidence contract: [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
@@ -1116,17 +1118,51 @@ curl -i -N \
     function connect(cameraId) {
       const ws = new WebSocket(`ws://localhost:9000/cameras/${cameraId}/live`);
       ws.binaryType = "arraybuffer";
-      ws.onopen  = () => document.getElementById("status").textContent = "Connected";
+      let currentUrl = null;
+      let pendingFrame = null;
+      let rafScheduled = false;
+      let retryDelay = 1000;
+      const maxDelay = 30000;
+      const statusEl = document.getElementById("status");
+      const imgEl = document.getElementById("stream");
+
+      function renderLoop() {
+        rafScheduled = false;
+        if (!pendingFrame) return;
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        currentUrl = URL.createObjectURL(
+          new Blob([pendingFrame], { type: "image/jpeg" })
+        );
+        imgEl.src = currentUrl;
+        pendingFrame = null;
+      }
+
+      ws.onopen = () => {
+        retryDelay = 1000;
+        statusEl.textContent = "Connected";
+      };
       ws.onclose = () => {
-        document.getElementById("status").textContent = "Reconnecting…";
-        setTimeout(() => connect(cameraId), 2000);   // manual reconnect required
+        statusEl.textContent = `Reconnecting in ${retryDelay / 1000}s…`;
+        setTimeout(() => connect(cameraId), retryDelay);
+        retryDelay = Math.min(retryDelay * 2, maxDelay);
       };
       ws.onerror = () => ws.close();
-      ws.onmessage = e => {
-        const blob = new Blob([e.data], { type: "image/jpeg" });
-        const img  = document.getElementById("stream");
-        URL.revokeObjectURL(img.src);                // free previous frame memory
-        img.src = URL.createObjectURL(blob);
+
+      let frameCount = 0;
+      let fpsWindowStart = performance.now();
+      ws.onmessage = (e) => {
+        frameCount++;
+        const now = performance.now();
+        if (now - fpsWindowStart >= 1000) {
+          console.debug(`[cam ${cameraId}] WS FPS: ${frameCount}`);
+          frameCount = 0;
+          fpsWindowStart = now;
+        }
+        pendingFrame = e.data;
+        if (!rafScheduled) {
+          rafScheduled = true;
+          requestAnimationFrame(renderLoop);
+        }
       };
     }
     connect("1");
