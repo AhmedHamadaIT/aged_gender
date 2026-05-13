@@ -94,7 +94,7 @@ class PersonSearchService:
             self._onnx = None
             self.identity_manager = None
 
-    def _is_ready(self) -> bool:
+    def is_ready(self) -> bool:
         if self.identity_manager is None:
             return False
         return self._onnx is not None or self.model is not None
@@ -147,7 +147,7 @@ class PersonSearchService:
         Decode image bytes, extract embedding, and search Qdrant.
         Used by the API endpoint for querying.
         """
-        if not self._is_ready():
+        if not self.is_ready():
             raise RuntimeError(
                 "Re-ID not loaded — set REID_MODEL_ONNX or REID_MODEL_PATH."
             )

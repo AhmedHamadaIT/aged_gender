@@ -8,13 +8,20 @@ Typical CPU / weights (override via env):
 
 Writes an MP4 of the same annotated frames as the live stream (see SAVE_ANNOTATED_VIDEO in frame_bus).
 
-Example:
-  python tools/run_crossline_local_video.py \\
+Example with annotator export (start/end points):
+
+  python3 tools/run_crossline_local_video.py \\
     --video "/path/to/clip.mp4" \\
+    --lines-json /path/to/lines_export.json \\
     --artifact-dir /tmp/crossline_run
 
 Full-length file (slow on CPU):
-  USE_FULL_VIDEO=1 python tools/run_crossline_local_video.py --video "/path/to/full.mp4"
+
+  USE_FULL_VIDEO=1 python3 tools/run_crossline_local_video.py --video "/path/to/full.mp4"
+
+Production-like logs + evidence layout under ``--artifact-dir``:
+
+  USE_FULL_VIDEO=1 python3 tools/run_crossline_local_video.py --production-artifacts ...
 """
 from __future__ import annotations
 
@@ -28,6 +35,31 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+def _lines_export_to_area_position(data: dict) -> str:
+    """
+    Convert UI/export shape { line_count, lines: [{ id, start, end, ... }] }
+    into CROSS_LINE areaPosition (JSON string for POST /api/tasks).
+    ``direction_deg`` is ignored; use ``direction`` per line if needed (0=both, 1/2=one way).
+    """
+    rows = []
+    for ln in data.get("lines") or []:
+        start = ln["start"]
+        end = ln["end"]
+        lid = ln.get("id", ln.get("line_id", ""))
+        rows.append(
+            {
+                "line_id": str(lid),
+                "line_name": str(ln.get("name", ln.get("line_name", f"line_{lid}"))),
+                "point": [
+                    {"x": int(start["x"]), "y": int(start["y"])},
+                    {"x": int(end["x"]), "y": int(end["y"])},
+                ],
+                "direction": int(ln.get("direction", 0)),
+            }
+        )
+    return json.dumps(rows)
 
 
 def _http(base: str, method: str, path: str, body: object | None = None, timeout: float = 120.0) -> object:
@@ -46,6 +78,24 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=19103)
     ap.add_argument("--camera-id", default="local_file_cam")
     ap.add_argument("--task-id", type=int, default=99002)
+    ap.add_argument(
+        "--lines-json",
+        type=pathlib.Path,
+        default=None,
+        help="Path to {line_count, lines:[{id,start,end,...}]} export; overrides default mid-line.",
+    )
+    ap.add_argument(
+        "--area-position-json",
+        type=pathlib.Path,
+        default=None,
+        help="Path to raw CROSS_LINE areaPosition array JSON (overrides --lines-json).",
+    )
+    ap.add_argument(
+        "--production-artifacts",
+        action="store_true",
+        help="DEBUG logging, app.log under <artifact>/logs/ (LOG_APP_FILE), uvicorn.log there too, "
+        "SAVE_JPEG_QUALITY=80, queue warn interval like compose.",
+    )
     args = ap.parse_args()
 
     video = args.video.expanduser().resolve()
@@ -58,23 +108,36 @@ def main() -> int:
     for sub in ("events", "captures", "scenes", "gallery", "outputs"):
         (art / sub).mkdir(parents=True, exist_ok=True)
 
+    logs_dir = art / "logs"
+    if args.production_artifacts:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
     root = pathlib.Path(__file__).resolve().parents[1]
     w = int(os.environ.get("WIDTH", "640"))
     h = int(os.environ.get("HEIGHT", "360"))
     mid_y = h // 2
-    area = json.dumps(
-        [
-            {
-                "line_id": "L1",
-                "line_name": "cross",
-                "point": [{"x": 0, "y": mid_y}, {"x": w, "y": mid_y}],
-                "direction": 0,
-            }
-        ]
-    )
+    if args.area_position_json:
+        area = args.area_position_json.expanduser().resolve().read_text().strip()
+    elif args.lines_json:
+        spec = json.loads(args.lines_json.expanduser().resolve().read_text())
+        area = _lines_export_to_area_position(spec)
+    else:
+        area = json.dumps(
+            [
+                {
+                    "line_id": "L1",
+                    "line_name": "cross",
+                    "point": [{"x": 0, "y": mid_y}, {"x": w, "y": mid_y}],
+                    "direction": 0,
+                }
+            ]
+        )
+
+    log_level = os.environ.get("LOG_LEVEL", "DEBUG" if args.production_artifacts else "WARNING")
 
     env = {
         **os.environ,
+        "LOG_LEVEL": log_level,
         "DEVICE": os.environ.get("DEVICE", "cpu"),
         "YOLO_MODEL": os.environ.get("YOLO_MODEL", str(root / "models" / "yolov8n.pt")),
         "CONF_THRESHOLD": os.environ.get("CONF_THRESHOLD", "0.35"),
@@ -83,14 +146,20 @@ def main() -> int:
         "HEIGHT": str(h),
         "FRAME_SKIP": os.environ.get("FRAME_SKIP", "2"),
         "LIVE_ANNOTATION_MODE": os.environ.get("LIVE_ANNOTATION_MODE", "opencv"),
+        "LIVE_PREVIEW_ANNOTATE": os.environ.get("LIVE_PREVIEW_ANNOTATE", "true"),
         "SAVE_OUTPUT": os.environ.get("SAVE_OUTPUT", "true"),
+        "SAVE_FORMAT": os.environ.get("SAVE_FORMAT", "jpg"),
+        "SAVE_JPEG_QUALITY": os.environ.get("SAVE_JPEG_QUALITY", "80"),
         "REDIS_CONNECT_RETRIES": os.environ.get("REDIS_CONNECT_RETRIES", "1"),
         "EVENTS_DIR": str(art / "events"),
         "CAPTURE_DIR": str(art / "captures"),
         "SCENE_DIR": str(art / "scenes"),
         "GALLERY_DIR": str(art / "gallery"),
         "OUTPUT_DIR": str(art / "outputs"),
-        "LOG_LEVEL": os.environ.get("LOG_LEVEL", "WARNING"),
+        "PERF_LOG_INTERVAL": os.environ.get("PERF_LOG_INTERVAL", "300"),
+        "FRAMEBUS_QUEUE_WARN_INTERVAL_SEC": os.environ.get(
+            "FRAMEBUS_QUEUE_WARN_INTERVAL_SEC", "15" if args.production_artifacts else "5.0"
+        ),
         # Same BGR annotations as WebSocket/Redis live preview; path under artifact dir.
         "SAVE_ANNOTATED_VIDEO": os.environ.get("SAVE_ANNOTATED_VIDEO", "true"),
         "SAVE_ANNOTATED_VIDEO_PATH": os.environ.get(
@@ -100,12 +169,27 @@ def main() -> int:
             "SAVE_ANNOTATED_VIDEO_MATCH_WS", "false"
         ),
     }
+    if args.production_artifacts:
+        env["LOG_APP_FILE"] = os.environ.get("LOG_APP_FILE", str(logs_dir / "app.log"))
+        env["PYTHONUNBUFFERED"] = os.environ.get("PYTHONUNBUFFERED", "1")
 
     port = args.port
     cam = args.camera_id
     task_id = args.task_id
     base = f"http://127.0.0.1:{port}"
-    log_path = art / "uvicorn.log"
+    log_path = (logs_dir / "uvicorn.log") if args.production_artifacts else (art / "uvicorn.log")
+    if args.production_artifacts:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "video": str(video),
+        "camera_id": args.camera_id,
+        "task_id": args.task_id,
+        "width": w,
+        "height": h,
+        "production_artifacts": args.production_artifacts,
+        "areaPosition": json.loads(area),
+    }
+    (art / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     log_f = log_path.open("w")
     proc = subprocess.Popen(
         [
@@ -147,6 +231,7 @@ def main() -> int:
             return 1
 
         _http(base, "POST", "/cameras", body={"cameras": [{"id": cam, "url": str(video)}]})
+        print("areaPosition:", area)
         _http(
             base,
             "POST",
@@ -216,6 +301,17 @@ def main() -> int:
         print("saved_annotated_frames:", len(jpegs))
         print("jsonl_event_files:", len(jsonl))
         print("annotated_stream_mp4:", mp4_path, "exists:", mp4_path.is_file(), "bytes:", mp4_path.stat().st_size if mp4_path.is_file() else 0)
+        for jf in jsonl[:5]:
+            nlines = sum(1 for ln in jf.read_text().splitlines() if ln.strip())
+            print(f"  events {jf.name}: {nlines} line(s)")
+        caps = list((art / "captures").rglob("*.jpg")) + list((art / "captures").rglob("*.jpeg"))
+        scns = list((art / "scenes").rglob("*.jpg")) + list((art / "scenes").rglob("*.jpeg"))
+        crops = list((art / "gallery").rglob("*.jpg")) + list((art / "gallery").rglob("*.jpeg"))
+        print("evidence_captures:", len(caps), "evidence_scenes:", len(scns), "gallery_crops:", len(crops))
+        if args.production_artifacts:
+            alog = logs_dir / "app.log"
+            print("logs/uvicorn.log:", log_path, "bytes:", log_path.stat().st_size if log_path.is_file() else 0)
+            print("logs/app.log:", alog, "bytes:", alog.stat().st_size if alog.is_file() else 0)
         print("final_status_row:", json.dumps(r_final, indent=2))
         return 0
     finally:

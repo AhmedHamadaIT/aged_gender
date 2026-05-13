@@ -1,17 +1,119 @@
-# BoT-SORT tuned for fixed / slow-pan RTSP: disables sparse optical-flow GMC that
-# logs heavily when texture is poor ("not enough matching points").
+# =============================================================================
+# BoT-SORT — EyeGo AI Platform (Jetson Orin NX, fixed / slow-pan RTSP)
+# =============================================================================
+#
+# Tuning goals
+#   1. Eliminate ID switching after brief occlusion  → ReID + tighter gates
+#   2. Prevent noisy/transient detections spawning new track IDs → min_hits
+#   3. Suppress sparseOptFlow log-spam on low-texture scenes    → gmc: none
+#   4. Safe offline startup on air-gapped Jetson                → pin ONNX path
+#
+# Runtime override (systemd unit or docker-compose env):
+#   REID_MODEL_ONNX=/opt/eyego/weights/osnet_x0_25.onnx
+# =============================================================================
 
 tracker_type: botsort
-track_high_thresh: 0.25
-track_low_thresh: 0.1
-new_track_thresh: 0.25
-track_buffer: 30
-match_thresh: 0.8
+
+# ---------------------------------------------------------------------------
+# Detection confidence gates
+# ---------------------------------------------------------------------------
+# Primary gate — only detections above this score enter the high-conf
+# association stage.  0.22 is intentionally low to catch partially occluded
+# cashiers / chefs; raise to 0.25 if ghost tracks appear.
+track_high_thresh: 0.22
+
+# Secondary gate — detections between low and high thresholds are used
+# only to *recover* an already-active track, never to start a new one.
+track_low_thresh: 0.10
+
+# New-track birth threshold.  Raised above track_high_thresh so that a
+# single noisy frame cannot spawn a permanent track ID.  A detection must
+# score ≥ 0.35 AND satisfy min_hits before a track is confirmed.
+new_track_thresh: 0.35
+
+# ---------------------------------------------------------------------------
+# Track lifecycle
+# ---------------------------------------------------------------------------
+# Frames a track can go unmatched before its slot is recycled.
+# 120 frames ≈ 4 s @ 30 fps — covers full-body occlusion by shelving units
+# or other cashiers passing in front of the ROI.
+track_buffer: 120
+
+# Consecutive hit requirement before a tentative track is promoted to
+# "confirmed" and published via SSE.  Prevents one-frame false positives
+# (reflections, motion blur) from appearing in the event stream.
+min_hits: 3
+
+# Explicit alias used by some Ultralytics BoT-SORT builds.  Keep in sync
+# with track_buffer to avoid version-dependent ambiguity.
+max_time_lost: 120
+
+# ---------------------------------------------------------------------------
+# IoU / Kalman association
+# ---------------------------------------------------------------------------
+# Cost-matrix threshold for the Hungarian assignment step.
+# 0.7 → allows ~30 % box drift between frames; reduces incorrect merges
+# when two people stand close together.
+match_thresh: 0.7
+
+# Fuse detection confidence into the IoU distance matrix.
+# Keep True — YOLO NMS output has variable scores; fusing prevents
+# high-IoU but low-confidence matches from winning over better candidates.
 fuse_score: True
 
+# IoU proximity gate applied *before* appearance matching.
+# Tightened 0.5 → 0.30 for fixed cameras: in a static scene there is no
+# camera motion to explain large spatial jumps, so a tighter gate removes
+# cross-frame false candidates before ReID even runs.
+proximity_thresh: 0.30
+
+# ---------------------------------------------------------------------------
+# Appearance / ReID gate
+# ---------------------------------------------------------------------------
+# Cosine-distance threshold for the ReID embedding comparison.
+# Lower value = stricter gate (only strong appearance matches accepted).
+# 0.50 → 0.40: reduces accidental ID reuse between people wearing similar
+# uniforms / hairnets — the dominant failure mode in the cashier pipeline.
+appearance_thresh: 0.40
+
+# ---------------------------------------------------------------------------
+# Global Motion Compensation
+# ---------------------------------------------------------------------------
+# Disabled for fixed cameras.  sparseOptFlow produces heavy "not enough
+# matching points" log output when the scene has low texture (plain walls,
+# uniform countertops).  Re-enable here — or via a separate TRACKER_YAML —
+# only if the camera pans or tilts.
+#
+# Supported values: none | sparseOptFlow | orb | ecc | sof
 gmc_method: none
 
-proximity_thresh: 0.5
-appearance_thresh: 0.8
-with_reid: False
+# ---------------------------------------------------------------------------
+# ReID model
+# ---------------------------------------------------------------------------
+# Enables the Ultralytics BoT-SORT ReID branch.  Primary fix for ID
+# switching after occlusion: appearance embeddings supplement Kalman IoU
+# matching so a re-entering person is linked to their existing track ID.
+with_reid: True
+
+# "auto" is the Ultralytics default and will attempt an online download of
+# osnet_x0_25 weights at startup.  On an air-gapped Jetson this causes a
+# silent hang.
+#
+# Resolution: export osnet_x0_25 to ONNX once and set the env var:
+#   REID_MODEL_ONNX=/opt/eyego/weights/osnet_x0_25.onnx
+#
+# The EmbeddingWorker in ml-server reads REID_MODEL_ONNX first; "auto"
+# here acts only as a fallback for environments that do have internet.
 model: auto
+
+# ---------------------------------------------------------------------------
+# Kalman filter — advanced (Ultralytics defaults kept; documented for ref)
+# ---------------------------------------------------------------------------
+# These are not exposed in the standard YAML but can be patched at runtime
+# via the BotSORT constructor if needed.
+#
+# cov_R_diag: [1,1,10,10]      # measurement noise (x,y,w,h)
+# cov_Q_diag: [1,1,1,1,0.01,0.01,0.0001]  # process noise
+#
+# For slow-moving cashiers behind a fixed camera the defaults are fine.
+# If you see jitter in bounding-box smoothing, reduce cov_R_diag[2,3].

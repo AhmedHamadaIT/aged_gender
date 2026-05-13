@@ -55,6 +55,10 @@ except ImportError:
 # Minimum confidence / variance to emit crop to embedding worker
 _EMBED_CONF_THRESHOLD = float(os.getenv("EMBED_CONF_THRESHOLD", "0.45"))
 _EMBED_MIN_VARIANCE = float(os.getenv("FRAME_MIN_VARIANCE", "8.0"))
+# Minimum Laplacian variance for sharpness gate — rejects motion-blurred crops
+# that would corrupt the ReID gallery. Lower = more permissive; 15.0 is a safe
+# default for 480p edge feeds. Set EMBED_MIN_SHARPNESS=0 to disable.
+_EMBED_MIN_SHARPNESS = float(os.getenv("EMBED_MIN_SHARPNESS", "15.0"))
 
 # Live JPEG / preview scale tiers (corrupt rate + optional WS backpressure).
 LIVE_QUALITY_LADDER = (
@@ -208,14 +212,24 @@ class FrameBus:
         self._padding    = int(os.getenv("REID_PADDING", "10"))
 
         model_path   = os.getenv("YOLO_MODEL", "yolov8n.pt")
-        conf         = float(os.getenv("CONF_THRESHOLD", "0.35"))
+        conf         = float(os.getenv("CONF_THRESHOLD", "0.45"))
+        # NMS IoU: higher → suppress fewer overlapping boxes (better for crowded groups).
+        iou          = float(os.getenv("IOU_THRESHOLD", "0.55"))
         _device_raw  = os.getenv("DEVICE", "0")
         device       = int(_device_raw) if _device_raw.isdigit() else _device_raw
         _classes_raw = os.getenv("FILTER_CLASSES", "")
         classes      = [int(c.strip()) for c in _classes_raw.split(",") if c.strip()] or None
 
+        try:
+            self._max_det = max(1, int(os.getenv("YOLO_MAX_DET", "300")))
+        except ValueError:
+            self._max_det = 300
+        _imgsz_raw = os.getenv("YOLO_IMGSZ", "").strip()
+        self._imgsz: Optional[int] = int(_imgsz_raw) if _imgsz_raw.isdigit() else None
+
         self._model   = YOLO(model_path, task="detect")
         self._conf    = conf
+        self._iou     = iou
         self._device  = device
         self._classes = classes
         self._names   = self._model.names
@@ -1008,15 +1022,30 @@ class FrameBus:
                 t_after_task_enc = time.perf_counter()
 
                 # ── BoT-SORT tracking ──────────────────────────────────────────
-                results = self._model.track(
-                    resized_frame,
-                    persist  = True,          # keeps track state across frames
-                    tracker  = self._tracker_yaml,
-                    conf     = self._conf,
-                    classes  = self._classes,
-                    device   = self._device,
-                    verbose  = False,
-                )
+                try:
+                    _track_kw: Dict[str, Any] = {
+                        "persist": True,  # keeps track state across frames
+                        "tracker": self._tracker_yaml,
+                        "conf": self._conf,
+                        "iou": self._iou,
+                        "classes": self._classes,
+                        "device": self._device,
+                        "verbose": False,
+                        "max_det": self._max_det,
+                    }
+                    if self._imgsz is not None:
+                        _track_kw["imgsz"] = self._imgsz
+                    results = self._model.track(resized_frame, **_track_kw)
+                except RuntimeError as _track_err:
+                    log.error(
+                        "[%s] model.track() error — resetting tracker state: %s",
+                        self.camera_id, _track_err,
+                    )
+                    try:
+                        self._model.reset()
+                    except Exception:
+                        pass
+                    continue
 
                 t_after_yolo = time.perf_counter()
                 detections = self._parse_tracks(results)
@@ -1315,6 +1344,15 @@ class FrameBus:
                     self._embed_skipped += 1
                     self._track_state[tid] = state
                     continue
+
+                # Laplacian sharpness gate — rejects motion-blurred crops before
+                # they reach the ONNX embedding worker and corrupt the ReID gallery.
+                if _EMBED_MIN_SHARPNESS > 0:
+                    lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                    if lap_var < _EMBED_MIN_SHARPNESS:
+                        self._embed_skipped += 1
+                        self._track_state[tid] = state
+                        continue
 
                 # Deterministic filename: 1 file per track per camera
                 crop_path = os.path.join(self._crop_dir, f"track_{tid}.jpg")

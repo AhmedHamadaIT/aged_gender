@@ -37,6 +37,13 @@ areaPosition element:
     "point"    : [{"x": int, "y": int}, {"x": int, "y": int}],
     "direction": int   # 0=bidirectional, 1=A→B, 2=B→A
 }
+
+Environment (optional tuning):
+- CROSSLINE_ANCHOR_POINT=bottom|center — bottom uses bbox bottom-center (feet) for
+  line-side tests; better for doorway / floor lines in crowds. Default: bottom.
+- CROSSLINE_SIDE_STATE_TTL_FRAMES=N — keep per-track line-side memory for N frames
+  after the track last appeared (occlusion / missed detections). Default: 90.
+  Set to 0 to restore immediate purge when a track is absent from a frame.
 """
 
 import os
@@ -44,7 +51,7 @@ import json
 import hashlib
 import time
 from datetime import datetime, timezone
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List, Set
 
 import cv2
 
@@ -96,6 +103,15 @@ class CrossLineTask:
 
         # Per-track line-side state: {track_id (int): {line_id (str): side (int)}}
         self._track_sides: Dict[int, Dict[str, int]] = {}
+        # Last frame_id each track was seen (FrameBus payload). Retain side state across
+        # short occlusions / missed detections so crossings are not lost or double-counted.
+        self._track_last_seen: Dict[int, int] = {}
+        self._side_state_ttl_frames = max(
+            0, int(os.getenv("CROSSLINE_SIDE_STATE_TTL_FRAMES", "90"))
+        )
+        self._fallback_frame_seq = 0
+        _anchor = os.getenv("CROSSLINE_ANCHOR_POINT", "bottom").strip().lower()
+        self._use_bottom_anchor = _anchor in ("bottom", "foot", "feet")
 
         # Age/Gender — loaded only when enableAttrDetect is true
         self._age_gender = None
@@ -115,7 +131,9 @@ class CrossLineTask:
 
         print(
             f"[CrossLine/{self.task_id}] Ready — "
-            f"{len(self.lines)} line(s), attr={self.enable_attr}"
+            f"{len(self.lines)} line(s), attr={self.enable_attr}, "
+            f"anchor={'bottom' if self._use_bottom_anchor else 'center'}, "
+            f"side_ttl_frames={self._side_state_ttl_frames}"
         )
 
     # ── Main entry point ──────────────────────────────────────────────────────
@@ -135,25 +153,37 @@ class CrossLineTask:
                 frame_cache = task_frame_bgr(payload)
             return frame_cache
 
-        persons = [
+        persons: List = [
             d for d in detection.get("items", [])
             if d.class_name == "person"
             and d.confidence >= self.threshold
             and d.track_id != -1            # skip detections with no track yet
         ]
 
-        events          = []
-        active_track_ids = set()
+        events: List = []
+        active_track_ids: Set[int] = set()
+        raw_fid = payload.get("frame_id")
+        if raw_fid is None:
+            self._fallback_frame_seq += 1
+            frame_id = self._fallback_frame_seq
+        else:
+            try:
+                frame_id = int(raw_fid)
+            except (TypeError, ValueError):
+                self._fallback_frame_seq += 1
+                frame_id = self._fallback_frame_seq
 
         for det in persons:
             track_id = det.track_id
             active_track_ids.add(track_id)
+            self._track_last_seen[track_id] = frame_id
 
             if track_id not in self._track_sides:
                 self._track_sides[track_id] = {}
 
+            anchor = self._crossing_anchor(det)
             for line in self.lines:
-                crossing_dir = self._check_crossing(track_id, det.center, line)
+                crossing_dir = self._check_crossing(track_id, anchor, line)
                 if crossing_dir is None:
                     continue
 
@@ -172,19 +202,18 @@ class CrossLineTask:
                 self._persist(event, _frame_bgr(), det, line, crossing_dir)
                 events.append(event)
 
-        # Purge side-state for tracks no longer in the frame
-        self._track_sides = {k: v for k, v in self._track_sides.items() if k in active_track_ids}
+        self._purge_stale_track_state(frame_id, active_track_ids)
 
         return events
 
     # ── Line crossing ─────────────────────────────────────────────────────────
 
-    def _check_crossing(self, track_id: int, centroid: Tuple, line: dict) -> Optional[int]:
+    def _check_crossing(self, track_id: int, point: Tuple[int, int], line: dict) -> Optional[int]:
         p1  = (line["point"][0]["x"], line["point"][0]["y"])
         p2  = (line["point"][1]["x"], line["point"][1]["y"])
         lid = line["line_id"]
 
-        new_side  = _line_side(centroid, p1, p2)
+        new_side  = _line_side(point, p1, p2)
         if new_side == 0:
             return None
 
@@ -202,6 +231,35 @@ class CrossLineTask:
         if direction_cfg == crossing_dir:
             return crossing_dir
         return None
+
+    def _crossing_anchor(self, det) -> Tuple[int, int]:
+        """Point used for line-side tests: foot/bottom-mid for counting, else bbox center."""
+        if self._use_bottom_anchor:
+            return ((det.x1 + det.x2) // 2, int(det.y2))
+        return det.center
+
+    def _purge_stale_track_state(self, frame_id: int, active_track_ids: Set[int]) -> None:
+        if self._side_state_ttl_frames <= 0:
+            # Legacy behaviour: drop side memory as soon as the track is absent.
+            self._track_sides = {
+                k: v for k, v in self._track_sides.items() if k in active_track_ids
+            }
+            self._track_last_seen = {
+                k: v for k, v in self._track_last_seen.items() if k in active_track_ids
+            }
+            return
+
+        ttl = self._side_state_ttl_frames
+        for tid in list(self._track_sides.keys()):
+            if tid in active_track_ids:
+                continue
+            last = self._track_last_seen.get(tid)
+            if last is None:
+                self._track_sides.pop(tid, None)
+                continue
+            if frame_id - last > ttl:
+                self._track_sides.pop(tid, None)
+                self._track_last_seen.pop(tid, None)
 
     # ── Attribute detection ───────────────────────────────────────────────────
 

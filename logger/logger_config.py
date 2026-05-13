@@ -14,8 +14,8 @@ class Logger:
             # Avoid adding handlers multiple times
             if not cls._logger.hasHandlers():
                 # Create handlers for file and console
-                log_file_path = "./logger/app.log"
-                os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+                log_file_path = os.getenv("LOG_APP_FILE", "./logger/app.log").strip() or "./logger/app.log"
+                os.makedirs(os.path.dirname(log_file_path) or ".", exist_ok=True)
 
                 file_handler = logging.FileHandler(log_file_path)
                 console_handler = logging.StreamHandler()

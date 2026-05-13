@@ -20,7 +20,7 @@ Output:
 
 import os
 from dataclasses import dataclass
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import cv2
 import numpy as np
@@ -28,9 +28,13 @@ from dotenv import load_dotenv
 from ultralytics import YOLO
 
 from logger.logger_config import Logger
-import os
-from dotenv import load_dotenv
+
 load_dotenv()
+
+# Resolve the same default tracker YAML as FrameBus so IDs are consistent
+# across all code paths (services/ lives one level below the project root).
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_DEFAULT_TRACKER_YAML = os.path.join(_repo_root, "cfg", "trackers", "botsort_stable.yaml")
 log = Logger.get_logger(__name__)
 
 COLORS = [
@@ -80,7 +84,6 @@ class Detection:
             "width"     : self.width,
             "height"    : self.height,
             "track_id"  : self.track_id,
-            "track_id"  : self.track_id,
         }
 
 
@@ -104,6 +107,13 @@ class DetectorService:
 
         self.model = YOLO(model_path, task="detect")
         self.names = self.model.names
+        self._iou = float(os.getenv("IOU_THRESHOLD", "0.55"))
+        try:
+            self._max_det = max(1, int(os.getenv("YOLO_MAX_DET", "300")))
+        except ValueError:
+            self._max_det = 300
+        _imgsz_raw = os.getenv("YOLO_IMGSZ", "").strip()
+        self._imgsz: Optional[int] = int(_imgsz_raw) if _imgsz_raw.isdigit() else None
 
         from utils.ml_backend import require_gpu_device_if_configured, resolve_ultralytics_device
 
@@ -116,15 +126,23 @@ class DetectorService:
     def __call__(self, context: Dict[str, Any]) -> Dict[str, Any]:
         frame   = context["data"]["frame"]
         context["data"]["clean_frame"] = frame.copy() 
-        results = self.model.track(
-            frame,
-            conf    = self.conf,
-            device  = self.device,
-            classes = self.classes,
-            persist  = True, 
-            tracker = "bytetrack.yaml",
-            verbose = False,
+        _tracker_env = os.getenv("TRACKER_YAML", "").strip()
+        _tracker = _tracker_env or (
+            _DEFAULT_TRACKER_YAML if os.path.isfile(_DEFAULT_TRACKER_YAML) else "botsort.yaml"
         )
+        _kw: Dict[str, Any] = {
+            "conf": self.conf,
+            "device": self.device,
+            "classes": self.classes,
+            "persist": True,
+            "tracker": _tracker,
+            "verbose": False,
+            "iou": self._iou,
+            "max_det": self._max_det,
+        }
+        if self._imgsz is not None:
+            _kw["imgsz"] = self._imgsz
+        results = self.model.track(frame, **_kw)
 
         detections = []
         for result in results:
@@ -135,7 +153,7 @@ class DetectorService:
                 if score < self.conf:
                     continue
 
-                track_id = int(box.id[0]) if box.id is not None else None
+                track_id = int(box.id[0]) if box.id is not None else -1
 
                 cls_id         = int(box.cls[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
@@ -164,7 +182,7 @@ class DetectorService:
         out = frame.copy()
         for det in detections:
             color = COLORS[det.class_id % len(COLORS)]
-            id_str = f"ID:{det.track_id} " if det.track_id is not None else ""
+            id_str = f"ID:{det.track_id} " if det.track_id >= 0 else ""
             label  = f"{id_str}{det.class_name} {det.confidence:.2f}"
 
             cv2.rectangle(out, (det.x1, det.y1), (det.x2, det.y2), color, 2)

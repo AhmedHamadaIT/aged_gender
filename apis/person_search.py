@@ -31,10 +31,10 @@ class PersonSearchResource(BaseResource):
         """
         Takes an uploaded image file, extracts bytes, and searches the vector DB.
         """
-        if getattr(self.person_search_service, "model", None) is None:
+        if not self.person_search_service.is_ready():
             raise HTTPException(
                 status_code=503,
-                detail="Person search is unavailable — OSNet model not loaded (check REID_MODEL_PATH).",
+                detail="Person search is unavailable — set REID_MODEL_ONNX or REID_MODEL_PATH.",
                 headers=_SERVICE_UNAVAILABLE_HEADERS,
             )
         if not file.content_type.startswith("image/"):

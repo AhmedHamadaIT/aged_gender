@@ -285,6 +285,11 @@ async def live_frames_ws(websocket: WebSocket, camera_id: str) -> None:
     Query param ``last_seq`` (optional): replay buffered frames with sequence
     greater than this value after connect (best-effort ring buffer).
     """
+    if reason := validate_camera_id(camera_id):
+        await websocket.accept()
+        await websocket.close(code=1008, reason=reason)
+        return
+
     await websocket.accept()
 
     last_seq = 0

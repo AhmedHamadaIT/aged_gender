@@ -94,8 +94,13 @@ services:
       - RTSP_BACKEND=${RTSP_BACKEND:-auto}
       - RTSP_GSTREAMER=${RTSP_GSTREAMER:-true}
       # YOLO / BoT-SORT in FrameBus: 0 = first NVIDIA GPU (see .env.example). Use cpu without a GPU.
+      # Override YOLO_MODEL in .env to point to a TensorRT .engine file on Jetson:
+      #   YOLO_MODEL=models/yolov8n.engine
       - DEVICE=${DEVICE:-0}
-      - YOLO_MODEL=${YOLO_MODEL:-yolov8n.pt}
+      - YOLO_MODEL=${YOLO_MODEL:-models/yolov8n.engine}
+      - CONF_THRESHOLD=${CONF_THRESHOLD:-0.45}
+      - IOU_THRESHOLD=${IOU_THRESHOLD:-0.45}
+      - EMBED_MIN_SHARPNESS=${EMBED_MIN_SHARPNESS:-15.0}
       - LIVE_ANNOTATION_MODE=${LIVE_ANNOTATION_MODE:-opencv}
       # Hardware decode (Jetson): auto uses /etc/nv_tegra_release or device-tree; true forces hw map; false = CPU.
       # Override decoder names if your ffmpeg build uses nvmpi instead of v4l2m2m (see .env.example).

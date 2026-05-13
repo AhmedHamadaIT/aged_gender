@@ -431,7 +431,7 @@ async def person_search(file: UploadFile = File(...), top_k: int = Form(10)):
 
 @app.get("/person_search/health")
 def person_search_health():
-    ready = getattr(person_search_api.person_search_service, "model", None) is not None
+    ready = person_search_api.person_search_service.is_ready()
     return {"model_loaded": ready, "status": "ok" if ready else "unavailable"}
 
 
