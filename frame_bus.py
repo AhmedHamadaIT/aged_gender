@@ -32,7 +32,7 @@ import hashlib
 import queue as _queue
 from collections import deque
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -193,6 +193,7 @@ class FrameBus:
         frame_seq_counter: Any = None,         # multiprocessing.Value('Q') for live frames
         frame_seq_lock: Any = None,
         bus_fatal_event: Any = None,           # multiprocessing.Event — set on fatal error
+        live_overlay: Optional[Dict[str, Any]] = None,  # cross-line + cashier zones (see utils/live_stream_overlay.py)
     ):
         self.camera_id       = camera_id
         self.rtsp_url        = rtsp_url
@@ -203,6 +204,13 @@ class FrameBus:
         self._frame_seq_counter = frame_seq_counter
         self._frame_seq_lock = frame_seq_lock
         self._bus_fatal_event = bus_fatal_event
+        self._live_overlay = live_overlay or {}
+        _geom_env = os.getenv("LIVE_STREAM_GEOMETRY_OVERLAY", "true").lower()
+        self._live_stream_geometry_enabled = _geom_env in ("true", "1", "yes")
+        self._live_stream_geometry_active = self._live_stream_geometry_enabled and (
+            bool(self._live_overlay.get("cross_lines"))
+            or bool(self._live_overlay.get("cashier_zones"))
+        )
 
         # Default off: per-frame disk writes fill storage quickly; enable explicitly for debugging.
         self.save_output = os.getenv("SAVE_OUTPUT", "false").lower() in ("true", "1", "yes")
@@ -840,6 +848,75 @@ class FrameBus:
             return results[0].plot(), True
         return self._draw_boxes_opencv(resized_frame, detections), True
 
+    def _draw_live_stream_geometry(self, bgr: np.ndarray) -> None:
+        """Draw cross-line segments and cashier ROI outlines in-place on ``bgr``."""
+        spec = self._live_overlay
+        if not spec:
+            return
+        for ln in spec.get("cross_lines") or []:
+            try:
+                p0 = (int(ln["x0"]), int(ln["y0"]))
+                p1 = (int(ln["x1"]), int(ln["y1"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            cv2.line(bgr, p0, p1, (0, 255, 255), 2, cv2.LINE_AA)
+            label = str(ln.get("label") or "")
+            if label:
+                mx = (p0[0] + p1[0]) // 2
+                my = (p0[1] + p1[1]) // 2
+                cv2.putText(
+                    bgr,
+                    label,
+                    (mx, max(14, my - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+        h, w = bgr.shape[:2]
+        if h < 2 or w < 2:
+            return
+        for zn in spec.get("cashier_zones") or []:
+            pts = zn.get("points_norm") or []
+            if len(pts) < 2:
+                continue
+            pix: List[Tuple[int, int]] = []
+            ok = True
+            for p in pts:
+                if not isinstance(p, (list, tuple)) or len(p) < 2:
+                    ok = False
+                    break
+                try:
+                    fx = float(p[0])
+                    fy = float(p[1])
+                except (TypeError, ValueError):
+                    ok = False
+                    break
+                pix.append((int(fx * w), int(fy * h)))
+            if not ok or len(pix) < 2:
+                continue
+            arr = np.array(pix, dtype=np.int32).reshape((-1, 1, 2))
+            color = zn.get("color_bgr") or (0, 200, 100)
+            try:
+                cb, cg, cr = int(color[0]), int(color[1]), int(color[2])
+            except (TypeError, ValueError, IndexError):
+                cb, cg, cr = 0, 200, 100
+            cv2.polylines(bgr, [arr], True, (cb, cg, cr), 2, cv2.LINE_AA)
+            zlabel = str(zn.get("label") or "")
+            if zlabel:
+                ax, ay = int(pix[0][0]), int(pix[0][1])
+                cv2.putText(
+                    bgr,
+                    zlabel,
+                    (ax + 4, min(h - 2, ay + 18)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48,
+                    (cb, cg, cr),
+                    1,
+                    cv2.LINE_AA,
+                )
+
     def run(self):
         from stream import QUALITY_LADDER, StreamExhausted, StreamGeneratorMetrics, frames
 
@@ -911,6 +988,7 @@ class FrameBus:
             "live_quality_tier": LIVE_QUALITY_LADDER[self._live_quality_tier][2],
             "live_scale": self._live_scale,
             "corrupt_rate_5s": 0.0,
+            "live_stream_geometry_overlay": self._live_stream_geometry_active,
         }
         state_carry: Dict[str, Any] = dict(self.shared_state[self.camera_id])
 
@@ -1070,6 +1148,8 @@ class FrameBus:
                     need_draw,
                     frame_count,
                 )
+                if self._live_stream_geometry_active and need_draw:
+                    self._draw_live_stream_geometry(annotated)
                 t_after_ann = time.perf_counter()
 
                 # Reuse the pre-track JPEG only when the annotated frame IS the raw
@@ -1241,6 +1321,7 @@ class FrameBus:
                         "live_quality_tier": LIVE_QUALITY_LADDER[self._live_quality_tier][2],
                         "live_scale": self._live_scale,
                         "corrupt_rate_5s": round(corrupt_rate, 4),
+                        "live_stream_geometry_overlay": self._live_stream_geometry_active,
                     }
                 )
                 push_state = (

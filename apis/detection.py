@@ -40,6 +40,7 @@ from apis.base import BaseResource
 from apis.cameras import camera_registry
 from apis.tasks import task_registry
 from schemas import DetectionRequest, DetectionStatus, CameraStatus
+from utils.live_stream_overlay import build_live_stream_overlay
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +241,7 @@ class DetectionResource(BaseResource):
             self._task_processes[cam_id][task_id] = p
             p.start()
 
+        live_overlay = build_live_stream_overlay(chan_tasks)
         bus = multiprocessing.Process(
             target=_run_frame_bus,
             args=(
@@ -252,6 +254,7 @@ class DetectionResource(BaseResource):
                 self._frame_seq[cam_id],
                 self._frame_seq_locks[cam_id],
                 self._bus_fatal_events[cam_id],
+                live_overlay,
             ),
             daemon=True,
         )
@@ -375,6 +378,7 @@ class DetectionResource(BaseResource):
                 p.start()
                 started_tasks.append(task_id)
 
+            live_overlay = build_live_stream_overlay(chan_tasks)
             # One FrameBus per camera — fans frames out to all task queues
             bus = multiprocessing.Process(
                 target=_run_frame_bus,
@@ -388,6 +392,7 @@ class DetectionResource(BaseResource):
                     self._frame_seq[chan_id],
                     self._frame_seq_locks[chan_id],
                     self._bus_fatal_events[chan_id],
+                    live_overlay,
                 ),
                 daemon=True,
             )
@@ -489,6 +494,7 @@ def _run_frame_bus(
     frame_seq=None,
     frame_seq_lock=None,
     bus_fatal_event=None,
+    live_overlay=None,
 ):
     from frame_bus import FrameBus
 
@@ -502,6 +508,7 @@ def _run_frame_bus(
         frame_seq_counter=frame_seq,
         frame_seq_lock=frame_seq_lock,
         bus_fatal_event=bus_fatal_event,
+        live_overlay=live_overlay,
     ).run()
 
 

@@ -32,6 +32,8 @@ GENDER_LABELS = ["Female", "Male"]
 AGE_LABELS    = ["Young", "MiddleAged", "Senior", "Elderly"]
 
 PADDING = int(os.getenv("AGE_GENDER_PADDING", "10"))
+# Reject placeholder / truncated files (empty ONNX in repo until Drive download).
+_MIN_ONNX_BYTES = max(256, int(os.getenv("AGE_GENDER_MIN_MODEL_BYTES", "512")))
 
 
 # ─────────────────────────────────────────────
@@ -65,6 +67,17 @@ class AgeGenderService:
 
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"[AGE_GENDER] Model not found: {model_path}")
+        try:
+            sz = os.path.getsize(model_path)
+        except OSError as e:
+            raise FileNotFoundError(f"[AGE_GENDER] Cannot stat model: {model_path} ({e})") from e
+        if sz < _MIN_ONNX_BYTES:
+            raise ValueError(
+                f"[AGE_GENDER] Model file too small ({sz} bytes < {_MIN_ONNX_BYTES}): {model_path}. "
+                "The repo placeholder may be empty. Fix: copy a real best_aged_gender_6.onnx from your "
+                "model bundle, run `python3 tools/download_models.py` (public Drive), or for dev only "
+                "`python3 tools/build_dummy_age_gender_onnx.py -o models/best_aged_gender_6.onnx`."
+            )
 
         from utils.onnx_runtime import create_inference_session
 

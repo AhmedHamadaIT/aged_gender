@@ -96,6 +96,12 @@ def main() -> int:
         help="DEBUG logging, app.log under <artifact>/logs/ (LOG_APP_FILE), uvicorn.log there too, "
         "SAVE_JPEG_QUALITY=80, queue warn interval like compose.",
     )
+    ap.add_argument(
+        "--disable-attr-detect",
+        action="store_true",
+        help="Turn off detailConfig.enableAttrDetect (age/gender on crossings). Default is ON — "
+        "the harness used to send empty detailConfig so AgeGender never loaded.",
+    )
     args = ap.parse_args()
 
     video = args.video.expanduser().resolve()
@@ -135,11 +141,16 @@ def main() -> int:
 
     log_level = os.environ.get("LOG_LEVEL", "DEBUG" if args.production_artifacts else "WARNING")
 
+    device_raw = os.environ.get("DEVICE", "cpu")
+
     env = {
         **os.environ,
         "LOG_LEVEL": log_level,
-        "DEVICE": os.environ.get("DEVICE", "cpu"),
+        "DEVICE": device_raw,
         "YOLO_MODEL": os.environ.get("YOLO_MODEL", str(root / "models" / "yolov8n.pt")),
+        "AGE_GENDER_MODEL": os.environ.get(
+            "AGE_GENDER_MODEL", str(root / "models" / "best_aged_gender_6.onnx")
+        ),
         "CONF_THRESHOLD": os.environ.get("CONF_THRESHOLD", "0.35"),
         "FILTER_CLASSES": os.environ.get("FILTER_CLASSES", "0"),
         "WIDTH": str(w),
@@ -173,6 +184,10 @@ def main() -> int:
         env["LOG_APP_FILE"] = os.environ.get("LOG_APP_FILE", str(logs_dir / "app.log"))
         env["PYTHONUNBUFFERED"] = os.environ.get("PYTHONUNBUFFERED", "1")
 
+    if "ONNX_EXECUTION_PROVIDERS_ORDER" not in os.environ:
+        if str(device_raw).strip().lower() == "cpu":
+            env["ONNX_EXECUTION_PROVIDERS_ORDER"] = "cpu_only"
+
     port = args.port
     cam = args.camera_id
     task_id = args.task_id
@@ -187,6 +202,7 @@ def main() -> int:
         "width": w,
         "height": h,
         "production_artifacts": args.production_artifacts,
+        "enable_attr_detect": not args.disable_attr_detect,
         "areaPosition": json.loads(area),
     }
     (art / "run_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -232,6 +248,12 @@ def main() -> int:
 
         _http(base, "POST", "/cameras", body={"cameras": [{"id": cam, "url": str(video)}]})
         print("areaPosition:", area)
+        detail = (
+            {"enableAttrDetect": False, "enableReid": False}
+            if args.disable_attr_detect
+            else {"enableAttrDetect": True, "enableReid": False}
+        )
+        print("detailConfig:", detail)
         _http(
             base,
             "POST",
@@ -244,7 +266,7 @@ def main() -> int:
                 "enable": True,
                 "threshold": 30,
                 "areaPosition": area,
-                "detailConfig": {},
+                "detailConfig": detail,
                 "validWeekday": [
                     "MONDAY",
                     "TUESDAY",
@@ -304,6 +326,30 @@ def main() -> int:
         for jf in jsonl[:5]:
             nlines = sum(1 for ln in jf.read_text().splitlines() if ln.strip())
             print(f"  events {jf.name}: {nlines} line(s)")
+        if jsonl and not args.disable_attr_detect:
+            attrs_found = 0
+            unknown_only = 0
+            for jf in jsonl:
+                for ln in jf.read_text().splitlines():
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        ev = json.loads(ln)
+                        att = (ev.get("person") or {}).get("attributes") or {}
+                        g, a = att.get("gender"), att.get("age")
+                        if g and g != "Unknown" and a and a != "Unknown":
+                            attrs_found += 1
+                        elif g == "Unknown" and a == "Unknown":
+                            unknown_only += 1
+                    except json.JSONDecodeError:
+                        pass
+            print(
+                "age_gender_in_events: non-Unknown pairs:",
+                attrs_found,
+                "Unknown-only events:",
+                unknown_only,
+            )
         caps = list((art / "captures").rglob("*.jpg")) + list((art / "captures").rglob("*.jpeg"))
         scns = list((art / "scenes").rglob("*.jpg")) + list((art / "scenes").rglob("*.jpeg"))
         crops = list((art / "gallery").rglob("*.jpg")) + list((art / "gallery").rglob("*.jpeg"))

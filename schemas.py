@@ -43,6 +43,7 @@ class CameraStatus(BaseModel):
     live_jpeg_quality         : Optional[int] = None
     task_queue_jpeg_quality   : Optional[int] = None
     redis_circuit_state       : Optional[str] = None
+    live_stream_geometry_overlay: Optional[bool] = None
 
 
 class DetectionStatus(BaseModel):

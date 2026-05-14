@@ -55,6 +55,7 @@ def select_onnx_execution_providers(
     - ``tensorrt_first`` (default): TensorRT -> CUDA -> CPU
     - ``cuda_first``: CUDA -> TensorRT -> CPU (helps some Jetson ORT builds where TRT EP misbehaves)
     - ``cuda_only``: CUDA -> CPU (no TensorRT; set ``ONNX_ALLOW_TENSORRT=0`` for the same effect)
+    - ``cpu_only``: CPU only (use with ``DEVICE=cpu`` / hosts without GPU ORT providers)
     """
     if os.getenv("ONNX_ALLOW_TENSORRT", "1").lower() not in (
         "1",
@@ -71,6 +72,14 @@ def select_onnx_execution_providers(
         allow_tensorrt = False
 
     available = set(ort.get_available_providers())
+    if order == "cpu_only":
+        if "CPUExecutionProvider" in available:
+            return ["CPUExecutionProvider"]
+        log.warning(
+            "[ONNX] cpu_only requested but CPUExecutionProvider missing; using fallback list"
+        )
+        return ["CPUExecutionProvider"]
+
     selected: List[ProviderEntry] = []
 
     trt: List[ProviderEntry] = []

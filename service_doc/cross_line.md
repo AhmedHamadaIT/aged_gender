@@ -29,6 +29,8 @@ Implementation: `services/cross_line.py` (`CrossLineTask`).
 | `detailConfig.enableReid` | Reserved |
 | `validWeekday`, `validStartTime`, `validEndTime` | Schedule window (ms from midnight for start/end) |
 
+**Common pitfall:** omitting `detailConfig` or sending `{}` leaves `enableAttrDetect` at its schema default **`false`**, so **`AgeGenderService` is never constructed** and every crossing event will show `gender` / `age` as `"Unknown"`. Set `"detailConfig": {"enableAttrDetect": true}` when you want ONNX age/gender on crossings (requires a valid `models/best_aged_gender_6.onnx` and a working ONNX Runtime; for CPU-only hosts set `ONNX_EXECUTION_PROVIDERS_ORDER=cpu_only`).
+
 ### `areaPosition` line element
 
 Coordinates are **pixel** values in the **camera frame** (same space as model detections).

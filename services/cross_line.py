@@ -115,9 +115,18 @@ class CrossLineTask:
 
         # Age/Gender — loaded only when enableAttrDetect is true
         self._age_gender = None
+        self._age_gender_load_error: Optional[str] = None
         if self.enable_attr:
-            from services.age_gender import AgeGenderService
-            self._age_gender = AgeGenderService()
+            try:
+                from services.age_gender import AgeGenderService
+
+                self._age_gender = AgeGenderService()
+            except Exception as e:
+                self._age_gender_load_error = str(e)
+                print(
+                    f"[CrossLine/{self.task_id}] AgeGenderService disabled: {e}",
+                    flush=True,
+                )
 
         # Local storage
         self._capture_dir = os.getenv("CAPTURE_DIR", "/local/storage/captures")
@@ -131,9 +140,12 @@ class CrossLineTask:
 
         print(
             f"[CrossLine/{self.task_id}] Ready — "
-            f"{len(self.lines)} line(s), attr={self.enable_attr}, "
+            f"{len(self.lines)} line(s), attr={self.enable_attr}"
+            f"{' (model loaded)' if self.enable_attr and self._age_gender else ''}"
+            f"{' (model FAILED: ' + self._age_gender_load_error + ')' if self._age_gender_load_error else ''}, "
             f"anchor={'bottom' if self._use_bottom_anchor else 'center'}, "
-            f"side_ttl_frames={self._side_state_ttl_frames}"
+            f"side_ttl_frames={self._side_state_ttl_frames}",
+            flush=True,
         )
 
     # ── Main entry point ──────────────────────────────────────────────────────
