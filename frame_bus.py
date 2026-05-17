@@ -1196,7 +1196,7 @@ class FrameBus:
                 # saturated past TASK_QUEUE_HIGHWATER to avoid cascading lag.
                 # Coalescing (drop-oldest) handles individual queue fullness;
                 # highwater skipping reduces total inference work under load.
-                if self._task_queues and self._task_queue_highwater < 1.0:
+                if self.task_queues and self._task_queue_highwater < 1.0:
                     try:
                         max_fill = max(
                             q.qsize() / max(1, self._task_queue_maxsize)
