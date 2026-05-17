@@ -68,6 +68,78 @@ LIVE_QUALITY_LADDER = (
     (50, 0.4, "minimal"),
 )
 
+# Live stream cross-line overlay (BGR): dark blue, thick line so it stays visible on busy frames.
+_LIVE_CROSS_LINE_BGR = (140, 35, 12)
+_LIVE_CROSS_LINE_THICKNESS = max(1, int(os.getenv("LIVE_CROSS_LINE_THICKNESS", "3")))
+
+
+def _patch_tracker_yaml(base_yaml: str, camera_id: str) -> str:
+    """
+    Return the path to a tracker YAML that incorporates env-variable overrides
+    for BoT-SORT / ByteTrack thresholds without editing the checked-in YAML.
+
+    Environment variables (all optional):
+        BOTSORT_TRACK_HIGH_THRESH  — high confidence gate (default 0.5)
+        BOTSORT_TRACK_LOW_THRESH   — low confidence gate  (default 0.1)
+        BOTSORT_NEW_TRACK_THRESH   — min conf for new track (default 0.6)
+        BOTSORT_TRACK_BUFFER       — max frames to keep a lost track (default 30)
+        BOTSORT_MATCH_THRESH       — IOU match threshold (default 0.8)
+        BOTSORT_GMC_ALGORITHM      — motion compensation: sparseOptFlow|orb|none
+        BOTSORT_WITH_REID          — 0/1 whether ReID is active (default 0)
+
+    When no overrides are set the original yaml path is returned unchanged so
+    there is zero overhead on unmodified deployments.
+    """
+    overrides = {}
+    _map = {
+        "BOTSORT_TRACK_HIGH_THRESH": ("track_high_thresh", float),
+        "BOTSORT_TRACK_LOW_THRESH":  ("track_low_thresh",  float),
+        "BOTSORT_NEW_TRACK_THRESH":  ("new_track_thresh",  float),
+        "BOTSORT_TRACK_BUFFER":      ("track_buffer",      int),
+        "BOTSORT_MATCH_THRESH":      ("match_thresh",      float),
+        "BOTSORT_GMC_ALGORITHM":     ("gmc_method",        str),
+        "BOTSORT_WITH_REID":         ("with_reid",         lambda v: bool(int(v))),
+    }
+    for env_key, (yaml_key, cast) in _map.items():
+        val = os.getenv(env_key, "").strip()
+        if val:
+            try:
+                overrides[yaml_key] = cast(val)
+            except (ValueError, TypeError):
+                pass
+
+    if not overrides:
+        return base_yaml
+
+    import tempfile
+    import yaml  # ultralytics bundles pyyaml
+
+    try:
+        with open(base_yaml) as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except Exception:
+        cfg = {}
+
+    cfg.update(overrides)
+
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=f"_botsort_{camera_id}.yaml",
+            delete=False,
+            dir=os.path.dirname(base_yaml) or None,
+        )
+        yaml.dump(cfg, tmp)
+        tmp.close()
+        log.info(
+            "[%s] tracker YAML patched: %s → %s (overrides=%s)",
+            camera_id, base_yaml, tmp.name, overrides,
+        )
+        return tmp.name
+    except Exception as exc:
+        log.warning("[%s] tracker YAML patch failed (%s) — using base YAML", camera_id, exc)
+        return base_yaml
+
 
 class CorruptionDetector:
     """Fast multi-check gate for HEVC decode glitches before JPEG / YOLO."""
@@ -194,6 +266,7 @@ class FrameBus:
         frame_seq_lock: Any = None,
         bus_fatal_event: Any = None,           # multiprocessing.Event — set on fatal error
         live_overlay: Optional[Dict[str, Any]] = None,  # cross-line + cashier zones (see utils/live_stream_overlay.py)
+        bus_ready_event: Any = None,           # multiprocessing.Event — set after YOLO loads
     ):
         self.camera_id       = camera_id
         self.rtsp_url        = rtsp_url
@@ -204,6 +277,7 @@ class FrameBus:
         self._frame_seq_counter = frame_seq_counter
         self._frame_seq_lock = frame_seq_lock
         self._bus_fatal_event = bus_fatal_event
+        self._bus_ready_event = bus_ready_event
         self._live_overlay = live_overlay or {}
         _geom_env = os.getenv("LIVE_STREAM_GEOMETRY_OVERLAY", "true").lower()
         self._live_stream_geometry_enabled = _geom_env in ("true", "1", "yes")
@@ -247,6 +321,20 @@ class FrameBus:
         require_gpu_device_if_configured(
             resolve_ultralytics_device(), "FrameBus"
         )
+
+        log.info(
+            "[%s] FrameBus: YOLO model loaded from %s (device=%s conf=%.2f iou=%.2f)",
+            camera_id, model_path, device, conf, iou,
+        )
+
+        # Signal to the parent process (apis/detection.py) that YOLO init succeeded.
+        # Parent waits on this event (step 8 of the validation sequence).
+        if self._bus_ready_event is not None:
+            try:
+                self._bus_ready_event.set()
+                log.info("[%s] FrameBus: bus_ready_event set (model loaded)", camera_id)
+            except Exception:
+                log.warning("[%s] FrameBus: could not set bus_ready_event", camera_id)
 
         # ── Best-crop-per-track state ─────────────────────────────────────
         # { track_id: {"best_area": int, "last_frame": int} }
@@ -294,13 +382,24 @@ class FrameBus:
 
         self._frames_dropped = 0
         self._frames_passed  = 0
+        self._frames_skipped_load = 0   # frames skipped due to queue highwater pressure
         self._embed_skipped  = 0
         self._embed_passed   = 0
+
+        # Highwater fraction: when ANY task queue exceeds this fill ratio the
+        # current frame is dropped before YOLO inference to shed load.
+        # Set TASK_QUEUE_HIGHWATER=1.0 to disable early skipping.
+        self._task_queue_highwater = self._env_float_clamped(
+            "TASK_QUEUE_HIGHWATER", 0.85, 0.0, 1.0
+        )
 
         _tracker_env = os.getenv("TRACKER_YAML", "").strip()
         self._tracker_yaml = _tracker_env or (
             _DEFAULT_TRACKER_YAML if os.path.isfile(_DEFAULT_TRACKER_YAML) else "botsort.yaml"
         )
+        # Allow per-process tracker threshold overrides without editing the YAML.
+        # These are written into a temp YAML that shadows the base file when set.
+        self._tracker_yaml = _patch_tracker_yaml(self._tracker_yaml, camera_id)
 
         # Wall-clock spacing between yielded frames (EMA) — jitter / stall indicator for metrics.
         self._metrics_last_wall_t: Optional[float] = None
@@ -859,7 +958,7 @@ class FrameBus:
                 p1 = (int(ln["x1"]), int(ln["y1"]))
             except (KeyError, TypeError, ValueError):
                 continue
-            cv2.line(bgr, p0, p1, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.line(bgr, p0, p1, _LIVE_CROSS_LINE_BGR, _LIVE_CROSS_LINE_THICKNESS, cv2.LINE_AA)
             label = str(ln.get("label") or "")
             if label:
                 mx = (p0[0] + p1[0]) // 2
@@ -870,8 +969,8 @@ class FrameBus:
                     (mx, max(14, my - 4)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.45,
-                    (0, 255, 255),
-                    1,
+                    _LIVE_CROSS_LINE_BGR,
+                    2,
                     cv2.LINE_AA,
                 )
         h, w = bgr.shape[:2]
@@ -948,6 +1047,7 @@ class FrameBus:
             "error"           : None,
             "stream_quality"  : _q0,
             "frames_dropped"  : 0,
+            "frames_skipped_load": 0,
             "drop_rate"       : 0.0,
             "decode_error_rate": 0.0,
             "task_queue_drops": 0,
@@ -1090,6 +1190,33 @@ class FrameBus:
                     )
 
                 t_after_resize = time.perf_counter()
+
+                # ── Highwater frame-skip ───────────────────────────────────────
+                # Drop this frame before YOLO inference when ANY task queue is
+                # saturated past TASK_QUEUE_HIGHWATER to avoid cascading lag.
+                # Coalescing (drop-oldest) handles individual queue fullness;
+                # highwater skipping reduces total inference work under load.
+                if self._task_queues and self._task_queue_highwater < 1.0:
+                    try:
+                        max_fill = max(
+                            q.qsize() / max(1, self._task_queue_maxsize)
+                            for q in self.task_queues.values()
+                        )
+                        if max_fill >= self._task_queue_highwater:
+                            self._frames_skipped_load += 1
+                            self._frames_dropped += 1
+                            if self._frames_skipped_load % 30 == 1:
+                                log.warning(
+                                    "[%s] highwater skip: queue fill=%.0f%% "
+                                    "(total_skipped=%d, TASK_QUEUE_HIGHWATER=%.2f)",
+                                    self.camera_id,
+                                    max_fill * 100.0,
+                                    self._frames_skipped_load,
+                                    self._task_queue_highwater,
+                                )
+                            continue
+                    except Exception:
+                        pass
 
                 _, buf = cv2.imencode(
                     ".jpg",
@@ -1280,6 +1407,7 @@ class FrameBus:
                         "decode_error_rate": decode_error_rate,
                         "task_queue_drops": self._frames_dropped,
                         "task_queue_drop_rate": task_queue_drop_rate,
+                        "frames_skipped_load": self._frames_skipped_load,
                         "task_queue_drops_by_task": dict(
                             self._task_queue_drops_by_task
                         ),

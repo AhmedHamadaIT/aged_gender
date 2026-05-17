@@ -8,8 +8,27 @@ calls the task, and emits each resulting event on exactly one path:
 
   - Redis ``live:event:{camera_id}`` when ``REDIS_URL`` is reachable (SSE via
     ``DetectionSSEBridge._redis_loop`` and ``WS /cameras/.../events``).
-  - Otherwise ``result_queue`` (multiprocessing.Queue) for the SSE bridge’s
+  - Otherwise ``result_queue`` (multiprocessing.Queue) for the SSE bridge's
     ``_bridge_loop`` (no Redis / local dev).
+
+Lifecycle (step 9 of the validation sequence):
+  1. Instantiate the task algorithm from TASK_REGISTRY.
+  2. Set ``worker_ready_event`` so the parent knows init succeeded.
+  3. Enter the processing loop — polling ``task_queue`` and ``task_validity_map``.
+  4. When ``stop_event`` is set or the task is invalidated, drain the buffer
+     and exit cleanly.
+
+Runtime invalidation:
+  Every ``TASK_VALIDITY_POLL_SEC`` (default 2 s) the worker checks
+  ``task_validity_map[task_id]``.  If the task was disabled or deleted the
+  worker emits a structured PIPELINE_ERROR event on SSE/result_queue so
+  clients are notified, then exits cleanly without crashing.
+
+Structured errors:
+  All error paths now emit ``PIPELINE_ERROR`` events through the same
+  ``_emit_event`` path as business events so SSE clients always see them.
+  ``print()`` to stderr is preserved only as a last-resort fallback when the
+  emit path itself is broken.
 
 Tasks are responsible for their own local persistence (JSONL, images).
 """
@@ -30,6 +49,13 @@ except ImportError:
 from resilience.circuit_breaker import CircuitBreaker
 from resilience.event_buffer import EventBuffer
 from resilience.sequencer import next_seq
+from utils.error_codes import (
+    WORKER_INIT_FAILED,
+    TASK_REMOVED_RUNTIME,
+    TASK_DISABLED_RUNTIME,
+    WORKER_ERROR,
+    RuntimeError_ as StructuredRuntimeError,
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -49,7 +75,7 @@ def _make_redis_client():
         client.ping()
         return client
     except Exception as exc:
-        print(f"[task_worker] Redis unavailable — event publishing disabled ({exc})")
+        print(f"[task_worker] Redis unavailable — event publishing disabled ({exc})", flush=True)
         return None
 
 
@@ -87,25 +113,53 @@ def run_task_worker(
     shared_state=None,
     event_seq_counter=None,
     event_seq_lock=None,
+    *,
+    worker_ready_event=None,
+    task_validity_map=None,
 ):
     """
     Entry point for each task worker process.
 
     Args:
-        camera_id    : Camera identifier (string version of channelId).
-        task_config  : Full task config dict from TaskRegistry.
-        task_queue   : Input queue — receives payload dicts from FrameBus.
-        result_queue : Output queue — events are pushed here for SSE streaming.
-        stop_event   : Shared event; set when this camera should stop.
-        shared_state : Optional manager dict for resilience metrics.
-        event_seq_counter / event_seq_lock : Optional per-camera event sequencing.
+        camera_id          : Camera identifier (string version of channelId).
+        task_config        : Full task config dict from TaskRegistry.
+        task_queue         : Input queue — receives payload dicts from FrameBus.
+        result_queue       : Output queue — events are pushed here for SSE streaming.
+        stop_event         : Shared event; set when this camera should stop.
+        shared_state       : Optional manager dict for resilience metrics.
+        event_seq_counter  : Optional per-camera event sequencing.
+        event_seq_lock     : Optional lock for event sequencing.
+        worker_ready_event : Set after successful task instantiation (step 9).
+        task_validity_map  : Manager dict polled for runtime task invalidation.
     """
     from services import TASK_REGISTRY
 
     algorithm = task_config["algorithmType"]
-    task_id   = task_config["taskId"]
+    task_id   = str(task_config["taskId"])
 
-    task = TASK_REGISTRY[algorithm](task_config)
+    # ── Step 9: Instantiate task and signal ready ──────────────────────────
+    try:
+        task = TASK_REGISTRY[algorithm](task_config)
+    except KeyError:
+        _record_init_failure(
+            shared_state, camera_id, task_id,
+            f"Unknown algorithmType '{algorithm}'. "
+            f"Supported: {sorted(TASK_REGISTRY.keys())}",
+        )
+        return
+    except Exception as exc:
+        _record_init_failure(
+            shared_state, camera_id, task_id,
+            f"Task init failed ({algorithm}): {exc}",
+        )
+        return
+
+    if worker_ready_event is not None:
+        try:
+            worker_ready_event.set()
+        except Exception:
+            pass
+
     redis_client = _make_redis_client()
     use_redis = redis_client is not None
     redis_channel = f"live:event:{camera_id}"
@@ -120,10 +174,14 @@ def run_task_worker(
     drain_interval = max(0.05, _env_int("EVENT_BUFFER_DRAIN_INTERVAL_MS", 200) / 1000.0)
     redis_retries = max(1, _env_int("REDIS_EVENT_RETRY", 3))
     retry_sleep = max(0.01, float(os.getenv("REDIS_EVENT_RETRY_SLEEP_SEC", "0.05")))
+    validity_poll_sec = max(0.5, float(os.getenv("TASK_VALIDITY_POLL_SEC", "2.0")))
     last_drain = time.monotonic()
     last_metrics = time.monotonic()
+    last_validity_check = time.monotonic()
 
-    print(f"[{camera_id}/{algorithm}/{task_id}] Worker started.")
+    print(f"[{camera_id}/{algorithm}/{task_id}] Worker started.", flush=True)
+
+    # ── Emit helpers ──────────────────────────────────────────────────────
 
     def _emit_event(event: dict) -> None:
         nonlocal redis_client, last_drain
@@ -150,46 +208,51 @@ def run_task_worker(
             if not published:
                 ok, reason = event_buffer.append(event)
                 if not ok:
-                    payload = {
-                        "level": "warning",
-                        "component": "task_worker",
-                        "camera_id": camera_id,
-                        "task_id": task_id,
-                        "reason": reason,
-                        "event": event,
-                    }
-                    print(
-                        json.dumps(
-                            {"resilience": True, "event_drop": payload},
-                            default=str,
-                        ),
-                        file=sys.stderr,
-                    )
+                    _log_event_drop(camera_id, task_id, reason, event)
         else:
             try:
                 result_queue.put_nowait(event)
             except Exception:
                 ok, reason = event_buffer.append(event)
                 if not ok:
-                    print(
-                        json.dumps(
-                            {
-                                "resilience": True,
-                                "event_drop": {
-                                    "camera_id": camera_id,
-                                    "task_id": task_id,
-                                    "reason": reason,
-                                },
-                            },
-                            default=str,
-                        ),
-                        file=sys.stderr,
-                    )
+                    _log_event_drop(camera_id, task_id, reason, event)
 
         now = time.monotonic()
         if now - last_drain >= drain_interval:
             last_drain = now
             _drain_buffer()
+
+    def _emit_error_event(
+        error_code: str,
+        message: str,
+        *,
+        stage: Optional[str] = None,
+        details: Optional[dict] = None,
+    ) -> None:
+        """Emit a structured PIPELINE_ERROR event on the SSE/result-queue path."""
+        err = StructuredRuntimeError(
+            error_code=error_code,
+            message=message,
+            camera_id=camera_id,
+            task_id=task_id,
+            stage=stage,
+            details=details or {},
+        )
+        try:
+            _emit_event(err.to_event_dict())
+        except Exception as emit_exc:
+            print(
+                json.dumps({
+                    "pipeline_error": True,
+                    "error_code": error_code,
+                    "message": message,
+                    "camera_id": camera_id,
+                    "task_id": task_id,
+                    "emit_exception": str(emit_exc),
+                }, default=str),
+                file=sys.stderr,
+                flush=True,
+            )
 
     def _drain_buffer() -> None:
         nonlocal redis_client
@@ -208,8 +271,7 @@ def run_task_worker(
                     break
             if replayed:
                 _update_shared_resilience(
-                    shared_state,
-                    camera_id,
+                    shared_state, camera_id,
                     events_buffered=len(event_buffer),
                     circuit_state="n/a",
                     events_replayed=replayed,
@@ -237,14 +299,39 @@ def run_task_worker(
                 break
         if replayed:
             _update_shared_resilience(
-                shared_state,
-                camera_id,
+                shared_state, camera_id,
                 events_buffered=len(event_buffer),
                 circuit_state=redis_breaker.state_label(),
                 events_replayed=replayed,
             )
 
+    # ── Processing loop ───────────────────────────────────────────────────
+
     while not stop_event.is_set():
+
+        # ── Runtime task validity check ────────────────────────────────
+        now_mono = time.monotonic()
+        if (
+            task_validity_map is not None
+            and now_mono - last_validity_check >= validity_poll_sec
+        ):
+            last_validity_check = now_mono
+            invalidation_reason = _check_task_validity(task_validity_map, task_id)
+            if invalidation_reason is not None:
+                code, msg = invalidation_reason
+                print(
+                    f"[{camera_id}/{algorithm}/{task_id}] Runtime invalidation: {msg}",
+                    flush=True,
+                )
+                _emit_error_event(
+                    code,
+                    f"Annotation stopped: {msg}",
+                    stage="runtime_validity",
+                    details={"task_id": task_id, "algorithm": algorithm,
+                             "camera_id": camera_id},
+                )
+                break
+
         try:
             payload = task_queue.get(timeout=1.0)
         except _queue.Empty:
@@ -254,8 +341,7 @@ def run_task_worker(
             if time.monotonic() - last_metrics >= 1.0:
                 last_metrics = time.monotonic()
                 _update_shared_resilience(
-                    shared_state,
-                    camera_id,
+                    shared_state, camera_id,
                     events_buffered=len(event_buffer),
                     circuit_state=redis_breaker.state_label(),
                 )
@@ -265,8 +351,17 @@ def run_task_worker(
 
         try:
             events = task(payload) or []
-        except Exception as e:
-            print(f"[{camera_id}/{algorithm}/{task_id}] Error: {e}")
+        except Exception as exc:
+            err_msg = (
+                f"[{camera_id}/{algorithm}/{task_id}] Frame processing error: {exc}"
+            )
+            print(err_msg, file=sys.stderr, flush=True)
+            _emit_error_event(
+                WORKER_ERROR,
+                f"Frame processing error in task {task_id} ({algorithm}): {exc}",
+                stage="frame_processing",
+                details={"frame_id": payload.get("frame_id"), "exception": str(exc)},
+            )
             continue
 
         for event in events:
@@ -275,8 +370,7 @@ def run_task_worker(
         if time.monotonic() - last_metrics >= 1.0:
             last_metrics = time.monotonic()
             _update_shared_resilience(
-                shared_state,
-                camera_id,
+                shared_state, camera_id,
                 events_buffered=len(event_buffer),
                 circuit_state=redis_breaker.state_label(),
             )
@@ -284,4 +378,76 @@ def run_task_worker(
     # Final drain
     _drain_buffer()
     event_buffer.close()
-    print(f"[{camera_id}/{algorithm}/{task_id}] Worker stopped.")
+    print(f"[{camera_id}/{algorithm}/{task_id}] Worker stopped.", flush=True)
+
+
+# ── Module-level helpers (outside run_task_worker to keep it picklable) ────────
+
+def _check_task_validity(task_validity_map, task_id: str) -> Optional[tuple]:
+    """
+    Check whether the task is still valid.
+    Returns ``(error_code, message)`` if invalid, ``None`` if valid.
+    """
+    try:
+        entry = task_validity_map.get(task_id)
+        if entry is None:
+            return (
+                TASK_REMOVED_RUNTIME,
+                f"task {task_id} was removed from the registry during live stream.",
+            )
+        if not entry.get("exists", True):
+            return (
+                TASK_REMOVED_RUNTIME,
+                f"task {task_id} was removed from the registry during live stream.",
+            )
+        if not entry.get("enabled", True):
+            return (
+                TASK_DISABLED_RUNTIME,
+                f"task {task_id} was disabled (enable=false) during live stream.",
+            )
+    except Exception:
+        pass
+    return None
+
+
+def _record_init_failure(
+    shared_state: Any, camera_id: str, task_id: str, message: str
+) -> None:
+    """Write a structured init-failure entry to shared_state so the parent can report it."""
+    print(
+        json.dumps({
+            "pipeline_error": True,
+            "error_code": WORKER_INIT_FAILED,
+            "camera_id": camera_id,
+            "task_id": task_id,
+            "message": message,
+        }, default=str),
+        file=sys.stderr,
+        flush=True,
+    )
+    if shared_state is None:
+        return
+    try:
+        row = dict(shared_state.get(camera_id, {}))
+        row["worker_init_error"] = message
+        row["error"] = message
+        row["state_updated_at"] = time.time()
+        shared_state[camera_id] = row
+    except Exception:
+        pass
+
+
+def _log_event_drop(camera_id: str, task_id: str, reason: str, event: dict) -> None:
+    print(
+        json.dumps({
+            "resilience": True,
+            "event_drop": {
+                "camera_id": camera_id,
+                "task_id": task_id,
+                "reason": reason,
+                "event": event,
+            },
+        }, default=str),
+        file=sys.stderr,
+        flush=True,
+    )

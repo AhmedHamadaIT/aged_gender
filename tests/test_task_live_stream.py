@@ -146,6 +146,19 @@ def _register_task(monkeypatch):
         tasks_mod.task_registry._tasks.pop(tid, None)
 
 
+def test_task_live_route_disabled_task_closes_4005(_register_task):
+    """Disabled task must not open the same preview as an active line task."""
+    _register_task(taskId=88, taskName="disabled_gate", enable=False)
+
+    import app as app_mod
+
+    with TestClient(app_mod.app) as client:
+        with client.websocket_connect("/tasks/disabled_gate/live") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                ws.receive_bytes()
+    assert exc_info.value.code == 4005
+
+
 def test_task_live_route_unknown_name(_register_task):
     """Connecting with an unknown taskName should close with code 4004."""
     import app as app_mod

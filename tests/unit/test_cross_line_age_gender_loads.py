@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 
 import pytest
+
+# Minimal valid areaPosition for tests that don't care about geometry
+_VALID_AREA = json.dumps(
+    [{"line_id": "1", "line_name": "L",
+      "point": [{"x": 0, "y": 0}, {"x": 100, "y": 0}], "direction": 0}]
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 _ONNX = ROOT / "models" / "best_aged_gender_6.onnx"
@@ -95,7 +102,7 @@ def test_cross_line_attr_enabled_but_placeholder_model_fails_cleanly(
             "channelId": "cam_x",
             "enable": True,
             "threshold": 50,
-            "areaPosition": "[]",
+            "areaPosition": _VALID_AREA,
             "detailConfig": {"enableAttrDetect": True, "enableReid": False},
             "validWeekday": [
                 "MONDAY",
@@ -131,7 +138,7 @@ def test_cross_line_skips_age_gender_when_disabled(monkeypatch: pytest.MonkeyPat
             "channelId": "cam_x",
             "enable": True,
             "threshold": 50,
-            "areaPosition": "[]",
+            "areaPosition": _VALID_AREA,
             "detailConfig": {"enableAttrDetect": False},
             "validWeekday": [
                 "MONDAY",

@@ -400,6 +400,7 @@ async def task_live_stream(websocket: WebSocket, task_name: str):
 
     Close codes returned before streaming begins:
       - 4004 — task name not found in the registry
+      - 4005 — task exists but is disabled (``enable=false``)
       - 4009 — task name is ambiguous (shared by multiple tasks)
       - 1011 — Redis is unavailable
 
@@ -415,6 +416,14 @@ async def task_live_stream(websocket: WebSocket, task_name: str):
         await websocket.accept()
         code = 4009 if exc.status_code == 409 else 4004
         await websocket.close(code=code, reason=exc.detail)
+        return
+
+    if not task.get("enable", True):
+        await websocket.accept()
+        await websocket.close(
+            code=4005,
+            reason="Task is disabled; enable it or use /cameras/{camera_id}/live.",
+        )
         return
 
     camera_id = str(task["channelId"])

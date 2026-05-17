@@ -30,6 +30,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from services.cross_line import parse_effective_cross_lines
+
 _CLR_CASHIER_BGR = (0, 200, 100)
 _CLR_CUSTOMER_BGR = (0, 165, 255)
 
@@ -46,6 +48,7 @@ def _count_enabled_cross_line_tasks(chan_tasks: List[dict]) -> int:
 
 
 def _parse_cross_lines_from_tasks(chan_tasks: List[dict]) -> List[dict]:
+    """Pixel segments for FrameBus — same effective lines as ``CrossLineTask``."""
     out: List[dict] = []
     n_line_tasks = _count_enabled_cross_line_tasks(chan_tasks)
     for t in chan_tasks:
@@ -56,15 +59,7 @@ def _parse_cross_lines_from_tasks(chan_tasks: List[dict]) -> List[dict]:
         raw = t.get("areaPosition")
         if raw is None:
             continue
-        if isinstance(raw, list):
-            arr = raw
-        else:
-            try:
-                arr = json.loads(str(raw))
-            except (json.JSONDecodeError, TypeError, ValueError):
-                continue
-        if not isinstance(arr, list):
-            continue
+        effective = parse_effective_cross_lines(raw)
         tid = t.get("taskId")
         tname = t.get("taskName")
         prefix = ""
@@ -72,21 +67,11 @@ def _parse_cross_lines_from_tasks(chan_tasks: List[dict]) -> List[dict]:
             prefix = f"[{tid}] "
         elif n_line_tasks > 1 and tname:
             prefix = f"{tname}: "
-        for i, obj in enumerate(arr):
-            if not isinstance(obj, dict):
-                continue
-            pts = obj.get("point")
-            if not isinstance(pts, list) or len(pts) < 2:
-                continue
-            a, b = pts[0], pts[1]
-            if not isinstance(a, dict) or not isinstance(b, dict):
-                continue
-            try:
-                x0, y0 = int(a["x"]), int(a["y"])
-                x1, y1 = int(b["x"]), int(b["y"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            name = str(obj.get("line_name") or obj.get("line_id") or f"line_{i}")
+        for line in effective:
+            pts = line["point"]
+            x0, y0 = int(pts[0]["x"]), int(pts[0]["y"])
+            x1, y1 = int(pts[1]["x"]), int(pts[1]["y"])
+            name = str(line.get("line_name") or line.get("line_id") or "")
             out.append(
                 {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "label": f"{prefix}{name}"}
             )

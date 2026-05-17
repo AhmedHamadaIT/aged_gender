@@ -7,9 +7,13 @@ Cameras and tasks are configured separately before starting:
   - POST /cameras          → register cameras (camera_id → rtsp_url)
   - POST /api/tasks        → register tasks (algorithmType, channelId, config)
 
-On start, one FrameBus process is spawned per unique channelId, and one
-task worker process is spawned per enabled task. Tasks that share a camera
-share the same FrameBus — the bus fans frames out to each task's queue.
+On start, a strict 10-step validation gate runs before ANY subprocess is
+spawned.  Only after all steps pass are processes created and verified:
+
+  Steps 1–7  : StreamValidator (in-process, synchronous)
+  Step  8    : FrameBus subprocess signals model-ready within timeout
+  Step  9    : Each task worker subprocess signals ready within timeout
+  Step 10    : Annotation / frame processing starts
 
 Routes registered in app.py:
     POST /detection/start   → start all (or one) camera
@@ -41,14 +45,38 @@ from apis.cameras import camera_registry
 from apis.tasks import task_registry
 from schemas import DetectionRequest, DetectionStatus, CameraStatus
 from utils.live_stream_overlay import build_live_stream_overlay
+from utils.error_codes import (
+    ValidationFailure,
+    BUS_INIT_TIMEOUT,
+    WORKER_INIT_TIMEOUT,
+    MODEL_INIT_FAILED,
+    WORKER_INIT_FAILED,
+)
 
 log = logging.getLogger(__name__)
+
+# Init-phase timeouts — how long the parent waits for subprocess ready signals.
+_WORKER_INIT_TIMEOUT_SEC = float(os.getenv("WORKER_INIT_TIMEOUT_SEC", "15.0"))
+_BUS_INIT_TIMEOUT_SEC    = float(os.getenv("BUS_INIT_TIMEOUT_SEC",    "30.0"))
 
 
 def _detection_http_error(status_code: int, detail: str) -> None:
     """Log client errors so server logs show the same message as the JSON ``detail`` field."""
     log.warning("[detection] HTTP %s: %s", status_code, detail)
     raise HTTPException(status_code=status_code, detail=detail)
+
+
+def _validation_failure_response(failure: ValidationFailure) -> None:
+    """Raise 422 Unprocessable Entity carrying the structured ValidationFailure payload."""
+    log.warning(
+        "[detection] validation_failure stage=%d code=%s cam=%s task=%s: %s",
+        failure.stage,
+        failure.error_code,
+        failure.camera_id,
+        failure.task_id,
+        failure.message,
+    )
+    raise HTTPException(status_code=422, detail=failure.to_dict())
 
 
 class DetectionResource(BaseResource):
@@ -64,6 +92,12 @@ class DetectionResource(BaseResource):
         self._result_queue   = self._manager.Queue()
         self._embedding_queue = self._manager.Queue(maxsize=200)
 
+        # task_validity_map: {task_id (str) → {"enabled": bool, "exists": bool}}
+        # Written by API handlers (update_task_validity) when tasks are modified.
+        # Read by task_worker processes every TASK_VALIDITY_POLL_SEC to detect
+        # runtime task removal / disable without full watchdog respawn.
+        self._task_validity_map: object = self._manager.dict()
+
         # Keyed by camera_id (str of channelId)
         self._bus_processes       : Dict[str, multiprocessing.Process]            = {}
         self._task_processes      : Dict[str, Dict[str, multiprocessing.Process]] = {}
@@ -73,10 +107,35 @@ class DetectionResource(BaseResource):
         self._frame_seq           : Dict[str, object] = {}
         self._frame_seq_locks     : Dict[str, object] = {}
         self._bus_fatal_events    : Dict[str, object] = {}
+        self._bus_ready_events    : Dict[str, object] = {}
+        self._worker_ready_events : Dict[str, Dict[str, object]] = {}
         self._event_seq           : Dict[str, object] = {}
         self._event_seq_locks     : Dict[str, object] = {}
         self._watchdog_respawn_times: Dict[str, List[float]] = defaultdict(list)
         self._task_queues_ref: Dict[str, Dict[str, object]] = {}
+
+    # ── Task validity map ─────────────────────────────────────────────────────
+
+    def update_task_validity(
+        self, task_id: str, *, enabled: bool, exists: bool
+    ) -> None:
+        """
+        Called by task API handlers (PUT / DELETE) so running task workers are
+        notified of state changes without requiring a full watchdog respawn.
+        Thread-safe: writes go through the multiprocessing Manager.
+        """
+        try:
+            self._task_validity_map[task_id] = {"enabled": enabled, "exists": exists}
+            log.info(
+                "[detection] task_validity updated: task_id=%s enabled=%s exists=%s",
+                task_id, enabled, exists,
+            )
+        except Exception:
+            log.exception("[detection] update_task_validity failed for task_id=%s", task_id)
+
+    def remove_task_validity(self, task_id: str) -> None:
+        """Mark task as removed — workers will detect this and stop cleanly."""
+        self.update_task_validity(task_id, enabled=False, exists=False)
 
     # ── Status ───────────────────────────────────────────────────────────────
 
@@ -146,11 +205,7 @@ class DetectionResource(BaseResource):
             try:
                 self._restart_channel(str(cam_id))
             except Exception:
-                import logging
-
-                logging.getLogger(__name__).exception(
-                    "watchdog: restart failed for %s", cam_id
-                )
+                log.exception("watchdog: restart failed for %s", cam_id)
 
     def _restart_channel(self, cam_id: str) -> None:
         """Tear down and respawn FrameBus + task workers for one camera."""
@@ -171,12 +226,9 @@ class DetectionResource(BaseResource):
         times.append(now)
         self._watchdog_respawn_times[cam_id] = times
 
-        import logging
-
-        logging.getLogger(__name__).warning(
+        log.warning(
             "resilience_watchdog: restarting channel %s (respawn #%d in window)",
-            cam_id,
-            len(times),
+            cam_id, len(times),
         )
 
         old_stop = self._stop_events.get(cam_id)
@@ -201,29 +253,25 @@ class DetectionResource(BaseResource):
         if not chan_tasks or cam_id not in cameras:
             return
 
-        if cam_id not in self._frame_seq:
-            self._frame_seq[cam_id] = self._manager.Value("Q", 0)
-            self._frame_seq_locks[cam_id] = self._manager.Lock()
-        if cam_id not in self._bus_fatal_events:
-            self._bus_fatal_events[cam_id] = self._manager.Event()
-        if cam_id not in self._event_seq:
-            self._event_seq[cam_id] = self._manager.Value("Q", 0)
-            self._event_seq_locks[cam_id] = self._manager.Lock()
-
-        try:
-            self._bus_fatal_events[cam_id].clear()
-        except Exception:
-            pass
+        self._ensure_channel_ipc(cam_id)
 
         stop_event = self._manager.Event()
         task_queues: Dict[str, object] = {}
         _tq_max = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "256")))
         self._task_processes[cam_id] = {}
+        self._worker_ready_events[cam_id] = {}
 
         for task_cfg in chan_tasks:
             task_id = str(task_cfg["taskId"])
             q = self._manager.Queue(maxsize=_tq_max)
             task_queues[task_id] = q
+            worker_ready = self._manager.Event()
+            self._worker_ready_events[cam_id][task_id] = worker_ready
+            # Refresh validity map
+            self._task_validity_map[task_id] = {
+                "enabled": bool(task_cfg.get("enable", True)),
+                "exists": True,
+            }
             p = multiprocessing.Process(
                 target=run_task_worker,
                 args=(
@@ -236,10 +284,17 @@ class DetectionResource(BaseResource):
                     self._event_seq[cam_id],
                     self._event_seq_locks[cam_id],
                 ),
+                kwargs={
+                    "worker_ready_event": worker_ready,
+                    "task_validity_map": self._task_validity_map,
+                },
                 daemon=True,
             )
             self._task_processes[cam_id][task_id] = p
             p.start()
+
+        bus_ready = self._manager.Event()
+        self._bus_ready_events[cam_id] = bus_ready
 
         live_overlay = build_live_stream_overlay(chan_tasks)
         bus = multiprocessing.Process(
@@ -256,11 +311,13 @@ class DetectionResource(BaseResource):
                 self._bus_fatal_events[cam_id],
                 live_overlay,
             ),
+            kwargs={"bus_ready_event": bus_ready},
             daemon=True,
         )
         self._bus_processes[cam_id] = bus
-        self._stop_events[cam_id] = stop_event
+        self._stop_events[cam_id]   = stop_event
         self._task_queues_ref[cam_id] = task_queues
+
         row = dict(self._shared_state.get(cam_id, {}))
         row["respawn_count"] = int(row.get("respawn_count", 0)) + 1
         row["running"] = True
@@ -270,11 +327,28 @@ class DetectionResource(BaseResource):
         self._shared_state[cam_id] = row
         bus.start()
 
+    def _ensure_channel_ipc(self, cam_id: str) -> None:
+        """Create Manager-backed IPC objects for a channel if not already present."""
+        if cam_id not in self._frame_seq:
+            self._frame_seq[cam_id] = self._manager.Value("Q", 0)
+            self._frame_seq_locks[cam_id] = self._manager.Lock()
+        if cam_id not in self._bus_fatal_events:
+            self._bus_fatal_events[cam_id] = self._manager.Event()
+        if cam_id not in self._event_seq:
+            self._event_seq[cam_id] = self._manager.Value("Q", 0)
+            self._event_seq_locks[cam_id] = self._manager.Lock()
+        try:
+            self._bus_fatal_events[cam_id].clear()
+        except Exception:
+            pass
+
     # ── Start ─────────────────────────────────────────────────────────────────
 
     def _start(self, camera_id: Optional[str] = None, all_channels: bool = False):
         from task_worker import run_task_worker
+        from services.stream_validator import StreamValidator
 
+        validator = StreamValidator(camera_registry, task_registry)
         all_enabled = task_registry.get_enabled()
         tasks   = all_enabled
         cameras = camera_registry.all()
@@ -320,6 +394,13 @@ class DetectionResource(BaseResource):
         for task in tasks:
             channel_tasks[str(task["channelId"])].append(task)
 
+        # ── Step 1–7: Run StreamValidator for EVERY channel before spawning anything ──
+        for chan_id, chan_tasks in channel_tasks.items():
+            rtsp_url = cameras.get(chan_id, "")
+            failure = validator.validate_channel(chan_id, rtsp_url, chan_tasks)
+            if failure:
+                _validation_failure_response(failure)
+
         started_cameras = []
         started_tasks   = []
 
@@ -338,27 +419,30 @@ class DetectionResource(BaseResource):
                     f"Camera '{chan_id}' is already running.",
                 )
 
-            if chan_id not in self._frame_seq:
-                self._frame_seq[chan_id] = self._manager.Value("Q", 0)
-                self._frame_seq_locks[chan_id] = self._manager.Lock()
-            if chan_id not in self._bus_fatal_events:
-                self._bus_fatal_events[chan_id] = self._manager.Event()
-            if chan_id not in self._event_seq:
-                self._event_seq[chan_id] = self._manager.Value("Q", 0)
-                self._event_seq_locks[chan_id] = self._manager.Lock()
+            self._ensure_channel_ipc(chan_id)
 
             stop_event  = self._manager.Event()
             task_queues = {}
 
-            # One task worker process per task
             self._task_processes.setdefault(chan_id, {})
-            # Bounded queue between FrameBus and each task worker. Too small + slow
-            # startup (TRT, 4K decode) causes put_nowait drops; override via TASK_QUEUE_MAXSIZE.
+            self._worker_ready_events.setdefault(chan_id, {})
             _tq_max = max(1, int(os.getenv("TASK_QUEUE_MAXSIZE", "256")))
+
+            # ── Spawn task workers first (they idle on empty queue) ────────
+            task_init_start = time.monotonic()
             for task_cfg in chan_tasks:
                 task_id = str(task_cfg["taskId"])
                 q = self._manager.Queue(maxsize=_tq_max)
                 task_queues[task_id] = q
+
+                worker_ready = self._manager.Event()
+                self._worker_ready_events[chan_id][task_id] = worker_ready
+
+                # Populate validity map so the worker can poll immediately
+                self._task_validity_map[task_id] = {
+                    "enabled": bool(task_cfg.get("enable", True)),
+                    "exists": True,
+                }
 
                 p = multiprocessing.Process(
                     target=run_task_worker,
@@ -372,14 +456,62 @@ class DetectionResource(BaseResource):
                         self._event_seq[chan_id],
                         self._event_seq_locks[chan_id],
                     ),
+                    kwargs={
+                        "worker_ready_event": worker_ready,
+                        "task_validity_map": self._task_validity_map,
+                    },
                     daemon=True,
                 )
                 self._task_processes[chan_id][task_id] = p
                 p.start()
                 started_tasks.append(task_id)
 
+            # ── Step 9: Wait for all task workers to signal ready ──────────
+            for task_cfg in chan_tasks:
+                task_id = str(task_cfg["taskId"])
+                ready_ev = self._worker_ready_events[chan_id][task_id]
+                algorithm = task_cfg.get("algorithmType", "")
+                signalled = ready_ev.wait(timeout=_WORKER_INIT_TIMEOUT_SEC)
+                if not signalled:
+                    log.error(
+                        "[detection] Worker init timeout: cam=%s task=%s algo=%s "
+                        "timeout=%.1fs — killing spawned processes",
+                        chan_id, task_id, algorithm, _WORKER_INIT_TIMEOUT_SEC,
+                    )
+                    self._kill_channel_processes(chan_id, stop_event)
+                    st = dict(self._shared_state.get(chan_id, {}))
+                    init_error = st.get("worker_init_error") or (
+                        f"Worker for task {task_id} ({algorithm}) did not signal "
+                        f"ready within {_WORKER_INIT_TIMEOUT_SEC:.0f}s"
+                    )
+                    failure = ValidationFailure(
+                        stage=9,
+                        stage_name="worker_initialized",
+                        error_code=WORKER_INIT_TIMEOUT,
+                        message=f"Annotation blocked: worker startup failed. {init_error}",
+                        stream_id=chan_id,
+                        camera_id=chan_id,
+                        task_id=task_id,
+                        details={
+                            "algorithm": algorithm,
+                            "timeout_sec": _WORKER_INIT_TIMEOUT_SEC,
+                            "init_error": init_error,
+                        },
+                    )
+                    _validation_failure_response(failure)
+
+            log.info(
+                "[detection] Step 9 passed: all %d task worker(s) ready for cam=%s "
+                "(%.1fs)",
+                len(chan_tasks), chan_id,
+                time.monotonic() - task_init_start,
+            )
+
+            # ── Spawn FrameBus ─────────────────────────────────────────────
+            bus_ready = self._manager.Event()
+            self._bus_ready_events[chan_id] = bus_ready
+
             live_overlay = build_live_stream_overlay(chan_tasks)
-            # One FrameBus per camera — fans frames out to all task queues
             bus = multiprocessing.Process(
                 target=_run_frame_bus,
                 args=(
@@ -394,12 +526,63 @@ class DetectionResource(BaseResource):
                     self._bus_fatal_events[chan_id],
                     live_overlay,
                 ),
+                kwargs={"bus_ready_event": bus_ready},
                 daemon=True,
             )
             self._bus_processes[chan_id] = bus
             self._stop_events[chan_id]   = stop_event
             self._task_queues_ref[chan_id] = task_queues
+
+            bus_init_start = time.monotonic()
             bus.start()
+
+            # ── Step 8: Wait for FrameBus to signal model ready ───────────
+            signalled = bus_ready.wait(timeout=_BUS_INIT_TIMEOUT_SEC)
+            if not signalled:
+                log.error(
+                    "[detection] FrameBus init timeout: cam=%s timeout=%.1fs "
+                    "— killing spawned processes",
+                    chan_id, _BUS_INIT_TIMEOUT_SEC,
+                )
+                stop_event.set()
+                bus.join(timeout=3)
+                if bus.is_alive():
+                    bus.terminate()
+                self._kill_channel_processes(chan_id, stop_event)
+
+                st = dict(self._shared_state.get(chan_id, {}))
+                init_error = st.get("error") or (
+                    f"FrameBus did not signal ready within {_BUS_INIT_TIMEOUT_SEC:.0f}s"
+                )
+                failure = ValidationFailure(
+                    stage=8,
+                    stage_name="model_initialized",
+                    error_code=BUS_INIT_TIMEOUT,
+                    message=f"Annotation blocked: model failed to initialize. {init_error}",
+                    stream_id=chan_id,
+                    camera_id=chan_id,
+                    details={
+                        "timeout_sec": _BUS_INIT_TIMEOUT_SEC,
+                        "init_error": init_error,
+                    },
+                )
+                _validation_failure_response(failure)
+
+            bus_init_elapsed = time.monotonic() - bus_init_start
+            log.info(
+                "[detection] Step 8 passed: FrameBus ready for cam=%s (%.1fs)",
+                chan_id, bus_init_elapsed,
+            )
+
+            # Record init latency in shared_state
+            try:
+                row = dict(self._shared_state.get(chan_id, {}))
+                row["init_latency_ms"] = round(bus_init_elapsed * 1000, 1)
+                row["state_updated_at"] = time.time()
+                self._shared_state[chan_id] = row
+            except Exception:
+                pass
+
             started_cameras.append(chan_id)
 
         # ── Start the shared EmbeddingWorker (if not already running) ─────
@@ -412,11 +595,31 @@ class DetectionResource(BaseResource):
             )
             self._embedding_worker.start()
 
+        log.info(
+            "[detection] All 10 validation+init steps passed. "
+            "cameras=%s tasks=%s — annotation running.",
+            started_cameras, started_tasks,
+        )
+
         return {
             "status" : "started",
             "cameras": started_cameras,
             "tasks"  : started_tasks,
         }
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _kill_channel_processes(self, chan_id: str, stop_event) -> None:
+        """Signal stop and forcibly terminate all processes for a channel."""
+        try:
+            stop_event.set()
+        except Exception:
+            pass
+        for p in list(self._task_processes.get(chan_id, {}).values()):
+            if p.is_alive():
+                p.join(timeout=2)
+                if p.is_alive():
+                    p.terminate()
 
     # ── Zombie reaper ─────────────────────────────────────────────────────────
 
@@ -463,6 +666,7 @@ class DetectionResource(BaseResource):
             for p in self._task_processes.get(cam_id, {}).values():
                 p.join(timeout=5)
             stopped.append(cam_id)
+            log.info("[detection] Camera stopped: cam=%s", cam_id)
 
         # ── Stop EmbeddingWorker if no cameras remain running ─────────────
         still_running = {k: v for k, v in self._bus_processes.items() if v.is_alive()}
@@ -495,21 +699,48 @@ def _run_frame_bus(
     frame_seq_lock=None,
     bus_fatal_event=None,
     live_overlay=None,
+    bus_ready_event=None,
 ):
     from frame_bus import FrameBus
 
-    FrameBus(
-        camera_id,
-        rtsp_url,
-        shared_state,
-        stop_event,
-        task_queues,
-        embedding_queue,
-        frame_seq_counter=frame_seq,
-        frame_seq_lock=frame_seq_lock,
-        bus_fatal_event=bus_fatal_event,
-        live_overlay=live_overlay,
-    ).run()
+    try:
+        bus = FrameBus(
+            camera_id,
+            rtsp_url,
+            shared_state,
+            stop_event,
+            task_queues,
+            embedding_queue,
+            frame_seq_counter=frame_seq,
+            frame_seq_lock=frame_seq_lock,
+            bus_fatal_event=bus_fatal_event,
+            live_overlay=live_overlay,
+            bus_ready_event=bus_ready_event,
+        )
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).error(
+            "[%s] FrameBus init failed (model/GPU): %s", camera_id, exc
+        )
+        try:
+            shared_state[camera_id] = {
+                "camera_id": camera_id,
+                "running": False,
+                "error": str(exc),
+                "error_code": MODEL_INIT_FAILED,
+                "stopped_reason": "model_init_failed",
+                "state_updated_at": __import__("time").time(),
+            }
+        except Exception:
+            pass
+        if bus_fatal_event is not None:
+            try:
+                bus_fatal_event.set()
+            except Exception:
+                pass
+        return
+
+    bus.run()
 
 
 def _run_embedding_worker(embedding_queue, stop_event):

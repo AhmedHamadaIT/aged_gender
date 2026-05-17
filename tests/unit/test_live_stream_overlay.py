@@ -66,6 +66,19 @@ def test_cashier_zones_from_task_area_position_not_file() -> None:
     assert "task 99" in lbls
 
 
+def test_parse_effective_cross_lines_matches_overlay_segment_count() -> None:
+    """Invalid line objects must not produce stream segments without worker lines."""
+    from services.cross_line import parse_effective_cross_lines
+
+    raw = json.dumps(
+        [
+            {"line_id": "ok", "point": [{"x": 1, "y": 2}, {"x": 3, "y": 4}]},
+            {"line_id": "bad", "point": [{"x": "nope", "y": 0}, {"x": 1, "y": 1}]},
+        ]
+    )
+    assert len(parse_effective_cross_lines(raw)) == 1
+
+
 def test_build_cross_line_from_json_string() -> None:
     ap = json.dumps(
         [

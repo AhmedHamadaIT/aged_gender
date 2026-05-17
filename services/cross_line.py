@@ -46,14 +46,17 @@ Environment (optional tuning):
   Set to 0 to restore immediate purge when a track is absent from a frame.
 """
 
+import logging
 import os
 import json
 import hashlib
 import time
 from datetime import datetime, timezone
-from typing import Optional, Dict, Tuple, List, Set
+from typing import Any, Optional, Dict, Tuple, List, Set
 
 import cv2
+
+_log_cl = logging.getLogger(__name__)
 
 from utils import build_image, draw_evidence_scene, make_evidence_paths
 
@@ -79,6 +82,71 @@ def _line_side(point: Tuple, p1: Tuple, p2: Tuple) -> int:
     return 0
 
 
+def parse_effective_cross_lines(area_position: Any) -> List[dict]:
+    """
+    Normalized line definitions used by ``CrossLineTask`` and the live-stream
+    geometry overlay. Entries without two valid ``{x,y}`` points are dropped.
+    ``line_id`` defaults from ``line_name`` or a stable ``line_<index>`` so the
+    worker and preview never disagree on which segments exist.
+    """
+    if area_position is None:
+        return []
+    try:
+        if isinstance(area_position, list):
+            arr = area_position
+        else:
+            s = str(area_position).strip()
+            if not s:
+                return []
+            arr = json.loads(s)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(arr, list):
+        return []
+    out: List[dict] = []
+    for i, obj in enumerate(arr):
+        if not isinstance(obj, dict):
+            continue
+        pts = obj.get("point")
+        if not isinstance(pts, list) or len(pts) < 2:
+            continue
+        a, b = pts[0], pts[1]
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            continue
+        try:
+            x0, y0 = int(a["x"]), int(a["y"])
+            x1, y1 = int(b["x"]), int(b["y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        lid_raw = obj.get("line_id")
+        if isinstance(lid_raw, str):
+            lid_raw = lid_raw.strip()
+        if lid_raw is None or lid_raw == "":
+            ln = obj.get("line_name")
+            if isinstance(ln, str) and ln.strip():
+                lid_raw = ln.strip()
+            else:
+                lid_raw = f"line_{i}"
+        else:
+            lid_raw = str(lid_raw)
+        raw_dir = obj.get("direction", 0)
+        try:
+            direction_cfg = int(raw_dir)
+        except (TypeError, ValueError):
+            direction_cfg = 0
+        if direction_cfg not in (0, 1, 2):
+            direction_cfg = 0
+        out.append(
+            {
+                "line_id": lid_raw,
+                "line_name": str(obj.get("line_name") or ""),
+                "point": [{"x": x0, "y": y0}, {"x": x1, "y": y1}],
+                "direction": direction_cfg,
+            }
+        )
+    return out
+
+
 # ── CrossLine task ────────────────────────────────────────────────────────────
 
 class CrossLineTask:
@@ -94,7 +162,17 @@ class CrossLineTask:
         self.enable_attr = detail.get("enableAttrDetect", False)
         self.enable_reid = detail.get("enableReid", False)   # reserved
 
-        self.lines = self._parse_lines(task_config.get("areaPosition", "[]"))
+        self.lines = parse_effective_cross_lines(task_config.get("areaPosition", "[]"))
+
+        # ── Init-time config validation (step 9 safety net) ──────────────────
+        # The API-time validator already checks this, but we re-validate here so
+        # a worker process started with a stale task config fails loudly at init
+        # rather than silently on the first frame.
+        if not self.lines and self.enable:
+            raise ValueError(
+                f"CrossLineTask {self.task_id} has no valid lines in areaPosition. "
+                f"Provide a JSON array with at least one line (two {{x,y}} points)."
+            )
 
         raw_days            = task_config.get("validWeekday", list(_WEEKDAY_MAP.keys()))
         self.valid_weekdays = {_WEEKDAY_MAP[d] for d in raw_days if d in _WEEKDAY_MAP}
@@ -109,6 +187,26 @@ class CrossLineTask:
         self._side_state_ttl_frames = max(
             0, int(os.getenv("CROSSLINE_SIDE_STATE_TTL_FRAMES", "90"))
         )
+
+        # Reentry grace: when a track reappears after being absent for ≥ this
+        # many frames, its previous side state is preserved but a crossing is
+        # NOT immediately fired even if the new position is on the opposite side.
+        # This prevents false positives on occlusion re-entry.
+        # Set CROSSLINE_REENTRY_GRACE_FRAMES=0 to disable.
+        self._reentry_grace_frames = max(
+            0, int(os.getenv("CROSSLINE_REENTRY_GRACE_FRAMES", "5"))
+        )
+        # {track_id: frame_id_when_track_returned} — tracks under grace period
+        self._reentry_grace_active: Dict[int, int] = {}
+
+        # Crowded scene throttle: when more than this many person detections
+        # arrive in a single frame, keep only the top-N by confidence to avoid
+        # O(N²) crossing checks and reduce ID instability from low-conf ghosts.
+        # Set CROSSLINE_MAX_TRACKS_PER_FRAME=0 to disable.
+        self._max_tracks_per_frame = max(
+            0, int(os.getenv("CROSSLINE_MAX_TRACKS_PER_FRAME", "0"))
+        )
+
         self._fallback_frame_seq = 0
         _anchor = os.getenv("CROSSLINE_ANCHOR_POINT", "bottom").strip().lower()
         self._use_bottom_anchor = _anchor in ("bottom", "foot", "feet")
@@ -123,9 +221,9 @@ class CrossLineTask:
                 self._age_gender = AgeGenderService()
             except Exception as e:
                 self._age_gender_load_error = str(e)
-                print(
-                    f"[CrossLine/{self.task_id}] AgeGenderService disabled: {e}",
-                    flush=True,
+                _log_cl.warning(
+                    "[CrossLine/%s] AgeGenderService disabled: %s",
+                    self.task_id, e,
                 )
 
         # Local storage
@@ -138,14 +236,19 @@ class CrossLineTask:
 
         self._jsonl_path = os.path.join(self._events_dir, f"task_{self.task_id}.jsonl")
 
-        print(
-            f"[CrossLine/{self.task_id}] Ready — "
-            f"{len(self.lines)} line(s), attr={self.enable_attr}"
-            f"{' (model loaded)' if self.enable_attr and self._age_gender else ''}"
-            f"{' (model FAILED: ' + self._age_gender_load_error + ')' if self._age_gender_load_error else ''}, "
-            f"anchor={'bottom' if self._use_bottom_anchor else 'center'}, "
-            f"side_ttl_frames={self._side_state_ttl_frames}",
-            flush=True,
+        _log_cl.info(
+            "[CrossLine/%s] Ready — lines=%d attr=%s model=%s anchor=%s "
+            "side_ttl=%d reentry_grace=%d max_tracks=%s",
+            self.task_id,
+            len(self.lines),
+            self.enable_attr,
+            "loaded" if (self.enable_attr and self._age_gender) else (
+                "FAILED:" + self._age_gender_load_error if self._age_gender_load_error else "n/a"
+            ),
+            "bottom" if self._use_bottom_anchor else "center",
+            self._side_state_ttl_frames,
+            self._reentry_grace_frames,
+            self._max_tracks_per_frame if self._max_tracks_per_frame > 0 else "unlimited",
         )
 
     # ── Main entry point ──────────────────────────────────────────────────────
@@ -172,6 +275,12 @@ class CrossLineTask:
             and d.track_id != -1            # skip detections with no track yet
         ]
 
+        # Crowded scene throttle: keep only top-N highest-confidence tracks
+        if self._max_tracks_per_frame > 0 and len(persons) > self._max_tracks_per_frame:
+            persons = sorted(persons, key=lambda d: d.confidence, reverse=True)[
+                : self._max_tracks_per_frame
+            ]
+
         events: List = []
         active_track_ids: Set[int] = set()
         raw_fid = payload.get("frame_id")
@@ -188,15 +297,44 @@ class CrossLineTask:
         for det in persons:
             track_id = det.track_id
             active_track_ids.add(track_id)
+
+            # Reentry grace: detect tracks that were absent and just reappeared.
+            last_seen = self._track_last_seen.get(track_id)
+            if (
+                last_seen is not None
+                and self._reentry_grace_frames > 0
+                and frame_id - last_seen > self._reentry_grace_frames
+            ):
+                # Track re-entered after an absence longer than the grace window —
+                # record the grace start so crossings are suppressed for the next
+                # _reentry_grace_frames frames while the side state settles.
+                self._reentry_grace_active[track_id] = frame_id
+
             self._track_last_seen[track_id] = frame_id
 
             if track_id not in self._track_sides:
                 self._track_sides[track_id] = {}
 
             anchor = self._crossing_anchor(det)
+
+            # Determine whether this track is in the reentry grace window.
+            grace_start = self._reentry_grace_active.get(track_id)
+            in_grace = (
+                grace_start is not None
+                and self._reentry_grace_frames > 0
+                and frame_id - grace_start < self._reentry_grace_frames
+            )
+            if grace_start is not None and not in_grace:
+                # Grace period expired — remove the marker.
+                self._reentry_grace_active.pop(track_id, None)
+
             for line in self.lines:
                 crossing_dir = self._check_crossing(track_id, anchor, line)
                 if crossing_dir is None:
+                    continue
+                if in_grace:
+                    # Update side state but do NOT fire crossing event — the
+                    # track is still settling after reappearing from occlusion.
                     continue
 
                 attrs = self._get_attributes(
@@ -259,6 +397,9 @@ class CrossLineTask:
             self._track_last_seen = {
                 k: v for k, v in self._track_last_seen.items() if k in active_track_ids
             }
+            self._reentry_grace_active = {
+                k: v for k, v in self._reentry_grace_active.items() if k in active_track_ids
+            }
             return
 
         ttl = self._side_state_ttl_frames
@@ -268,10 +409,12 @@ class CrossLineTask:
             last = self._track_last_seen.get(tid)
             if last is None:
                 self._track_sides.pop(tid, None)
+                self._reentry_grace_active.pop(tid, None)
                 continue
             if frame_id - last > ttl:
                 self._track_sides.pop(tid, None)
                 self._track_last_seen.pop(tid, None)
+                self._reentry_grace_active.pop(tid, None)
 
     # ── Attribute detection ───────────────────────────────────────────────────
 
@@ -386,11 +529,3 @@ class CrossLineTask:
         return self.valid_start_ms <= ms_now <= self.valid_end_ms
 
     # ── Helpers ───────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _parse_lines(area_position: str) -> list:
-        try:
-            return json.loads(area_position) if area_position else []
-        except Exception as e:
-            print(f"[CrossLine] Failed to parse areaPosition: {e}")
-            return []

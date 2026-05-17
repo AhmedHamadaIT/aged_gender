@@ -84,15 +84,18 @@ class TaskConfig(BaseModel):
 # ─────────────────────────────────────────────
 def _validate_cross_line_area_position(area_position: str) -> None:
     """
-    Enabled CROSS_LINE tasks must have areaPosition as a non-empty JSON array
-    of line objects, each with point: [{x,y},{x,y}] (see services/cross_line.py).
+    Enabled CROSS_LINE tasks must have areaPosition that yields at least one
+    effective line — same rules as ``CrossLineTask`` /
+    ``parse_effective_cross_lines`` (see services/cross_line.py).
     """
-    if not area_position or not area_position.strip():
+    from services.cross_line import parse_effective_cross_lines
+
+    if not area_position or not str(area_position).strip():
         raise HTTPException(
             status_code=400,
             detail=(
                 "CROSS_LINE task with enable=true requires a non-empty areaPosition "
-                "JSON array with at least one line (line_id, point with two {x,y} points)."
+                "JSON array with at least one valid line (two {x,y} points per line)."
             ),
         )
     try:
@@ -109,29 +112,14 @@ def _validate_cross_line_area_position(area_position: str) -> None:
                 "CROSS_LINE areaPosition must be a JSON array with at least one line object."
             ),
         )
-    for i, line in enumerate(parsed):
-        if not isinstance(line, dict):
-            raise HTTPException(
-                status_code=400,
-                detail=f"CROSS_LINE areaPosition[{i}] must be an object.",
-            )
-        pts = line.get("point")
-        if not isinstance(pts, list) or len(pts) != 2:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"CROSS_LINE areaPosition[{i}] must have \"point\" as an array of "
-                    "exactly two {{x,y}} objects."
-                ),
-            )
-        for j, p in enumerate(pts):
-            if not isinstance(p, dict) or "x" not in p or "y" not in p:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"CROSS_LINE areaPosition[{i}].point[{j}] must be an object with x and y."
-                    ),
-                )
+    if len(parse_effective_cross_lines(area_position)) < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "CROSS_LINE areaPosition must contain at least one valid line: "
+                "each line needs \"point\" with two {x,y} objects with numeric coordinates."
+            ),
+        )
 
 
 class TaskRegistry:
@@ -215,6 +203,9 @@ class TaskRegistry:
     def on_post(self, config: TaskConfig):
         existed = config.taskId in self._tasks
         task = self.upsert(config)
+        _notify_detection_task_changed(
+            config.taskId, enabled=bool(task.get("enable", True)), exists=True
+        )
         return {"status": "updated" if existed else "created", "task": task}
 
     def on_get_all(self):
@@ -231,11 +222,34 @@ class TaskRegistry:
             )
         self.require(task_id)
         task = self.upsert(config)
+        _notify_detection_task_changed(
+            task_id, enabled=bool(task.get("enable", True)), exists=True
+        )
         return {"status": "updated", "task": task}
 
     def on_delete(self, task_id: int):
         self.remove(task_id)
+        _notify_detection_task_changed(task_id, enabled=False, exists=False)
         return {"status": "deleted", "taskId": task_id}
+
+
+def _notify_detection_task_changed(
+    task_id: int, *, enabled: bool, exists: bool
+) -> None:
+    """
+    Inform the running DetectionResource (if any) that a task was modified or
+    deleted.  This updates the task_validity_map polled by task worker processes
+    so they can stop cleanly without waiting for a full watchdog respawn.
+
+    Uses a late import to avoid circular imports between apis.tasks and
+    apis.detection at module load time.
+    """
+    try:
+        from apis.detection import detection  # noqa: PLC0415
+        if detection is not None:
+            detection.update_task_validity(str(task_id), enabled=enabled, exists=exists)
+    except Exception:
+        pass  # Non-critical: worker will detect on next validity poll cycle
 
 
 # ── Singleton ─────────────────────────────────
