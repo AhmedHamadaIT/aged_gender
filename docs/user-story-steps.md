@@ -53,7 +53,7 @@ flowchart LR
 
 | Step | User action | API / transport |
 |------|-------------|-----------------|
-| 1 | Add camera (id + RTSP URL) | `POST /cameras` |
+| 1 | Add camera (id + RTSP URL) | `POST /cameras` (or `PATCH /cameras/{id}` to change URL only) |
 | 2 | Draw line(s) on canvas | Use `GET /cameras` → `snapshot`; save geometry in **inference pixels** |
 | 3 | Save task | `POST /api/tasks` (`algorithmType`: `CROSS_LINE`, `areaPosition` as JSON **string**) |
 | 4 | Start pipeline | `POST /detection/start?camera_id={id}` |
@@ -104,6 +104,14 @@ Content-Type: application/json
 ```
 
 Flat body is also accepted: `{ "camera_id": "401", "rtsp_url": "rtsp://..." }`.
+
+**Update URL only** (camera already registered):
+
+```bash
+curl -sS -X PATCH "${BASE}/cameras/401" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "rtsp://admin:Aa112233@10.0.3.71:554/Streaming/channels/401"}'
+```
 
 **Verify:** `GET /cameras` → each entry has `id`, `url`, and optional `snapshot` (path to a recent JPEG for the line editor).
 

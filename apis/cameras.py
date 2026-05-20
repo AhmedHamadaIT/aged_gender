@@ -9,6 +9,7 @@ Cameras can be added/removed while detection is running.
 Endpoints (registered in app.py):
     POST   /cameras                  → add one or more cameras
     GET    /cameras                  → list all configured cameras
+    PATCH  /cameras/{cam_id}         → update RTSP URL for one camera
     DELETE /cameras/{cam_id}         → remove a camera
     POST   /cameras/{cam_id}/tasks   → ensure a task uses this camera (updates channelId if needed)
 """
@@ -77,6 +78,21 @@ class CameraSetupRequest(BaseModel):
         if cam_id is not None and url is not None:
             return {"cameras": [{"id": cam_id, "url": url}]}
         return data
+
+
+class CameraPatchRequest(BaseModel):
+    """Body for ``PATCH /cameras/{camera_id}`` — update stream URL only."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    url: str = Field(..., validation_alias=AliasChoices("url", "rtsp_url"))
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _normalize_patch_url(cls, v: Any) -> str:
+        if v is None:
+            raise TypeError("url is required")
+        return normalize_rtsp_source_url(str(v))
 
 
 class CameraTaskLinkBody(BaseModel):
@@ -287,6 +303,22 @@ class CameraRegistry:
         finally:
             if cap is not None:
                 cap.release()
+
+    def on_patch(self, cam_id: str, req: CameraPatchRequest):
+        cam_id_s = str(cam_id)
+        if cam_id_s not in self._cameras:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Camera '{cam_id_s}' not found.",
+            )
+        self._cameras[cam_id_s] = req.url
+        with self._snapshot_lock:
+            self._snapshot_cache.pop(cam_id_s, None)
+        return {
+            "status": "updated",
+            "camera_id": cam_id_s,
+            "url": self._cameras[cam_id_s],
+        }
 
     def on_delete(self, cam_id: str):
         self.remove(cam_id)

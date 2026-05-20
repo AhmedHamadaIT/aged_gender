@@ -395,6 +395,20 @@ List configured cameras as structured rows.
 curl -s "http://<jetson-ip>:9000/cameras"
 ```
 
+### `PATCH /cameras/{cam_id}`
+
+Update the RTSP URL for one registered camera (flat JSON body).
+
+```bash
+export BASE="http://<jetson-ip>:9000"
+
+curl -sS -X PATCH "${BASE}/cameras/cam1" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "rtsp://192.168.1.10/stream"}'
+```
+
+**Response:** `{ "status": "updated", "camera_id": "cam1", "url": "..." }` — **`404`** if the id is not registered.
+
 **Sample JSON response**
 
 ```json

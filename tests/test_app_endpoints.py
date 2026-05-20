@@ -127,6 +127,15 @@ def test_camera_endpoints(client: TestClient, monkeypatch):
     )
     monkeypatch.setattr(
         app_mod.camera_registry,
+        "on_patch",
+        lambda cam_id, req: {
+            "status": "updated",
+            "camera_id": cam_id,
+            "url": req.url,
+        },
+    )
+    monkeypatch.setattr(
+        app_mod.camera_registry,
         "on_delete",
         lambda cam_id: {"status": "removed", "camera_id": cam_id},
     )
@@ -138,6 +147,11 @@ def test_camera_endpoints(client: TestClient, monkeypatch):
     r2 = client.get("/cameras")
     assert r2.status_code == 200
     assert r2.json()["count"] == 1
+
+    r_patch = client.patch("/cameras/cam1", json={"url": "rtsp://cam1-updated"})
+    assert r_patch.status_code == 200
+    assert r_patch.json()["status"] == "updated"
+    assert r_patch.json()["url"] == "rtsp://cam1-updated"
 
     r3 = client.delete("/cameras/cam1")
     assert r3.status_code == 200

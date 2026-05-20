@@ -5,6 +5,7 @@ Application entry point — owns all routes and startup.
 
 Workflow:
     1. POST /cameras                  → register cameras (id → rtsp_url)
+       PATCH /cameras/{id}            → update one camera RTSP URL
     2. POST /api/tasks                → register tasks (algorithmType, channelId, config)
        POST /cameras/{id}/tasks       → optional: point an existing task at this camera
     3. POST /detection/start          → start processing
@@ -50,6 +51,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Reque
 from fastapi.responses import FileResponse, StreamingResponse
 
 from apis.cameras import (
+    CameraPatchRequest,
     CameraSetupRequest,
     CameraTaskLinkBody,
     camera_link_task,
@@ -187,6 +189,11 @@ def evidence_file(file_path: str):
             return FileResponse(str(candidate), media_type="image/jpeg")
 
     raise HTTPException(status_code=404, detail=f"Evidence not found: {file_path}")
+
+
+@app.patch("/cameras/{cam_id}")
+def camera_patch(cam_id: str, req: CameraPatchRequest):
+    return camera_registry.on_patch(cam_id, req)
 
 
 @app.delete("/cameras/{cam_id}")

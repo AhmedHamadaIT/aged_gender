@@ -12,6 +12,7 @@ Cameras can be added or removed while the server runs; starting detection valida
 |--------|------|-------------|
 | POST | `/cameras` | Add or update one or more cameras |
 | GET | `/cameras` | List all cameras |
+| PATCH | `/cameras/{cam_id}` | Update RTSP URL for one registered camera |
 | DELETE | `/cameras/{cam_id}` | Remove a camera by id |
 
 ## Request schema (POST)
@@ -37,6 +38,30 @@ curl -sS -X POST "${BASE}/cameras" \
 
 ```bash
 curl -sS "${BASE}/cameras"
+```
+
+## curl — update URL (PATCH)
+
+Use when the camera is already registered and you only need to change the stream URL (no re-`POST` with full batch).
+
+```bash
+curl -sS -X PATCH "${BASE}/cameras/1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "rtsp://192.168.1.10/stream"
+  }'
+```
+
+Alias: `rtsp_url` instead of `url`. Returns **`404`** if the camera id is not registered.
+
+**Response:**
+
+```json
+{
+  "status": "updated",
+  "camera_id": "1",
+  "url": "rtsp://192.168.1.10/stream"
+}
 ```
 
 ## curl — delete

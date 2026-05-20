@@ -117,6 +117,33 @@ Each camera includes a **`snapshot`** field: a server-local filesystem path to a
 }
 ```
 
+### Update one camera URL (PATCH)
+
+Use when the camera id is already registered and only the RTSP URL changes. Prefer this over re-`POST`ing the full `cameras` array for a single edit.
+
+```bash
+export BASE="http://localhost:9000"
+
+curl -sS -X PATCH "${BASE}/cameras/1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "rtsp://192.168.1.10/stream"
+  }'
+```
+
+`rtsp_url` is accepted as an alias for `url`. Extra fields are ignored. **`404`** if the camera is not registered.
+
+**Response:**
+```json
+{
+  "status": "updated",
+  "camera_id": "1",
+  "url": "rtsp://192.168.1.10/stream"
+}
+```
+
+**Verify:** `GET /cameras` — the matching row shows the new `url` (snapshot may refresh on next list).
+
 ### Delete a camera
 ```bash
 curl -X DELETE http://localhost:9000/cameras/1
