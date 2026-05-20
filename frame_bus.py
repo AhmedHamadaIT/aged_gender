@@ -643,6 +643,16 @@ class FrameBus:
             self._redis_breaker.record_success()
             log.info("[%s] FrameBus: Redis reconnected", self.camera_id)
 
+    @staticmethod
+    def _can_reuse_live_encode(
+        *,
+        will_publish: bool,
+        had_boxes: bool,
+        drew_geometry: bool,
+    ) -> bool:
+        """Reuse the task JPEG only when the live frame is still identical to it."""
+        return will_publish and not had_boxes and not drew_geometry
+
     def _publish_live_jpeg(
         self,
         annotated,
@@ -1275,13 +1285,18 @@ class FrameBus:
                     need_draw,
                     frame_count,
                 )
-                if self._live_stream_geometry_active and need_draw:
+                drew_geometry = self._live_stream_geometry_active and need_draw
+                if drew_geometry:
                     self._draw_live_stream_geometry(annotated)
                 t_after_ann = time.perf_counter()
 
                 # Reuse the pre-track JPEG only when the annotated frame IS the raw
                 # frame (no detections, no overlay drawn).
-                reuse_live_buf = will_publish and not had_boxes
+                reuse_live_buf = self._can_reuse_live_encode(
+                    will_publish=will_publish,
+                    had_boxes=had_boxes,
+                    drew_geometry=drew_geometry,
+                )
 
                 publish_sec = 0.0
                 if will_publish:

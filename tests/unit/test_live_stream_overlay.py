@@ -129,3 +129,16 @@ def test_draw_live_stream_geometry_mutates_frame() -> None:
     before = img.copy()
     bus._draw_live_stream_geometry(img)
     assert not np.array_equal(img, before)
+
+
+def test_live_encode_not_reused_when_geometry_overlay_drawn() -> None:
+    assert not FrameBus._can_reuse_live_encode(
+        will_publish=True,
+        had_boxes=False,
+        drew_geometry=True,
+    )
+    assert FrameBus._can_reuse_live_encode(
+        will_publish=True,
+        had_boxes=False,
+        drew_geometry=False,
+    )
