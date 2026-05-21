@@ -8,7 +8,11 @@ import json
 import cv2
 import numpy as np
 
-from services.cross_line import CrossLineTask
+from services.cross_line import (
+    CrossLineTask,
+    line_segment_pixels,
+    parse_effective_cross_lines,
+)
 from services.detector import Detection
 
 
@@ -161,3 +165,72 @@ def test_cross_line_survives_missed_detection_frames(tmp_path, monkeypatch):
     events = task({**base, "frame_id": 3, "detection": {"items": [det_below], "count": 1}})
     assert len(events) == 1
     assert events[0]["person"]["trackingId"] == "7"
+
+
+def test_parse_normalized_line_coords_not_truncated_to_zero() -> None:
+    """Fractional y (e.g. 0.5) must scale to mid-frame, not int(0.5)==0."""
+    raw = json.dumps(
+        [
+            {
+                "line_id": "N1",
+                "point": [{"x": 0, "y": 0.5}, {"x": 1, "y": 0.5}],
+                "direction": 0,
+            }
+        ]
+    )
+    lines = parse_effective_cross_lines(raw)
+    assert len(lines) == 1
+    assert lines[0]["coords_space"] == "normalized"
+    p0, p1 = line_segment_pixels(lines[0], 480, 360)
+    assert p0 == (0, 180)
+    assert p1 == (480, 180)
+
+
+def test_cross_line_crossing_with_normalized_midline(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CAPTURE_DIR", str(tmp_path / "cap"))
+    monkeypatch.setenv("SCENE_DIR", str(tmp_path / "scene"))
+    monkeypatch.setenv("EVENTS_DIR", str(tmp_path / "evt"))
+
+    area = json.dumps(
+        [
+            {
+                "line_id": "N1",
+                "point": [{"x": 0, "y": 0.5}, {"x": 1, "y": 0.5}],
+                "direction": 0,
+            }
+        ]
+    )
+    cfg = {
+        "taskId": 12,
+        "taskName": "cross_norm",
+        "algorithmType": "CROSS_LINE",
+        "channelId": "cam1",
+        "enable": True,
+        "threshold": 50,
+        "areaPosition": area,
+        "detailConfig": {},
+        "validWeekday": [
+            "MONDAY",
+            "TUESDAY",
+            "WEDNESDAY",
+            "THURSDAY",
+            "FRIDAY",
+            "SATURDAY",
+            "SUNDAY",
+        ],
+        "validStartTime": 0,
+        "validEndTime": 86400000,
+    }
+    task = CrossLineTask(cfg)
+    frame = np.zeros((360, 480, 3), dtype=np.uint8)
+    det_lo = Detection(40, 60, 60, 80, 0, "person", 0.9, track_id=55)
+    det_hi = Detection(40, 200, 60, 220, 0, "person", 0.9, track_id=55)
+    base = {
+        "timestamp": "t",
+        "camera_id": "cam1",
+        "frame_b64": _jpeg_b64(frame),
+        "frame_id": 1,
+    }
+    assert task({**base, "detection": {"items": [det_lo], "count": 1}}) == []
+    events = task({**base, "frame_id": 2, "detection": {"items": [det_hi], "count": 1}})
+    assert len(events) == 1

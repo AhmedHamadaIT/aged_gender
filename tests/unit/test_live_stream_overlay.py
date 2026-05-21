@@ -106,6 +106,27 @@ def test_build_cross_line_from_json_string() -> None:
     assert o["cashier_zones"] == []
 
 
+def test_build_cross_line_normalized_midline_scales_y(monkeypatch) -> None:
+    monkeypatch.setenv("WIDTH", "480")
+    monkeypatch.setenv("HEIGHT", "360")
+    ap = json.dumps(
+        [
+            {
+                "line_id": "1",
+                "point": [{"x": 0, "y": 0.5}, {"x": 1, "y": 0.5}],
+                "direction": 0,
+            }
+        ]
+    )
+    o = build_live_stream_overlay(
+        [{"algorithmType": "CROSS_LINE", "enable": True, "areaPosition": ap}]
+    )
+    assert o is not None
+    ln = o["cross_lines"][0]
+    assert ln["y0"] == 180 and ln["y1"] == 180
+    assert ln["x0"] == 0 and ln["x1"] == 480
+
+
 def test_build_nothing_when_cross_disabled_and_no_cashier() -> None:
     tasks = [
         {

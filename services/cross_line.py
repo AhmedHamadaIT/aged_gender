@@ -82,6 +82,67 @@ def _line_side(point: Tuple, p1: Tuple, p2: Tuple) -> int:
     return 0
 
 
+def _parse_xy_pair(raw: Any) -> Optional[Tuple[float, float]]:
+    """Parse one ``{x,y}`` dict, ``[x,y]`` list, or ``(x,y)`` tuple."""
+    if isinstance(raw, dict):
+        x_raw = raw.get("x", raw.get("X"))
+        y_raw = raw.get("y", raw.get("Y"))
+        if x_raw is None or y_raw is None:
+            return None
+        try:
+            return float(x_raw), float(y_raw)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        try:
+            return float(raw[0]), float(raw[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _line_endpoints_from_object(obj: dict) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """Return segment endpoints from ``point`` (two entries) or ``start``/``end``."""
+    pts = obj.get("point")
+    if isinstance(pts, list) and len(pts) >= 2:
+        a = _parse_xy_pair(pts[0])
+        b = _parse_xy_pair(pts[1])
+        if a is not None and b is not None:
+            return a, b
+    start = _parse_xy_pair(obj.get("start"))
+    end = _parse_xy_pair(obj.get("end"))
+    if start is not None and end is not None:
+        return start, end
+    return None
+
+
+def _coords_look_normalized(x0: float, y0: float, x1: float, y1: float) -> bool:
+    """True when all endpoints lie in [0, 1] — treat as fractions of frame W×H."""
+    if any(v < 0 for v in (x0, y0, x1, y1)):
+        return False
+    return max(x0, y0, x1, y1) <= 1.0
+
+
+def line_segment_pixels(
+    line: dict,
+    frame_w: int,
+    frame_h: int,
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """Map a parsed line (pixel or normalized) to integer pixel endpoints."""
+    pts = line["point"]
+    x0, y0 = float(pts[0]["x"]), float(pts[0]["y"])
+    x1, y1 = float(pts[1]["x"]), float(pts[1]["y"])
+    if line.get("coords_space") == "normalized":
+        return (
+            (int(round(x0 * frame_w)), int(round(y0 * frame_h))),
+            (int(round(x1 * frame_w)), int(round(y1 * frame_h))),
+        )
+    return (
+        (int(round(x0)), int(round(y0))),
+        (int(round(x1)), int(round(y1))),
+    )
+
+
 def parse_effective_cross_lines(area_position: Any) -> List[dict]:
     """
     Normalized line definitions used by ``CrossLineTask`` and the live-stream
@@ -107,17 +168,13 @@ def parse_effective_cross_lines(area_position: Any) -> List[dict]:
     for i, obj in enumerate(arr):
         if not isinstance(obj, dict):
             continue
-        pts = obj.get("point")
-        if not isinstance(pts, list) or len(pts) < 2:
+        endpoints = _line_endpoints_from_object(obj)
+        if endpoints is None:
             continue
-        a, b = pts[0], pts[1]
-        if not isinstance(a, dict) or not isinstance(b, dict):
-            continue
-        try:
-            x0, y0 = int(a["x"]), int(a["y"])
-            x1, y1 = int(b["x"]), int(b["y"])
-        except (KeyError, TypeError, ValueError):
-            continue
+        (x0, y0), (x1, y1) = endpoints
+        coords_space = (
+            "normalized" if _coords_look_normalized(x0, y0, x1, y1) else "pixel"
+        )
         lid_raw = obj.get("line_id")
         if isinstance(lid_raw, str):
             lid_raw = lid_raw.strip()
@@ -141,6 +198,7 @@ def parse_effective_cross_lines(area_position: Any) -> List[dict]:
                 "line_id": lid_raw,
                 "line_name": str(obj.get("line_name") or ""),
                 "point": [{"x": x0, "y": y0}, {"x": x1, "y": y1}],
+                "coords_space": coords_space,
                 "direction": direction_cfg,
             }
         )
@@ -283,6 +341,22 @@ class CrossLineTask:
 
         events: List = []
         active_track_ids: Set[int] = set()
+        frame_wh: Optional[Tuple[int, int]] = None
+
+        def _frame_wh() -> Tuple[int, int]:
+            nonlocal frame_wh
+            if frame_wh is not None:
+                return frame_wh
+            frame = _frame_bgr()
+            if frame is not None and frame.size > 0:
+                h, w = frame.shape[:2]
+                frame_wh = (w, h)
+            else:
+                fw = max(1, int(os.getenv("WIDTH", "1280")))
+                fh = max(1, int(os.getenv("HEIGHT", "0")) or fw)
+                frame_wh = (fw, fh)
+            return frame_wh
+
         raw_fid = payload.get("frame_id")
         if raw_fid is None:
             self._fallback_frame_seq += 1
@@ -329,7 +403,8 @@ class CrossLineTask:
                 self._reentry_grace_active.pop(track_id, None)
 
             for line in self.lines:
-                crossing_dir = self._check_crossing(track_id, anchor, line)
+                fw, fh = _frame_wh()
+                crossing_dir = self._check_crossing(track_id, anchor, line, fw, fh)
                 if crossing_dir is None:
                     continue
                 if in_grace:
@@ -349,7 +424,7 @@ class CrossLineTask:
                     payload["timestamp"],
                     str(payload.get("camera_id") or ""),
                 )
-                self._persist(event, _frame_bgr(), det, line, crossing_dir)
+                self._persist(event, _frame_bgr(), det, line, crossing_dir, *_frame_wh())
                 events.append(event)
 
         self._purge_stale_track_state(frame_id, active_track_ids)
@@ -358,9 +433,15 @@ class CrossLineTask:
 
     # ── Line crossing ─────────────────────────────────────────────────────────
 
-    def _check_crossing(self, track_id: int, point: Tuple[int, int], line: dict) -> Optional[int]:
-        p1  = (line["point"][0]["x"], line["point"][0]["y"])
-        p2  = (line["point"][1]["x"], line["point"][1]["y"])
+    def _check_crossing(
+        self,
+        track_id: int,
+        point: Tuple[int, int],
+        line: dict,
+        frame_w: int,
+        frame_h: int,
+    ) -> Optional[int]:
+        p1, p2 = line_segment_pixels(line, frame_w, frame_h)
         lid = line["line_id"]
 
         new_side  = _line_side(point, p1, p2)
@@ -488,7 +569,16 @@ class CrossLineTask:
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
-    def _persist(self, event: dict, frame, det, line: dict, crossing_dir: int):
+    def _persist(
+        self,
+        event: dict,
+        frame,
+        det,
+        line: dict,
+        crossing_dir: int,
+        frame_w: int,
+        frame_h: int,
+    ):
         x1, y1, x2, y2 = det.bbox
         h, w  = frame.shape[:2]
         PAD   = 10
@@ -504,15 +594,12 @@ class CrossLineTask:
         os.makedirs(os.path.dirname(scene_path),   exist_ok=True)
         if crop.size > 0:
             cv2.imwrite(capture_path, crop)
-        pts = line["point"]
+        p1, p2 = line_segment_pixels(line, frame_w, frame_h)
         scene_vis = draw_evidence_scene(
             frame,
             subject_bbox=det.bbox,
             label=f"{line.get('line_name') or line.get('line_id','')} dir{crossing_dir} id{det.track_id}",
-            line_endpoints=(
-                (int(pts[0]["x"]), int(pts[0]["y"])),
-                (int(pts[1]["x"]), int(pts[1]["y"])),
-            ),
+            line_endpoints=(p1, p2),
         )
         cv2.imwrite(scene_path, scene_vis)
 

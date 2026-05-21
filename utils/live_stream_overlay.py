@@ -30,7 +30,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from services.cross_line import parse_effective_cross_lines
+from services.cross_line import line_segment_pixels, parse_effective_cross_lines
 
 _CLR_CASHIER_BGR = (0, 200, 100)
 _CLR_CUSTOMER_BGR = (0, 165, 255)
@@ -68,12 +68,18 @@ def _parse_cross_lines_from_tasks(chan_tasks: List[dict]) -> List[dict]:
         elif n_line_tasks > 1 and tname:
             prefix = f"{tname}: "
         for line in effective:
-            pts = line["point"]
-            x0, y0 = int(pts[0]["x"]), int(pts[0]["y"])
-            x1, y1 = int(pts[1]["x"]), int(pts[1]["y"])
+            fw = max(1, int(os.getenv("WIDTH", "1280")))
+            fh = max(1, int(os.getenv("HEIGHT", "0")) or fw)
+            p0, p1 = line_segment_pixels(line, fw, fh)
             name = str(line.get("line_name") or line.get("line_id") or "")
             out.append(
-                {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "label": f"{prefix}{name}"}
+                {
+                    "x0": p0[0],
+                    "y0": p0[1],
+                    "x1": p1[0],
+                    "y1": p1[1],
+                    "label": f"{prefix}{name}",
+                }
             )
     return out
 

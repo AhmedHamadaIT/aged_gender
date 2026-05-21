@@ -43,18 +43,22 @@ def _lines_export_to_area_position(data: dict) -> str:
     into CROSS_LINE areaPosition (JSON string for POST /api/tasks).
     ``direction_deg`` is ignored; use ``direction`` per line if needed (0=both, 1/2=one way).
     """
+    from services.cross_line import _parse_xy_pair
+
     rows = []
     for ln in data.get("lines") or []:
-        start = ln["start"]
-        end = ln["end"]
+        start = _parse_xy_pair(ln.get("start"))
+        end = _parse_xy_pair(ln.get("end"))
+        if start is None or end is None:
+            continue
         lid = ln.get("id", ln.get("line_id", ""))
         rows.append(
             {
                 "line_id": str(lid),
                 "line_name": str(ln.get("name", ln.get("line_name", f"line_{lid}"))),
                 "point": [
-                    {"x": int(start["x"]), "y": int(start["y"])},
-                    {"x": int(end["x"]), "y": int(end["y"])},
+                    {"x": start[0], "y": start[1]},
+                    {"x": end[0], "y": end[1]},
                 ],
                 "direction": int(ln.get("direction", 0)),
             }
