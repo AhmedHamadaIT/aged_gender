@@ -39,9 +39,11 @@ Anywhere an image is described in the **structured** form, the value is an objec
 | `eventType` | `evidence.captureImage` | `evidence.sceneImage` | JSONL file |
 |-------------|-------------------------|------------------------|------------|
 | `CROSS_LINE` | V2 object (`capture`) | V2 object (`scene`) | `$EVENTS_DIR/task_<taskId>.jsonl` |
-| `MASK_HAIRNET_CHEF_HAT` | V2 object | V2 object | same |
+| `MASK_HAIRNET_CHEF_HAT` | V2 object | V2 object | same — plus Eyego **`data`** (`personStructural`, `captureUrl`, `sceneUrl`) |
 | `PHONE_USAGE` | V2 object | V2 object | same |
 | `CASHIER_BOX_OPEN` (multiplexed SSE) | V2 `capture` when a frame is saved, **or** top-level `evidence` on structured event | V2: **either** full `build_image` for `scene` **inside `data`**, or `sceneImage` with `status: "not_available"` when only one file exists (see below) | `$EVENTS_DIR/task_<taskId>.jsonl` |
+
+**PPE** additionally embeds under **`data`** (Eyego): `captureUrl` / `sceneUrl`, `personStructural` (violation + bbox + zone), and **`data.evidence`** with V2 objects. URL bases: `PPE_CLOUD_IMAGE_BASE`, `PPE_CAPTURE_URL_BASE`, `PPE_SCENE_URL_BASE`, or `PPE_FORCE_LOCAL_URLS`. See [mask_hairnet_chef_hat.md](./mask_hairnet_chef_hat.md).
 
 **Cashier** additionally embeds:
 

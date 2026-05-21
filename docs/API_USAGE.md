@@ -248,18 +248,23 @@ curl -X POST http://localhost:9000/api/tasks \
 > `validWeekday`, `validStartTime`, and `validEndTime` are optional — they default to all days, all day.
 
 ### Register a PPE task (MASK_HAIRNET_CHEF_HAT)
+
+PPE uses a **polygon zone** in pixel coordinates — not a line. `areaPosition` may be a bare array of `{x, y}` vertices or a wrapped `[{"point":[...]}]` zone. See [../service_doc/mask_hairnet_chef_hat.md](../service_doc/mask_hairnet_chef_hat.md).
+
 ```bash
 curl -X POST http://localhost:9000/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "taskId": 20,
-    "taskName": "kitchen_ppe_check",
+    "taskId": 8,
+    "taskName": "staff_safety_bar_area",
     "algorithmType": "MASK_HAIRNET_CHEF_HAT",
-    "channelId": 2,
+    "channelId": 7,
     "threshold": 70,
-    "areaPosition": "[{\"line_id\":\"zone1\",\"point\":[{\"x\":50,\"y\":50},{\"x\":600,\"y\":50},{\"x\":600,\"y\":500},{\"x\":50,\"y\":500}],\"direction\":0}]",
+    "areaPosition": "[{\"x\":1004,\"y\":56},{\"x\":1831,\"y\":89},{\"x\":2013,\"y\":1831},{\"x\":308,\"y\":1876},{\"x\":304,\"y\":1872}]",
     "detailConfig": {
-      "alarmType": ["no_mask", "no_chef_hat", "no_hat"]
+      "alarmType": ["no_mask", "no_chef_hat", "no_hat"],
+      "channelName": "7",
+      "deviceSN": "HQDZW1SBCABAH0235"
     }
   }'
 ```
@@ -269,10 +274,10 @@ curl -X POST http://localhost:9000/api/tasks \
 {
   "status": "created",
   "task": {
-    "taskId": 20,
-    "taskName": "kitchen_ppe_check",
+    "taskId": 8,
+    "taskName": "staff_safety_bar_area",
     "algorithmType": "MASK_HAIRNET_CHEF_HAT",
-    "channelId": 2,
+    "channelId": 7,
     "enable": true,
     "threshold": 70,
     "areaPosition": "...",
@@ -516,9 +521,13 @@ SSE sends **one minified** `data:` line per event. Illustrative **pretty** `evid
 }
 ```
 
-### CrossLine / PPE / phone — same envelope
+### CrossLine / phone — flat envelope; PPE uses Eyego `data`
 
-The outer fields (`eventType`, `taskId`, `line` or `alert` + `person`, etc.) are unchanged; only `evidence` values moved from string paths to V2 objects. Filter **`eventType=PHONE_USAGE`** the same way as other tasks once a phone task is registered.
+**`CROSS_LINE`** and **`PHONE_USAGE`** use a flat envelope (`line` or `alert` + `person`, etc.); only `evidence` values are V2 image objects.
+
+**`MASK_HAIRNET_CHEF_HAT`** uses the **Eyego `data` block** (same integration pattern as `CASHIER_BOX_OPEN`): violation details live in **`data.personStructural`** (JSON string). Top-level `eventId`, `eventType`, `taskId`, `channelId`, and `evidence` remain for SSE filters and V2 consumers. See [PPE structured event](#ppe-structured-event-mask_hairnet_chef_hat) below.
+
+Filter **`eventType=PHONE_USAGE`** the same way as other tasks once a phone task is registered.
 
 ### Cashier structured event (`CASHIER_BOX_OPEN`)
 
@@ -581,7 +590,66 @@ SSE sends **one** `data:` line per event (minified outer JSON). Equivalent struc
 
 When a frame is saved, **top-level** `evidence` may also be present (same V2 `captureImage`; `sceneImage` may be `{ "url": null, "type": "scene", "status": "not_available" }` if there is no separate scene file). See [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md).
 
-Persisted to disk as one JSON line per frame: **`$EVENTS_DIR/task_<taskId>.jsonl`** (default `EVENTS_DIR=/local/storage/events`).
+### PPE structured event (`MASK_HAIRNET_CHEF_HAT`)
+
+One event **per violation** (missing mask, hairnet, or chef hat). Top-level fields support SSE filters; the Eyego integration payload is under **`data`**. Parse violation details from **`data.personStructural`** (JSON string). Set **`PPE_COMPACT_PERSON_STRUCTURAL=1`** to force a single-line `personStructural`; default is compact. Set **`PPE_PRETTY_PERSON_STRUCTURAL=1`** for pretty-printed multi-line strings.
+
+**`data` field notes:** `id` is a **separate** 32-hex correlation id appended to `captureUrl` / `sceneUrl` as `{captureId}{id}.jpg`. `captureId` and `sceneId` each use their own UUID. **`deviceSN`** resolves from `detailConfig.deviceSN`, then `PPE_DEVICE_SN`, `DEVICE_SN`, `HOSTNAME`, else `"UNKNOWN"`. **`captureUrl` / `sceneUrl`:** `PPE_CLOUD_IMAGE_BASE` applies to both sides; if unset, use `PPE_CAPTURE_URL_BASE` and `PPE_SCENE_URL_BASE` independently. If still empty, set **`PPE_FORCE_LOCAL_URLS=1`** to use `file:///local/storage/images` per missing side; otherwise URLs are `""`. Full guide: [../service_doc/mask_hairnet_chef_hat.md](../service_doc/mask_hairnet_chef_hat.md).
+
+SSE sends **one** `data:` line per event (minified outer JSON). Equivalent structure (pretty outer JSON for readability; UUIDs are examples):
+
+```json
+{
+  "eventId": "a1b2c3d4e5f678901234567890123456",
+  "eventType": "MASK_HAIRNET_CHEF_HAT",
+  "timestamp": 1774312985135,
+  "timestampUTC": "2026-03-24T00:43:05.135Z",
+  "taskId": 8,
+  "taskName": "staff_safety_bar_area",
+  "channelId": "7",
+  "camera_id": "7",
+  "data": {
+    "algorithmType": "MASK_HAIRNET_CHEF_HAT",
+    "captureId": "MASK_HAIRNET_CHEF_HAT_82ae3908-3130-487b-9bf6-13b52c5d788f.jpg",
+    "sceneId": "MASK_HAIRNET_CHEF_HAT_88132b76-f9d1-4df2-936f-5a69afabe123.jpg",
+    "channelId": 7,
+    "channelName": "7",
+    "deviceSN": "HQDZW1SBCABAH0235",
+    "id": "642a88a75023084fea16bc8828e8d351",
+    "taskId": 8,
+    "taskName": "staff_safety_bar_area",
+    "recordTime": 1774312985135,
+    "dateUTC": "2026-03-24T00:43:05.135Z",
+    "personStructural": "{\"alarmType\":\"no_chef_hat\",\"areaPoints\":\"[{\\\"x\\\":1004,\\\"y\\\":56},{\\\"x\\\":1831,\\\"y\\\":89}]\",\"objectHeight\":144,\"objectWidth\":117,\"objectX\":1417,\"objectY\":115,\"score\":79,\"smokingHeight\":0,\"smokingWidth\":0,\"smokingX\":0,\"smokingY\":0}",
+    "captureUrl": "https://storage.googleapis.com/logs-data-images/MASK_HAIRNET_CHEF_HAT_82ae3908-3130-487b-9bf6-13b52c5d788f.jpg642a88a75023084fea16bc8828e8d351.jpg",
+    "sceneUrl": "https://storage.googleapis.com/logs-data-images/MASK_HAIRNET_CHEF_HAT_88132b76-f9d1-4df2-936f-5a69afabe123.jpg642a88a75023084fea16bc8828e8d351.jpg",
+    "evidence": {
+      "captureImage": {
+        "url": "https://ml.example.com/evidence/2026-03-24/MASK_HAIRNET_CHEF_HAT_82ae3908-3130-487b-9bf6-13b52c5d788f.jpg",
+        "path": "2026-03-24/MASK_HAIRNET_CHEF_HAT_82ae3908-3130-487b-9bf6-13b52c5d788f.jpg",
+        "type": "capture",
+        "format": "image/jpeg",
+        "timestamp": "2026-03-24T00:43:05.135Z"
+      },
+      "sceneImage": {
+        "url": "https://ml.example.com/evidence/2026-03-24/MASK_HAIRNET_CHEF_HAT_88132b76-f9d1-4df2-936f-5a69afabe123.jpg",
+        "path": "2026-03-24/MASK_HAIRNET_CHEF_HAT_88132b76-f9d1-4df2-936f-5a69afabe123.jpg",
+        "type": "scene",
+        "format": "image/jpeg",
+        "timestamp": "2026-03-24T00:43:05.135Z"
+      }
+    }
+  },
+  "evidence": {
+    "captureImage": { "…": "same as data.evidence.captureImage" },
+    "sceneImage":   { "…": "same as data.evidence.sceneImage" }
+  }
+}
+```
+
+Parse `personStructural` on the client: `jq -r '.data.personStructural | fromjson'`.
+
+Persisted to disk as one JSON line per event: **`$EVENTS_DIR/task_<taskId>.jsonl`** (default `EVENTS_DIR=/local/storage/events`).
 
 ### Event fields reference
 
@@ -618,10 +686,11 @@ Persisted to disk as one JSON line per frame: **`$EVENTS_DIR/task_<taskId>.jsonl
 
 | Field | Type | Description |
 |---|---|---|
-| `alert.type` | string | `"no_mask"`, `"no_hat"`, or `"no_chef_hat"` |
-| `alert.description` | string | Human-readable description of the violation |
-| `alert.confidence` | int | PPE model confidence 0–100 |
-| `person.areaPoints` | array | Polygon zone points from `areaPosition` config |
+| `data` | object | Eyego block: `algorithmType`, `captureId`, `sceneId`, `id`, `recordTime`, `dateUTC`, `personStructural`, `captureUrl`, `sceneUrl`, `channelId`, `channelName`, `deviceSN`, `taskId`, `taskName`, `evidence` |
+| `data.personStructural` | string | JSON string: `alarmType`, `areaPoints` (stringified polygon), `objectX/Y/Width/Height`, `score`, `smoking*` (always 0) |
+| `data.captureUrl` / `data.sceneUrl` | string | Integration URLs; pattern `{base}/{captureId}{id}.jpg` when `PPE_CLOUD_IMAGE_BASE` is set |
+
+Parse violation type: `jq -r '.data.personStructural | fromjson | .alarmType'`.
 
 **CASHIER_BOX_OPEN specific:**
 
@@ -750,10 +819,10 @@ curl -X DELETE http://localhost:9000/api/tasks/20
 curl -X PUT http://localhost:9000/api/tasks/20 \
   -H "Content-Type: application/json" \
   -d '{
-    "taskId": 20,
-    "taskName": "kitchen_ppe_check",
+    "taskId": 8,
+    "taskName": "staff_safety_bar_area",
     "algorithmType": "MASK_HAIRNET_CHEF_HAT",
-    "channelId": 2,
+    "channelId": 7,
     "enable": false,
     "detailConfig": { "alarmType": ["no_mask"] }
   }'
@@ -847,10 +916,10 @@ curl -X POST http://localhost:9000/api/tasks \
 curl -X POST http://localhost:9000/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "taskId":20,"taskName":"kitchen_ppe","algorithmType":"MASK_HAIRNET_CHEF_HAT","channelId":2,
+    "taskId":8,"taskName":"staff_safety_bar_area","algorithmType":"MASK_HAIRNET_CHEF_HAT","channelId":7,
     "threshold":70,
-    "areaPosition":"[{\"line_id\":\"z1\",\"point\":[{\"x\":0,\"y\":0},{\"x\":1280,\"y\":0},{\"x\":1280,\"y\":720},{\"x\":0,\"y\":720}],\"direction\":0}]",
-    "detailConfig":{"alarmType":["no_mask","no_chef_hat"]}
+    "areaPosition":"[{\"x\":1004,\"y\":56},{\"x\":1831,\"y\":89},{\"x\":2013,\"y\":1831},{\"x\":308,\"y\":1876},{\"x\":304,\"y\":1872}]",
+    "detailConfig":{"alarmType":["no_mask","no_chef_hat"],"deviceSN":"HQDZW1SBCABAH0235"}
   }'
 
 curl -X POST http://localhost:9000/api/tasks \
@@ -1045,12 +1114,21 @@ curl -s -o latest.gif "http://localhost:9000/cashier/media/1/latest/gif"
 | `1` | A→B only (left-to-right or top-to-bottom depending on line angle) |
 | `2` | B→A only |
 
-### For MASK_HAIRNET_CHEF_HAT (polygon zone):
+### For MASK_HAIRNET_CHEF_HAT (polygon zone — pixel coordinates)
+
+**Preferred — bare polygon** (no line, no `line_id`):
+
 ```json
-"[{\"line_id\":\"zone1\",\"point\":[{\"x\":50,\"y\":50},{\"x\":600,\"y\":50},{\"x\":600,\"y\":500},{\"x\":50,\"y\":500}],\"direction\":0}]"
+"[{\"x\":1004,\"y\":56},{\"x\":1831,\"y\":89},{\"x\":2013,\"y\":1831},{\"x\":308,\"y\":1876},{\"x\":304,\"y\":1872}]"
 ```
 
-Polygon needs at least 3 points. Persons whose centroid falls outside all zones are ignored. If `areaPosition` is `"[]"`, the entire frame is the detection zone.
+**Also accepted — wrapped zone:**
+
+```json
+"[{\"point\":[{\"x\":50,\"y\":50},{\"x\":600,\"y\":50},{\"x\":600,\"y\":500},{\"x\":50,\"y\":500}]}]"
+```
+
+Each `{x, y}` is a polygon vertex in **pixels** on the video frame. Minimum 3 points. Persons whose centroid falls outside all zones are ignored. If `areaPosition` is `"[]"`, the entire frame is the detection zone. See [../service_doc/mask_hairnet_chef_hat.md](../service_doc/mask_hairnet_chef_hat.md).
 
 ---
 

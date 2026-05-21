@@ -97,7 +97,8 @@ curl -sS -X DELETE "${BASE}/api/tasks/10"
 | Field | Used by | Notes |
 |-------|---------|--------|
 | `enableAttrDetect`, `enableReid` | `CROSS_LINE` | Optional attributes / ReID |
-| `alarmType` | `MASK_HAIRNET_CHEF_HAT` | Alarm list |
+| `alarmType` | `MASK_HAIRNET_CHEF_HAT` | Violation list: `no_mask`, `no_hat`, `no_chef_hat` |
+| `channelName`, `deviceSN` | `MASK_HAIRNET_CHEF_HAT` | Optional Eyego `data.channelName` / `data.deviceSN` |
 | `drawerOpenLimit`, `serviceWaitLimit`, `enableStaffList`, `staffIds` | `CASHIER_BOX_OPEN` | Drawer / service timing and staff list |
 
 ## Edge device note

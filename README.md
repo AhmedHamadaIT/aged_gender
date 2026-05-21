@@ -90,7 +90,7 @@ from the directory that contains `docker-compose.yml`.
 | `algorithmType` | Implementation | What it does | SSE `eventType` on `/detection/stream` |
 |-----------------|----------------|--------------|----------------------------------------|
 | `CROSS_LINE` | [`CrossLineTask`](services/cross_line.py) | Person crosses configured lines (`areaPosition` JSON); optional age/gender on crossing via `detailConfig.enableAttrDetect`; `enableReid` reserved | `CROSS_LINE` |
-| `MASK_HAIRNET_CHEF_HAT` | [`MaskHairnetChefHatTask`](services/mask_hairnet_chef_hat.py) | PPE compliance inside polygon zones; violations from `detailConfig.alarmType` (`no_mask`, `no_hat`, `no_chef_hat`, …) | `MASK_HAIRNET_CHEF_HAT` |
+| `MASK_HAIRNET_CHEF_HAT` | [`MaskHairnetChefHatTask`](services/mask_hairnet_chef_hat.py) | PPE compliance inside polygon zones; Eyego `data.personStructural`; violations from `detailConfig.alarmType` | `MASK_HAIRNET_CHEF_HAT` |
 | `CASHIER_BOX_OPEN` | [`CashierDrawerTask`](services/cashier.py) | Zones, drawer/cash/person logic **N1–N6** / **A1–A7**; structured JSON per frame on detection SSE + `/cashier/*` | `CASHIER_BOX_OPEN` |
 
 **Shared task fields** (see `TaskConfig` in [`apis/tasks.py`](apis/tasks.py)): `taskId`, `taskName`, `channelId`, `enable`, `threshold` (0–100 confidence), `areaPosition` (JSON string: lines or polygons per algorithm), `detailConfig`, `validWeekday`, `validStartTime`, `validEndTime` (ms).
@@ -98,7 +98,7 @@ from the directory that contains `docker-compose.yml`.
 **`detailConfig` per algorithm**
 
 - **CROSS_LINE:** `enableAttrDetect`, `enableReid`
-- **MASK_HAIRNET_CHEF_HAT:** `alarmType` (list of violation keys)
+- **MASK_HAIRNET_CHEF_HAT:** `alarmType` (violation list); `areaPosition` = polygon `{x,y}` pixels (see [mask_hairnet_chef_hat.md](service_doc/mask_hairnet_chef_hat.md)); optional `channelName` / `deviceSN` in `detailConfig`
 - **CASHIER_BOX_OPEN:** `drawerOpenLimit`, `serviceWaitLimit`, `enableStaffList`, `staffIds`
 
 ### Detection control, SSE events & live WebSocket stream

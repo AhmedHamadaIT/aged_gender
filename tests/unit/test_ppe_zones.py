@@ -84,4 +84,7 @@ def test_ppe_violation_when_classes_missing(tmp_path, monkeypatch):
     }
     events = task(payload)
     assert len(events) >= 1
-    assert events[0]["alert"]["type"] == "no_mask"
+    ps = json.loads(events[0]["data"]["personStructural"])
+    assert ps["alarmType"] == "no_mask"
+    assert events[0]["eventType"] == "MASK_HAIRNET_CHEF_HAT"
+    assert "captureId" in events[0]["data"]

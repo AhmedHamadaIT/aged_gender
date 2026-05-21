@@ -39,16 +39,19 @@ import os
 import json
 import hashlib
 import time
+import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import cv2
 import numpy as np
 
-from utils import build_image, draw_evidence_scene, make_evidence_paths
+from utils import build_image, draw_evidence_scene
 from utils.task_payload import task_frame_bgr
 
 # ── Constants ─────────────────────────────────────────────────────────────────
+
+ALGORITHM_TYPE = "MASK_HAIRNET_CHEF_HAT"
 
 _WEEKDAY_MAP = {
     "MONDAY": 0, "TUESDAY": 1, "WEDNESDAY": 2, "THURSDAY": 3,
@@ -68,6 +71,153 @@ _ALERT_DESCRIPTIONS = {
     "no_chef_hat": "Chef hat not detected",
     "no_hat"     : "Hairnet not detected",
 }
+
+
+def _env_truthy(name: str) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _channel_id_data(ch_raw: Any) -> Any:
+    """Eyego ``data.channelId``: int when numeric, else string."""
+    if ch_raw is None:
+        return None
+    s = str(ch_raw).strip()
+    if not s:
+        return None
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return s
+
+
+def build_ppe_person_structural(
+    alarm_type: str,
+    area_points: list,
+    bbox: tuple,
+    score: int,
+) -> str:
+    """
+    Eyego ``personStructural`` for PPE violations.
+
+    ``areaPoints`` is a JSON-encoded string (not a native array) per integration spec.
+    """
+    x1, y1, x2, y2 = bbox
+    ps_obj = {
+        "alarmType"    : alarm_type,
+        "areaPoints"   : json.dumps(area_points, separators=(",", ":")),
+        "objectHeight" : int(y2 - y1),
+        "objectWidth"  : int(x2 - x1),
+        "objectX"      : int(x1),
+        "objectY"      : int(y1),
+        "score"        : int(score),
+        "smokingHeight": 0,
+        "smokingWidth" : 0,
+        "smokingX"     : 0,
+        "smokingY"     : 0,
+    }
+    compact = _env_truthy("PPE_COMPACT_PERSON_STRUCTURAL")
+    if compact or not _env_truthy("PPE_PRETTY_PERSON_STRUCTURAL"):
+        return json.dumps(ps_obj, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(ps_obj, indent=2, ensure_ascii=False)
+
+
+def build_ppe_spec_data(
+    *,
+    alarm_type: str,
+    area_points: list,
+    bbox: tuple,
+    score: int,
+    task_id: int,
+    task_name: str,
+    channel_id: Any,
+    channel_name: str = "",
+    device_sn: str = "",
+    record_ms: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Eyego ``data`` block for ``MASK_HAIRNET_CHEF_HAT``.
+
+    URL pattern (integration): ``{base}/{captureId}{id}.jpg`` where ``id`` is a
+    32-char hex correlation id (separate from the UUID embedded in ``captureId``).
+    Bases: ``PPE_CLOUD_IMAGE_BASE``, then ``PPE_CAPTURE_URL_BASE`` /
+    ``PPE_SCENE_URL_BASE``, with ``PPE_FORCE_LOCAL_URLS`` fallback.
+    """
+    ch_out = _channel_id_data(channel_id)
+    ch_str = str(channel_id).strip() if channel_id is not None else ""
+
+    if not channel_name:
+        if ch_str.isdigit():
+            channel_name = os.getenv("PPE_CHANNEL_NAME", ch_str)
+        elif ch_str:
+            channel_name = os.getenv("PPE_CHANNEL_NAME", ch_str)
+        else:
+            channel_name = os.getenv("PPE_CHANNEL_NAME", "CAM-UNKNOWN")
+
+    if not device_sn:
+        device_sn = (
+            os.getenv("PPE_DEVICE_SN")
+            or os.getenv("DEVICE_SN")
+            or os.getenv("HOSTNAME")
+            or "UNKNOWN"
+        )
+
+    cap_uuid = uuid.uuid4()
+    scene_uuid = uuid.uuid4()
+    correlation_id = uuid.uuid4().hex
+    capture_id = f"{ALGORITHM_TYPE}_{cap_uuid}.jpg"
+    scene_id = f"{ALGORITHM_TYPE}_{scene_uuid}.jpg"
+
+    now = datetime.now(timezone.utc)
+    if record_ms is None:
+        record_ms = int(now.timestamp() * 1000)
+    date_utc = datetime.fromtimestamp(
+        record_ms / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+    cloud = (os.getenv("PPE_CLOUD_IMAGE_BASE") or "").strip().rstrip("/")
+    if cloud:
+        cap_base = cloud
+        scene_base = cloud
+    else:
+        cap_base = (os.getenv("PPE_CAPTURE_URL_BASE") or "").strip().rstrip("/")
+        scene_base = (os.getenv("PPE_SCENE_URL_BASE") or "").strip().rstrip("/")
+
+    local_fallback = "file:///local/storage/images"
+    if _env_truthy("PPE_FORCE_LOCAL_URLS"):
+        if not cap_base:
+            cap_base = local_fallback
+        if not scene_base:
+            scene_base = local_fallback
+
+    capture_url = f"{cap_base}/{capture_id}{correlation_id}.jpg" if cap_base else ""
+    scene_url = f"{scene_base}/{scene_id}{correlation_id}.jpg" if scene_base else ""
+
+    date_folder = now.strftime("%Y-%m-%d")
+    return {
+        "algorithmType"   : ALGORITHM_TYPE,
+        "captureId"       : capture_id,
+        "sceneId"         : scene_id,
+        "channelId"       : ch_out,
+        "channelName"     : channel_name,
+        "deviceSN"        : device_sn,
+        "id"              : correlation_id,
+        "taskId"          : int(task_id),
+        "taskName"        : task_name,
+        "recordTime"      : record_ms,
+        "dateUTC"         : date_utc,
+        "personStructural": build_ppe_person_structural(
+            alarm_type, area_points, bbox, score
+        ),
+        "captureUrl"      : capture_url,
+        "sceneUrl"        : scene_url,
+        "evidence"        : {
+            "captureImage": build_image(f"{date_folder}/{capture_id}", "capture"),
+            "sceneImage"  : build_image(f"{date_folder}/{scene_id}", "scene"),
+        },
+    }
 
 
 # ── Polygon helpers ───────────────────────────────────────────────────────────
@@ -101,6 +251,17 @@ class MaskHairnetChefHatTask:
         raw_alarms      = detail.get("alarmType", list(_ALARM_TO_PPE_CLASS.keys()))
         # Only keep alarm types this task can handle
         self.alarm_types: List[str] = [a for a in raw_alarms if a in _ALARM_TO_PPE_CLASS]
+
+        self.channel_name = str(
+            task_config.get("channelName")
+            or detail.get("channelName")
+            or ""
+        ).strip()
+        self.device_sn = str(
+            task_config.get("deviceSN")
+            or detail.get("deviceSN")
+            or ""
+        ).strip()
 
         self.zones = self._parse_zones(task_config.get("areaPosition", "[]"))
 
@@ -215,37 +376,40 @@ class MaskHairnetChefHatTask:
             f"{self.task_id}_{det.track_id}_{alarm_type}_{now_ms}".encode()
         ).hexdigest()
 
-        cam_key = str(camera_id or self.channel_id or "unknown")
-        cap_rel, scene_rel = make_evidence_paths(cam_key, event_id)
-
         x1, y1, x2, y2 = det.bbox
         area_points     = zone.get("point", []) if zone else []
+        cam_key         = str(camera_id or self.channel_id or "unknown")
+
+        data = build_ppe_spec_data(
+            alarm_type=alarm_type,
+            area_points=area_points,
+            bbox=(x1, y1, x2, y2),
+            score=conf_pct,
+            task_id=self.task_id,
+            task_name=self.task_name,
+            channel_id=cam_key,
+            channel_name=self.channel_name,
+            device_sn=self.device_sn,
+            record_ms=now_ms,
+        )
+
+        ch_top = str(cam_key)
+        try:
+            task_id_out: Any = int(self.task_id)
+        except (TypeError, ValueError):
+            task_id_out = self.task_id
 
         return {
             "eventId"     : event_id,
-            "eventType"   : "MASK_HAIRNET_CHEF_HAT",
+            "eventType"   : ALGORITHM_TYPE,
             "timestamp"   : now_ms,
-            "timestampUTC": datetime.fromtimestamp(
-                now_ms / 1000, tz=timezone.utc
-            ).isoformat().replace("+00:00", "Z"),
-            "taskId"      : self.task_id,
+            "timestampUTC": data["dateUTC"],
+            "taskId"      : task_id_out,
             "taskName"    : self.task_name,
-            "channelId"   : str(camera_id or self.channel_id),
-            "camera_id"   : camera_id,
-            "alert": {
-                "type"       : alarm_type,
-                "description": _ALERT_DESCRIPTIONS.get(alarm_type, alarm_type),
-                "confidence" : conf_pct,
-            },
-            "person": {
-                "trackingId" : str(det.track_id),
-                "boundingBox": {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1},
-                "areaPoints" : area_points,
-            },
-            "evidence": {
-                "captureImage": build_image(cap_rel, "capture"),
-                "sceneImage"  : build_image(scene_rel, "scene"),
-            },
+            "channelId"   : ch_top,
+            "camera_id"   : camera_id or cam_key,
+            "data"        : data,
+            "evidence"    : data["evidence"],
         }
 
     # ── Persistence ───────────────────────────────────────────────────────────
@@ -267,8 +431,20 @@ class MaskHairnetChefHatTask:
         if crop.size > 0:
             cv2.imwrite(capture_path, crop)
 
-        alarm_type   = event.get("alert", {}).get("type", "")
-        zone_points  = event.get("person", {}).get("areaPoints") or []
+        ps_raw = event.get("data", {}).get("personStructural", "{}")
+        try:
+            ps = json.loads(ps_raw)
+        except json.JSONDecodeError:
+            ps = {}
+        alarm_type = ps.get("alarmType", "")
+        area_raw = ps.get("areaPoints", "[]")
+        if isinstance(area_raw, str):
+            try:
+                zone_points = json.loads(area_raw)
+            except json.JSONDecodeError:
+                zone_points = []
+        else:
+            zone_points = area_raw or []
         scene_vis = draw_evidence_scene(
             frame,
             subject_bbox=det.bbox,
@@ -294,7 +470,14 @@ class MaskHairnetChefHatTask:
     @staticmethod
     def _parse_zones(area_position: str) -> list:
         try:
-            return json.loads(area_position) if area_position else []
+            parsed = json.loads(area_position) if area_position else []
         except Exception as e:
             print(f"[MaskHairnetChefHat] Failed to parse areaPosition: {e}")
             return []
+        if not parsed or not isinstance(parsed, list):
+            return []
+        # Bare polygon: [{"x":..,"y":..}, ...] → single zone
+        first = parsed[0]
+        if isinstance(first, dict) and "x" in first and "y" in first and "point" not in first:
+            return [{"point": parsed}]
+        return parsed

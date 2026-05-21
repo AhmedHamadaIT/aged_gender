@@ -215,20 +215,26 @@ curl -s -X POST "$BASE/api/tasks" \
 
 ---
 
-## Part I — 4. Tasks — `MASK_HAIRNET_CHEF_HAT` (PPE zone)
+## Part I — 4. Tasks — `MASK_HAIRNET_CHEF_HAT` (PPE polygon zone)
+
+PPE uses a **polygon** in pixel coordinates — not a line. Events use the Eyego **`data`** envelope with **`personStructural`**. Guide: [../service_doc/mask_hairnet_chef_hat.md](../service_doc/mask_hairnet_chef_hat.md).
 
 ```bash
 curl -s -X POST "$BASE/api/tasks" \
   -H "Content-Type: application/json" \
   -d '{
-    "taskId": 20,
-    "taskName": "kitchen_ppe",
+    "taskId": 8,
+    "taskName": "staff_safety_bar_area",
     "algorithmType": "MASK_HAIRNET_CHEF_HAT",
-    "channelId": 1,
+    "channelId": 7,
     "enable": true,
     "threshold": 70,
-    "areaPosition": "[{\"line_id\":\"z1\",\"point\":[{\"x\":50,\"y\":50},{\"x\":600,\"y\":50},{\"x\":600,\"y\":500},{\"x\":50,\"y\":500}],\"direction\":0}]",
-    "detailConfig": { "alarmType": ["no_mask", "no_hat"] }
+    "areaPosition": "[{\"x\":1004,\"y\":56},{\"x\":1831,\"y\":89},{\"x\":2013,\"y\":1831},{\"x\":308,\"y\":1876},{\"x\":304,\"y\":1872}]",
+    "detailConfig": {
+      "alarmType": ["no_mask", "no_hat"],
+      "channelName": "7",
+      "deviceSN": "HQDZW1SBCABAH0235"
+    }
   }'
 ```
 
@@ -238,13 +244,13 @@ curl -s -X POST "$BASE/api/tasks" \
 {
   "status": "created",
   "task": {
-    "taskId": 20,
-    "taskName": "kitchen_ppe",
+    "taskId": 8,
+    "taskName": "staff_safety_bar_area",
     "algorithmType": "MASK_HAIRNET_CHEF_HAT",
-    "channelId": 1,
+    "channelId": 7,
     "enable": true,
     "threshold": 70,
-    "areaPosition": "[{\"line_id\":\"z1\",\"point\":[{\"x\":50,\"y\":50},{\"x\":600,\"y\":50},{\"x\":600,\"y\":500},{\"x\":50,\"y\":500}],\"direction\":0}]",
+    "areaPosition": "[{\"x\":1004,\"y\":56},{\"x\":1831,\"y\":89},{\"x\":2013,\"y\":1831},{\"x\":308,\"y\":1876},{\"x\":304,\"y\":1872}]",
     "detailConfig": {
       "enableAttrDetect": false,
       "enableReid": false,
@@ -256,6 +262,32 @@ curl -s -X POST "$BASE/api/tasks" \
   }
 }
 ```
+
+### Example SSE event (illustrative)
+
+```json
+{
+  "eventType": "MASK_HAIRNET_CHEF_HAT",
+  "taskId": 8,
+  "taskName": "staff_safety_bar_area",
+  "channelId": "7",
+  "data": {
+    "algorithmType": "MASK_HAIRNET_CHEF_HAT",
+    "channelId": 7,
+    "channelName": "7",
+    "deviceSN": "HQDZW1SBCABAH0235",
+    "personStructural": "{\"alarmType\":\"no_chef_hat\",\"areaPoints\":\"[{\\\"x\\\":1004,\\\"y\\\":56}]\",\"objectX\":1417,\"objectY\":115,\"objectWidth\":117,\"objectHeight\":144,\"score\":79}",
+    "captureUrl": "https://storage.googleapis.com/logs-data-images/MASK_HAIRNET_CHEF_HAT_….jpg….jpg",
+    "sceneUrl": "https://storage.googleapis.com/logs-data-images/MASK_HAIRNET_CHEF_HAT_….jpg….jpg"
+  },
+  "evidence": {
+    "captureImage": { "type": "capture", "path": "2026-03-24/MASK_HAIRNET_CHEF_HAT_….jpg" },
+    "sceneImage":   { "type": "scene",   "path": "2026-03-24/MASK_HAIRNET_CHEF_HAT_….jpg" }
+  }
+}
+```
+
+Filter SSE: `curl -sN "$BASE/detection/stream?eventType=MASK_HAIRNET_CHEF_HAT&taskId=8"`. URL bases: `PPE_CLOUD_IMAGE_BASE` / `PPE_CAPTURE_URL_BASE` / `PPE_SCENE_URL_BASE`.
 
 ---
 
