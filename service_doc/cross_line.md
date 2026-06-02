@@ -17,7 +17,10 @@ Implementation: `services/cross_line.py` (`CrossLineTask`).
 | Register task | `POST /api/tasks` | `algorithmType`: `"CROSS_LINE"` |
 | Start | `POST /detection/start` | Spawns frame bus + worker |
 | Monitor | `GET /detection/status`, `GET /detection/stream?...` | Status + crossing events |
+| Hot-update line | `PATCH /api/tasks/{task_id}/lines/{line_id}` | Change one line without full task PUT |
 | Stop | `POST /detection/stop` | Tear down |
+
+**Runtime tuning:** `CROSS_LINE_DEBOUNCE_SEC` (default `0`) adds a per `(track_id, line_id)` cooldown between crossing events. See [`docs/OPTIMIZATION_REFERENCE.md`](../docs/OPTIMIZATION_REFERENCE.md).
 
 ## Task configuration
 

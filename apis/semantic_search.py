@@ -44,7 +44,12 @@ class SemanticSearchResource(BaseResource):
             raise HTTPException(status_code=400, detail="Text query cannot be empty.")
 
         try:
-            results = self.semantic_search_service.search_by_text(text_query=text_query, top_k=top_k)
+            # M-13: run sync search in thread pool to avoid blocking the event loop.
+            import asyncio as _aio
+            results = await _aio.to_thread(
+                self.semantic_search_service.search_by_text,
+                text_query=text_query, top_k=top_k,
+            )
 
             return {
                 "status": "success",
@@ -82,7 +87,10 @@ class SemanticSearchResource(BaseResource):
                 raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
             image_bytes = await file.read()
             try:
-                results = self.semantic_search_service.search_by_image(image_bytes, top_k=top_k)
+                import asyncio as _aio
+                results = await _aio.to_thread(
+                    self.semantic_search_service.search_by_image, image_bytes, top_k
+                )
             except RuntimeError as e:
                 raise HTTPException(
                     status_code=503,

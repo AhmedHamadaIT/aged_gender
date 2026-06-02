@@ -52,6 +52,7 @@ import json
 import hashlib
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, Dict, Tuple, List, Set
 
 import cv2
@@ -59,6 +60,7 @@ import cv2
 _log_cl = logging.getLogger(__name__)
 
 from utils import build_image, draw_evidence_scene, make_evidence_paths
+from utils.geometry import line_side as _line_side  # noqa: F401  (M-9)
 
 # ── Schedule helpers ──────────────────────────────────────────────────────────
 
@@ -66,20 +68,6 @@ _WEEKDAY_MAP = {
     "MONDAY": 0, "TUESDAY": 1, "WEDNESDAY": 2, "THURSDAY": 3,
     "FRIDAY": 4, "SATURDAY": 5, "SUNDAY": 6,
 }
-
-# ── Geometry ──────────────────────────────────────────────────────────────────
-
-def _line_side(point: Tuple, p1: Tuple, p2: Tuple) -> int:
-    """
-    Sign of the 2D cross product (p2-p1) × (point-p1).
-    Returns  1 → left of directed line p1→p2
-            -1 → right
-             0 → on the line
-    """
-    cross = (p2[0] - p1[0]) * (point[1] - p1[1]) - (p2[1] - p1[1]) * (point[0] - p1[0])
-    if cross > 0: return  1
-    if cross < 0: return -1
-    return 0
 
 
 def _parse_xy_pair(raw: Any) -> Optional[Tuple[float, float]]:
@@ -269,6 +257,16 @@ class CrossLineTask:
         _anchor = os.getenv("CROSSLINE_ANCHOR_POINT", "bottom").strip().lower()
         self._use_bottom_anchor = _anchor in ("bottom", "foot", "feet")
 
+        # QW-8: post-crossing cooldown per (track_id, line_id) to suppress
+        # repeated firings when a person lingers near the line.
+        # 0 = disabled (default, preserves existing behavior).
+        _debounce_env = float(os.getenv("CROSS_LINE_DEBOUNCE_SEC", "0"))
+        self._debounce_sec: float = max(
+            0.0, detail.get("debounceSec", _debounce_env)
+        )
+        # {(track_id, line_id): wall-clock time of last crossing fire}
+        self._last_crossing_wall: Dict[tuple, float] = {}
+
         # Age/Gender — loaded only when enableAttrDetect is true
         self._age_gender = None
         self._age_gender_load_error: Optional[str] = None
@@ -293,6 +291,8 @@ class CrossLineTask:
         os.makedirs(self._events_dir,  exist_ok=True)
 
         self._jsonl_path = os.path.join(self._events_dir, f"task_{self.task_id}.jsonl")
+        from utils.jsonl_writer import JsonlWriter as _JW
+        self._jsonl_writer = _JW(Path(self._jsonl_path))
 
         _log_cl.info(
             "[CrossLine/%s] Ready — lines=%d attr=%s model=%s anchor=%s "
@@ -457,11 +457,18 @@ class CrossLineTask:
         crossing_dir  = 1 if prev_side > 0 else 2
         direction_cfg = line.get("direction", 0)
 
-        if direction_cfg == 0:
-            return crossing_dir
-        if direction_cfg == crossing_dir:
-            return crossing_dir
-        return None
+        if direction_cfg != 0 and direction_cfg != crossing_dir:
+            return None
+
+        # QW-8: debounce — suppress repeat crossings for the same (track, line) pair
+        if self._debounce_sec > 0:
+            key = (track_id, lid)
+            now = time.time()
+            if now - self._last_crossing_wall.get(key, 0.0) < self._debounce_sec:
+                return None
+            self._last_crossing_wall[key] = now
+
+        return crossing_dir
 
     def _crossing_anchor(self, det) -> Tuple[int, int]:
         """Point used for line-side tests: foot/bottom-mid for counting, else bbox center."""
@@ -480,6 +487,11 @@ class CrossLineTask:
             }
             self._reentry_grace_active = {
                 k: v for k, v in self._reentry_grace_active.items() if k in active_track_ids
+            }
+            # Prune debounce map for absent tracks.
+            self._last_crossing_wall = {
+                k: v for k, v in self._last_crossing_wall.items()
+                if k[0] in active_track_ids
             }
             return
 
@@ -603,8 +615,7 @@ class CrossLineTask:
         )
         cv2.imwrite(scene_path, scene_vis)
 
-        with open(self._jsonl_path, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        self._jsonl_writer.append(event)
 
     # ── Schedule ──────────────────────────────────────────────────────────────
 
@@ -616,3 +627,44 @@ class CrossLineTask:
         return self.valid_start_ms <= ms_now <= self.valid_end_ms
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+
+# ── Module-level helpers (M-5) ────────────────────────────────────────────────
+
+def update_line_in_area_position(
+    area_position: str,
+    line_id_or_name: str,
+    *,
+    point: Optional[List[dict]] = None,
+    direction: Optional[int] = None,
+) -> str:
+    """
+    Return a new JSON-encoded areaPosition string with the specified line updated.
+
+    Matches the line by ``line_id`` first, then by ``line_name`` (case-insensitive).
+    Raises ``ValueError`` if no matching line is found.
+    """
+    try:
+        lines: List[dict] = json.loads(area_position) if area_position else []
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid areaPosition JSON: {exc}") from exc
+
+    target = line_id_or_name.lower()
+    matched = False
+    for entry in lines:
+        lid = str(entry.get("line_id", "")).lower()
+        lname = str(entry.get("line_name", "")).lower()
+        if lid == target or lname == target:
+            if point is not None:
+                entry["point"] = point
+            if direction is not None:
+                entry["direction"] = direction
+            matched = True
+            break
+
+    if not matched:
+        raise ValueError(
+            f"Line '{line_id_or_name}' not found in areaPosition"
+        )
+
+    return json.dumps(lines)

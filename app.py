@@ -43,12 +43,19 @@ import asyncio
 import json
 import logging
 import os
+
+# Wire LOG_LEVEL env to Python root logger so all modules honour it.
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s %(name)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
+)
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query, Request, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Form, Query, Request, WebSocket
 from fastapi.responses import FileResponse, StreamingResponse
+from utils.auth import check_upload_size, require_auth
 
 from apis.cameras import (
     CameraPatchRequest,
@@ -65,7 +72,7 @@ from apis.detection_stream import (
     DetectionSSEBridge,
     StreamFilters,
 )
-from apis.tasks     import task_registry, TaskConfig
+from apis.tasks     import task_registry, TaskConfig, CrossLineLinePatch
 from apis.ws_live   import live_frames_ws, live_events_ws
 from resilience.watchdog import DetectionWatchdog
 from apis.face_lib  import router as face_router
@@ -73,6 +80,7 @@ from schemas        import DetectionRequest, DetectionStatus
 from apis.person_search import person_search_api
 from apis.semantic_search import semantic_search_api
 from utils.storage_cleanup import start_storage_cleanup_thread
+from utils.metrics import metrics_response
 from vision_utils import log_evidence_dirs_disk_usage
 
 
@@ -115,6 +123,15 @@ async def lifespan(app: FastAPI):
         app.state.detection_watchdog = None
         await bridge.stop()
         app.state.detection_sse_bridge = None
+        # M-8: stop all camera pipelines cleanly before the process exits.
+        try:
+            detection._stop_all()
+        except Exception:
+            pass
+        # M-8: signal the storage cleanup thread to exit cooperatively.
+        handle = app.state.storage_cleanup_thread
+        if handle is not None and hasattr(handle, "stop"):
+            handle.stop(timeout=3.0)
         app.state.storage_cleanup_thread = None
 
 
@@ -132,15 +149,31 @@ app.include_router(face_router)
 # ─────────────────────────────────────────────
 # Health
 # ─────────────────────────────────────────────
+_MODEL_META: dict = {}
+
+
+def _get_model_meta() -> dict:
+    """Build model metadata dict once and cache it (additive fields for QW-13)."""
+    global _MODEL_META
+    if not _MODEL_META:
+        import datetime as _dt
+        _MODEL_META = {
+            "model_version": os.getenv("MODEL_VERSION", "unknown"),
+            "model_file": os.getenv("YOLO_MODEL", "unknown"),
+            "model_loaded_at": _dt.datetime.utcnow().isoformat() + "Z",
+        }
+    return _MODEL_META
+
+
 @app.get("/")
 def root():
-    return {"service": "Vision Pipeline API", "version": "2.0.0"}
+    return {"service": "Vision Pipeline API", "version": "2.0.0", **_get_model_meta()}
 
 
 @app.get("/health")
 def health():
     """Liveness probe — process is up; does not check Redis, Qdrant, or model files."""
-    return {"status": "ok", "service": "Vision Pipeline API", "version": "2.0.0"}
+    return {"status": "ok", "service": "Vision Pipeline API", "version": "2.0.0", **_get_model_meta()}
 
 
 @app.get("/status", response_model=DetectionStatus)
@@ -149,10 +182,22 @@ def api_status():
     return detection.on_get()
 
 
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    """
+    M-12: Prometheus text exposition format.
+    Only populated when PROMETHEUS_ENABLED=true (default off).
+    Does NOT replace /stream/metrics (JSON).
+    """
+    from fastapi.responses import Response
+    body, content_type = metrics_response()
+    return Response(content=body, media_type=content_type)
+
+
 # ─────────────────────────────────────────────
 # Camera routes
 # ─────────────────────────────────────────────
-@app.post("/cameras")
+@app.post("/cameras", dependencies=[Depends(require_auth)])
 def camera_add(req: CameraSetupRequest):
     return camera_registry.on_post(req)
 
@@ -191,17 +236,17 @@ def evidence_file(file_path: str):
     raise HTTPException(status_code=404, detail=f"Evidence not found: {file_path}")
 
 
-@app.patch("/cameras/{cam_id}")
+@app.patch("/cameras/{cam_id}", dependencies=[Depends(require_auth)])
 def camera_patch(cam_id: str, req: CameraPatchRequest):
     return camera_registry.on_patch(cam_id, req)
 
 
-@app.delete("/cameras/{cam_id}")
+@app.delete("/cameras/{cam_id}", dependencies=[Depends(require_auth)])
 def camera_delete(cam_id: str):
     return camera_registry.on_delete(cam_id)
 
 
-@app.post("/cameras/{cam_id}/tasks")
+@app.post("/cameras/{cam_id}/tasks", dependencies=[Depends(require_auth)])
 def camera_attach_task(cam_id: str, body: CameraTaskLinkBody):
     return camera_link_task(cam_id, body)
 
@@ -209,7 +254,7 @@ def camera_attach_task(cam_id: str, body: CameraTaskLinkBody):
 # ─────────────────────────────────────────────
 # Task routes
 # ─────────────────────────────────────────────
-@app.post("/api/tasks")
+@app.post("/api/tasks", dependencies=[Depends(require_auth)])
 def task_create(config: TaskConfig):
     return task_registry.on_post(config)
 
@@ -224,20 +269,26 @@ def task_get(task_id: int):
     return task_registry.on_get_one(task_id)
 
 
-@app.put("/api/tasks/{task_id}")
+@app.put("/api/tasks/{task_id}", dependencies=[Depends(require_auth)])
 def task_update(task_id: int, config: TaskConfig):
     return task_registry.on_put(task_id, config)
 
 
-@app.delete("/api/tasks/{task_id}")
+@app.delete("/api/tasks/{task_id}", dependencies=[Depends(require_auth)])
 def task_delete(task_id: int):
     return task_registry.on_delete(task_id)
+
+
+@app.patch("/api/tasks/{task_id}/lines/{line_id}", dependencies=[Depends(require_auth)])
+def task_patch_line(task_id: int, line_id: str, patch: CrossLineLinePatch):
+    """M-5: Hot-patch a single virtual line geometry in a CROSS_LINE task."""
+    return task_registry.on_patch_cross_line(task_id, line_id, patch)
 
 
 # ─────────────────────────────────────────────
 # Detection routes
 # ─────────────────────────────────────────────
-@app.post("/detection/start")
+@app.post("/detection/start", dependencies=[Depends(require_auth)])
 def detection_start(
     camera_id: Optional[str] = None,
     all_channels: bool = False,
@@ -251,13 +302,13 @@ def detection_start(
     )
 
 
-@app.post("/detection/stop")
+@app.post("/detection/stop", dependencies=[Depends(require_auth)])
 def detection_stop(camera_id: str = None):
     action = "stop_all" if not camera_id else "stop"
     return detection.on_post(DetectionRequest(action=action, camera_id=camera_id))
 
 
-@app.post("/detection/stop/all")
+@app.post("/detection/stop/all", dependencies=[Depends(require_auth)])
 def detection_stop_all():
     """Alias for stopping all cameras (same as ``POST /detection/stop`` with no ``camera_id``)."""
     return detection.on_post(DetectionRequest(action="stop_all", camera_id=None))
@@ -311,7 +362,11 @@ async def detection_stream(
     if last_raw:
         try:
             lid = int(str(last_raw).strip())
-            for ev in bridge.replay_after(lid):
+            # S-7: use Redis Streams replay when REDIS_STREAMS_ENABLED=true,
+            # otherwise fall back to in-memory ring.
+            cam_filter = str(channelId) if channelId else "*"
+            replay_events = await bridge.replay_after_stream(lid, camera_id=cam_filter)
+            for ev in replay_events:
                 try:
                     client_q.put_nowait(ev)
                 except asyncio.QueueFull:
@@ -440,7 +495,7 @@ async def task_live_stream(websocket: WebSocket, task_name: str):
 # ─────────────────────────────────────────────
 # ReID routes
 # ─────────────────────────────────────────────
-@app.post("/person_search/search")
+@app.post("/person_search/search", dependencies=[Depends(check_upload_size)])
 async def person_search(file: UploadFile = File(...), top_k: int = Form(10)):
     return await person_search_api.search(file, top_k)
 
@@ -454,7 +509,7 @@ def person_search_health():
 # ─────────────────────────────────────────────
 # Semantic Search routes
 # ─────────────────────────────────────────────
-@app.post("/semantic_search/search")
+@app.post("/semantic_search/search", dependencies=[Depends(check_upload_size)])
 async def semantic_search(
     text_query: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),

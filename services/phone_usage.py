@@ -35,6 +35,7 @@ import numpy as np
 
 from utils import build_image, draw_evidence_scene, make_evidence_paths
 from utils.task_payload import task_frame_bgr
+from utils.geometry import point_in_polygon_dict as _point_in_polygon  # M-9
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -42,22 +43,6 @@ _WEEKDAY_MAP = {
     "MONDAY": 0, "TUESDAY": 1, "WEDNESDAY": 2, "THURSDAY": 3,
     "FRIDAY": 4, "SATURDAY": 5, "SUNDAY": 6,
 }
-
-
-# ── Polygon helpers ───────────────────────────────────────────────────────────
-
-def _point_in_polygon(point: tuple, polygon: list) -> bool:
-    """Ray-casting algorithm — returns True if point is inside the polygon."""
-    x, y   = point
-    n      = len(polygon)
-    inside = False
-    px, py = polygon[-1]["x"], polygon[-1]["y"]
-    for pt in polygon:
-        cx, cy = pt["x"], pt["y"]
-        if ((cy > y) != (py > y)) and (x < (px - cx) * (y - cy) / (py - cy + 1e-9) + cx):
-            inside = not inside
-        px, py = cx, cy
-    return inside
 
 
 # ── Task ──────────────────────────────────────────────────────────────────────
@@ -89,6 +74,9 @@ class PhoneUsageTask:
         os.makedirs(self._events_dir,  exist_ok=True)
 
         self._jsonl_path = os.path.join(self._events_dir, f"task_{self.task_id}.jsonl")
+        from pathlib import Path
+        from utils.jsonl_writer import JsonlWriter as _JW
+        self._jsonl_writer = _JW(Path(self._jsonl_path))
 
         print(
             f"[PhoneUsage/{self.task_id}] Ready — "
@@ -249,8 +237,7 @@ class PhoneUsageTask:
         )
         cv2.imwrite(scene_path, scene_vis)
 
-        with open(self._jsonl_path, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        self._jsonl_writer.append(event)
 
     # ── Schedule ──────────────────────────────────────────────────────────────
 

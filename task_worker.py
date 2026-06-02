@@ -183,6 +183,25 @@ def run_task_worker(
 
     # ── Emit helpers ──────────────────────────────────────────────────────
 
+    # S-7: Redis Streams shadow — optional XADD alongside Pub/Sub.
+    _streams_enabled = os.getenv("REDIS_STREAMS_ENABLED", "false").lower() in ("true", "1", "yes")
+    _stream_key = f"live:events:{camera_id}"
+    _stream_maxlen = max(1, int(os.getenv("REDIS_STREAMS_MAXLEN", "500")))
+
+    def _shadow_xadd(event: dict, line: str) -> None:
+        """S-7: shadow-write to Redis Stream alongside Pub/Sub."""
+        if not _streams_enabled or redis_client is None:
+            return
+        try:
+            redis_client.xadd(
+                _stream_key,
+                {"data": line},
+                maxlen=_stream_maxlen,
+                approximate=True,
+            )
+        except Exception:
+            pass  # Streams are a shadow; Pub/Sub is authoritative.
+
     def _emit_event(event: dict) -> None:
         nonlocal redis_client, last_drain
         seq = next_seq(event_seq_counter, event_seq_lock)
@@ -205,7 +224,9 @@ def run_task_worker(
                         redis_breaker.record_failure()
                         time.sleep(retry_sleep)
                         redis_client = _make_redis_client()
-            if not published:
+            if published:
+                _shadow_xadd(event, line)
+            else:
                 ok, reason = event_buffer.append(event)
                 if not ok:
                     _log_event_drop(camera_id, task_id, reason, event)
@@ -333,7 +354,20 @@ def run_task_worker(
                 break
 
         try:
-            payload = task_queue.get(timeout=1.0)
+            _raw = task_queue.get(timeout=1.0)
+            # M-2: resolve FrameRef → dict when SHM fan-out is active.
+            from utils.task_payload import resolve_payload
+            payload = resolve_payload(_raw)
+            # M-4: apply per-task confThreshold to filter detections.
+            _per_task_conf = float(
+                (task_config.get("detailConfig") or {}).get("confThreshold", 0.0)
+            )
+            if _per_task_conf > 0.0:
+                _det = payload.get("detection") or {}
+                _items = _det.get("items") or []
+                _filtered = [d for d in _items if float(d.get("conf", 1.0)) >= _per_task_conf]
+                if len(_filtered) != len(_items):
+                    payload = {**payload, "detection": {**_det, "items": _filtered, "count": len(_filtered)}}
         except _queue.Empty:
             if time.monotonic() - last_drain >= drain_interval:
                 last_drain = time.monotonic()

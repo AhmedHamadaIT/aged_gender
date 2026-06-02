@@ -20,6 +20,24 @@ import cv2
 import numpy as np
 
 
+def resolve_payload(item: Any) -> "dict[str, Any]":
+    """
+    Normalise an item received from the task queue.
+
+    When TASK_SHM_ENABLED=true, FrameBus enqueues a ``FrameRef`` instead of
+    a full dict.  This function converts it back into the canonical payload
+    dict that every task algorithm expects.  A plain dict is returned as-is.
+    """
+    try:
+        from utils.shm_ring import FrameRef, frame_ref_to_payload
+
+        if isinstance(item, FrameRef):
+            return frame_ref_to_payload(item)
+    except ImportError:
+        pass
+    return item  # type: ignore[return-value]
+
+
 def task_frame_bgr(payload: dict[str, Any]) -> np.ndarray:
     """
     Return a BGR ``uint8`` image for task algorithms.

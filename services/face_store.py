@@ -145,6 +145,17 @@ class FaceStore:
         print(f"[FaceStore] Loaded {len(self._libraries)} libraries, "
               f"{len(self._stranger_meta)} strangers from {self._storage_dir}")
 
+        # M-10: start periodic FAISS persistence thread.
+        _save_interval = max(30, int(os.getenv("FAISS_SAVE_INTERVAL_SEC", "300")))
+        self._periodic_save_stop = threading.Event()
+        self._periodic_save_thread = threading.Thread(
+            target=self._periodic_save_loop,
+            args=(_save_interval,),
+            name="faiss_periodic_save",
+            daemon=True,
+        )
+        self._periodic_save_thread.start()
+
     # ── Loading ───────────────────────────────
 
     def _load_all(self):
@@ -225,6 +236,28 @@ class FaceStore:
             faiss.write_index(self._stranger_index, str(self._surv_dir / "strangers.faiss"))
         (self._surv_dir / "strangers_meta.json").write_text(
             json.dumps(self._stranger_meta, indent=2))
+
+    def _save_all(self) -> None:
+        """Atomically persist all libraries and the stranger index."""
+        with self._lock:
+            for lib_id in list(self._libraries):
+                try:
+                    self._save_library(lib_id)
+                except Exception as exc:
+                    print(f"[FaceStore] periodic save lib {lib_id} failed: {exc}")
+            try:
+                self._save_strangers()
+            except Exception as exc:
+                print(f"[FaceStore] periodic save strangers failed: {exc}")
+
+    def _periodic_save_loop(self, interval: int) -> None:
+        """Background loop: save all FAISS indices every *interval* seconds."""
+        while not self._periodic_save_stop.wait(timeout=interval):
+            self._save_all()
+
+    def stop_periodic_save(self) -> None:
+        """Signal the periodic save thread to exit (call on graceful shutdown)."""
+        self._periodic_save_stop.set()
 
     # ── Library CRUD ──────────────────────────
 

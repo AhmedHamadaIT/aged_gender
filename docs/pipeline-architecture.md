@@ -80,6 +80,25 @@ Evidence images (capture/scene) still use task-defined paths (mostly `.jpg`); th
 | `STATE_UPDATE_MIN_SEC` | `1.0` | Min seconds between `shared_state` writes. |
 | `PERF_LOG_INTERVAL` | `300` | Log YOLO/encode/publish timing every N frames. |
 | `LIVE_ANNOTATION_MODE` | `opencv` (code default; Compose may override) | `opencv` is lighter than `ultralytics` `plot()`. |
+| `ANNOTATION_THREADS` | `0` | If &gt; 0, annotate+encode+publish run in a thread pool; inference loop stays sync. |
+| `DYNAMIC_FRAME_SKIP` | `false` | Increase skip-N when task queues are near full. |
+| `LIVE_PUBLISH_REQUIRE_SUBSCRIBER` | `false` | Skip Redis `live:frame:*` publish when subscriber count is 0. |
+| `MODEL_WARMUP_FRAMES` | `5` | Warm-up inferences after YOLO load (TensorRT first-frame spike). |
+| `MIN_DETECTION_AREA_PX` | `0` | Filter small boxes before task fan-out. |
+| `BBOX_SMOOTHING_ALPHA` | `0` | EMA smoothing on annotation boxes only (not task logic). |
+| `TASK_SHM_ENABLED` | `false` | Fan-out `FrameRef` via shared memory instead of pickled JPEG. |
+| `TRACKER_STATE_RESTORE` | `false` | JSON checkpoint of last track bboxes on stop/startup. |
+| `CUDA_PREPROCESS` | `false` | Try `cv2.cuda.resize` before CPU resize. |
+| `CPU_AFFINITY_ENABLED` | `false` | Pin FrameBus process to cores (`CAMERA_CPU_AFFINITY`). |
+| `WS_MUX_ENABLED` | `false` | One Redis pubsub per camera for WebSocket live clients. |
+
+Full list: [`OPTIMIZATION_REFERENCE.md`](./OPTIMIZATION_REFERENCE.md).
+
+## Task worker and SSE delivery
+
+- **`task_worker.py`**: optional `XADD` to `live:events:{camera_id}` when `REDIS_STREAMS_ENABLED=true` (Pub/Sub unchanged).
+- **`apis/detection_stream.py`**: `replay_after()` (in-memory ring) and `replay_after_stream()` (Redis Streams) for `Last-Event-ID` on `GET /detection/stream`.
+- **`task_worker.py`**: honors `detailConfig.confThreshold` when filtering detection items (M-4).
 
 ## Worker process lifecycle and zombie prevention
 

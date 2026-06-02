@@ -23,7 +23,8 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from utils.auth import check_upload_size, require_auth
 
 
 router = APIRouter(prefix="/api/face", tags=["face"])
@@ -98,7 +99,7 @@ def delete_lib(lib_id: int):
 # ─────────────────────────────────────────────
 # Person routes
 # ─────────────────────────────────────────────
-@router.post("/lib/{lib_id}/persons")
+@router.post("/lib/{lib_id}/persons", dependencies=[Depends(require_auth), Depends(check_upload_size)])
 async def add_person(
     lib_id   : int,
     person_id: int              = Form(...),
@@ -114,12 +115,15 @@ async def add_person(
     embeddings  = []
     face_images = []
 
+    import asyncio as _aio
+
     for img_file in images:
         img = _read_image(img_file)
         if img is None:
             raise HTTPException(status_code=400, detail=f"Cannot read image: {img_file.filename}")
 
-        emb = engine.embedding_from_image(img)
+        # M-13: run embedding in a thread to avoid blocking the event loop.
+        emb = await _aio.to_thread(engine.embedding_from_image, img)
         if emb is None:
             raise HTTPException(
                 status_code=400,
@@ -160,7 +164,7 @@ def delete_person(lib_id: int, person_id: int):
 # ─────────────────────────────────────────────
 # Recognition route
 # ─────────────────────────────────────────────
-@router.post("/recognize")
+@router.post("/recognize", dependencies=[Depends(check_upload_size)])
 async def recognize(
     image    : UploadFile = File(...),
     lib_ids  : str        = Form("-1"),
@@ -174,7 +178,8 @@ async def recognize(
     if img is None:
         raise HTTPException(status_code=400, detail="Cannot read image.")
 
-    faces = engine.detect_and_embed(img, det_thresh=0.4)
+    import asyncio as _aio
+    faces = await _aio.to_thread(engine.detect_and_embed, img, 0.4)
     if not faces:
         raise HTTPException(status_code=400, detail="No face detected in image.")
 
@@ -207,7 +212,7 @@ def list_strangers(
     return _get_store().list_strangers(limit=limit, offset=offset)
 
 
-@router.post("/strangers/search")
+@router.post("/strangers/search", dependencies=[Depends(check_upload_size)])
 async def search_strangers(
     image    : UploadFile = File(...),
     top_k    : int        = Form(5),

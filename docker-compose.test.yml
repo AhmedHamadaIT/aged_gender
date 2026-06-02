@@ -1,0 +1,38 @@
+version: "3.9"
+
+# Integration test stack — lightweight services only.
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   python -m pytest tests/integration/ -m "integration" -v
+#   docker compose -f docker-compose.test.yml down
+
+services:
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6399:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: "no"
+
+  qdrant-test:
+    image: qdrant/qdrant:v1.9.1
+    ports:
+      - "6334:6334"
+      - "6335:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: "no"
+
+  mediamtx-test:
+    image: bluenviron/mediamtx:latest
+    ports:
+      - "8554:8554"    # RTSP
+      - "8888:8888"    # WebRTC / HLS (unused in unit tests)
+    restart: "no"

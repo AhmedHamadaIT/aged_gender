@@ -23,6 +23,12 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   # ── Qdrant vector DB (ReID identity store) ──
   qdrant:
@@ -34,6 +40,12 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # ── ML Pipeline ────────────────────────────
   yolo-detect:
@@ -59,12 +71,12 @@ services:
     tty: true
 
     depends_on:
-      - qdrant
-      - redis
-
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     env_file:
       - .env
-
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
@@ -83,7 +95,6 @@ services:
       # RTSP defaults favor decode stability (HEVC/H.264, jittery Wi‑Fi, substreams).
       # For lowest latency on a clean LAN + H.264, set RTSP_PROFILE=performance and RTSP_LOW_DELAY=true.
       - RTSP_PROFILE=balanced
-      - FORCE_TRANSCODE=false
       - RTSP_DISCARD_CORRUPT=true
       - RTSP_LOW_DELAY=false
       - RTSP_OPENCV_BUFFER_SIZE=3
@@ -105,7 +116,6 @@ services:
       # Hardware decode (Jetson): auto uses /etc/nv_tegra_release or device-tree; true forces hw map; false = CPU.
       # Override decoder names if your ffmpeg build uses nvmpi instead of v4l2m2m (see .env.example).
       - RTSP_ENABLE_GPU_DECODE=${RTSP_ENABLE_GPU_DECODE:-auto}
-      - RTSP_HWACCEL=cuda
       - RTSP_JETSON_HEVC_DECODER=${RTSP_JETSON_HEVC_DECODER:-}
       - RTSP_JETSON_H264_DECODER=${RTSP_JETSON_H264_DECODER:-}
       - RTSP_HWDECODER=${RTSP_HWDECODER:-}
@@ -115,11 +125,7 @@ services:
       - FRAME_SKIP=2
       - STREAM_TARGET_FPS=5
       - QUALITY_LADDER=854x480x8,640x360x5
-      - STREAM_DOWNGRADE_AFTER=20
-      - STREAM_DOWNGRADE_COOLDOWN=30
       - FRAME_MIN_VARIANCE=8.0
-      - STREAM_MAX_FAILS=15
-      - STREAM_RECONNECT_DELAY=2.0
       - EMBED_CONF_THRESHOLD=0.45
       - EMBED_BATCH_SIZE=8
       - EMBED_FLUSH_TIMEOUT=3.0

@@ -23,6 +23,7 @@ Base URL for all examples: `http://localhost:9000`
 13. [Stream metrics and quality (`/stream/*`)](#13-stream-metrics-and-quality-stream)
 14. [Person search / ReID (`/person_search/*`)](#14-person-search-reid-person_search)
 15. [Semantic image search (`/semantic_search/*`)](#15-semantic-image-search-semantic_search)
+16. [Frontend ↔ backend integration](./FRONTEND_BACKEND_INTEGRATION.md) — dashboards, SSE/WebSocket, face attendance
 
 ---
 
@@ -482,7 +483,12 @@ curl -N "http://localhost:9000/detection/stream?eventType=CASHIER_BOX_OPEN"
 
 ### Reconnect / resume (optional)
 
-Task events may include a monotonic **`_seq`** field when sequencing is enabled. On reconnect, clients can send the standard SSE header **`Last-Event-ID`** with the last seen sequence number; the server replays a short ring buffer of newer events before live delivery resumes. This is best-effort and bounded by `SSE_REPLAY_BUFFER` (see [`stream_test_runbook.md`](./stream_test_runbook.md)).
+Task events may include a monotonic **`_seq`** field when sequencing is enabled. On reconnect, clients can send the standard SSE header **`Last-Event-ID`** with the last seen sequence number; the server replays newer events before live delivery resumes:
+
+1. In-memory ring bounded by `SSE_REPLAY_BUFFER` (default 200).
+2. When `REDIS_STREAMS_ENABLED=true`, also replays from Redis Stream `live:events:{camera_id}` (shadow of Pub/Sub).
+
+This is best-effort. See [`OPTIMIZATION_REFERENCE.md`](./OPTIMIZATION_REFERENCE.md) and [`stream_test_runbook.md`](./stream_test_runbook.md).
 
 ```bash
 curl -N -H 'Last-Event-ID: 42' 'http://localhost:9000/detection/stream?channelId=1'

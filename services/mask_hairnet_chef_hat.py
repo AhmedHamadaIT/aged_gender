@@ -48,6 +48,7 @@ import numpy as np
 
 from utils import build_image, draw_evidence_scene
 from utils.task_payload import task_frame_bgr
+from utils.geometry import point_in_polygon_dict as _point_in_polygon  # M-9
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -222,20 +223,6 @@ def build_ppe_spec_data(
 
 # ── Polygon helpers ───────────────────────────────────────────────────────────
 
-def _point_in_polygon(point: tuple, polygon: list) -> bool:
-    """Ray-casting algorithm — returns True if point is inside the polygon."""
-    x, y   = point
-    n      = len(polygon)
-    inside = False
-    px, py = polygon[-1]["x"], polygon[-1]["y"]
-    for pt in polygon:
-        cx, cy = pt["x"], pt["y"]
-        if ((cy > y) != (py > y)) and (x < (px - cx) * (y - cy) / (py - cy + 1e-9) + cx):
-            inside = not inside
-        px, py = cx, cy
-    return inside
-
-
 # ── Task ──────────────────────────────────────────────────────────────────────
 
 class MaskHairnetChefHatTask:
@@ -271,7 +258,21 @@ class MaskHairnetChefHatTask:
         self.valid_end_ms   = task_config.get("validEndTime",   86400000)
 
         from services.ppe import PPEService
+        from collections import deque as _deque
         self._ppe = PPEService()
+
+        # QW-9: temporal voting window — suppress jittery per-frame alarms.
+        # PPE_VOTE_WINDOW=1 (default) keeps the per-frame behavior unchanged.
+        try:
+            self._vote_window = max(1, int(os.getenv("PPE_VOTE_WINDOW", "1")))
+        except ValueError:
+            self._vote_window = 1
+        try:
+            self._vote_threshold = min(1.0, max(0.0, float(os.getenv("PPE_VOTE_THRESHOLD", "0.6"))))
+        except ValueError:
+            self._vote_threshold = 0.6
+        # {(track_id, alarm_type): deque of bool} — True = non-compliant in that frame
+        self._vote_history: dict = {}
 
         self._capture_dir = os.getenv("CAPTURE_DIR", "/local/storage/captures")
         self._scene_dir   = os.getenv("SCENE_DIR",   "/local/storage/scenes")
@@ -281,10 +282,14 @@ class MaskHairnetChefHatTask:
         os.makedirs(self._events_dir,  exist_ok=True)
 
         self._jsonl_path = os.path.join(self._events_dir, f"task_{self.task_id}.jsonl")
+        from pathlib import Path
+        from utils.jsonl_writer import JsonlWriter as _JW
+        self._jsonl_writer = _JW(Path(self._jsonl_path))
 
         print(
             f"[MaskHairnetChefHat/{self.task_id}] Ready — "
-            f"alarmTypes={self.alarm_types}, zones={len(self.zones)}"
+            f"alarmTypes={self.alarm_types}, zones={len(self.zones)}, "
+            f"vote_window={self._vote_window}"
         )
 
     # ── Main entry point ──────────────────────────────────────────────────────
@@ -334,7 +339,23 @@ class MaskHairnetChefHatTask:
             # Check each alarm type
             for alarm_type in self.alarm_types:
                 required_class = _ALARM_TO_PPE_CLASS[alarm_type]
-                if required_class not in detected_classes:
+                non_compliant = required_class not in detected_classes
+
+                if self._vote_window > 1:
+                    from collections import deque as _deque
+                    key = (det.track_id, alarm_type)
+                    hist = self._vote_history.get(key)
+                    if hist is None:
+                        hist = _deque(maxlen=self._vote_window)
+                        self._vote_history[key] = hist
+                    hist.append(non_compliant)
+                    # Fire only when the majority of the window is non-compliant.
+                    non_compliant = (
+                        len(hist) >= self._vote_window
+                        and sum(hist) / len(hist) >= self._vote_threshold
+                    )
+
+                if non_compliant:
                     # Use threshold as fallback confidence when class absent
                     conf_pct = int(ppe_conf_map.get(required_class, self.threshold) * 100)
                     zone     = self.zones[0] if self.zones else None
@@ -453,8 +474,7 @@ class MaskHairnetChefHatTask:
         )
         cv2.imwrite(scene_path, scene_vis)
 
-        with open(self._jsonl_path, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        self._jsonl_writer.append(event)
 
     # ── Schedule ──────────────────────────────────────────────────────────────
 

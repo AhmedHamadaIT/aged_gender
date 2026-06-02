@@ -120,6 +120,7 @@ from dotenv import load_dotenv
 from logger.logger_config import Logger
 from utils import build_image
 from utils.task_payload import task_frame_bgr
+from utils.geometry import iou as _iou, point_in_poly as _point_in_poly, rect_to_poly as _rect_to_poly  # M-9
 
 # Optional GIF support
 try:
@@ -268,33 +269,8 @@ def mock_cashier_staff_context(bindings: List[Dict[str, Any]]) -> Dict[str, Any]
 
 
 # ─────────────────────────────────────────────
-# Geometry helpers
+# Geometry helpers (M-9: delegated to utils.geometry)
 # ─────────────────────────────────────────────
-
-def _iou(b1: List[float], b2: List[float]) -> float:
-    """Intersection-over-Union for two [x1,y1,x2,y2] boxes."""
-    xi1 = max(b1[0], b2[0]);  yi1 = max(b1[1], b2[1])
-    xi2 = min(b1[2], b2[2]);  yi2 = min(b1[3], b2[3])
-    inter = max(0.0, xi2 - xi1) * max(0.0, yi2 - yi1)
-    union = (b1[2] - b1[0]) * (b1[3] - b1[1]) + (b2[2] - b2[0]) * (b2[3] - b2[1]) - inter
-    return inter / union if union > 0 else 0.0
-
-
-def _point_in_poly(px: float, py: float, poly: List[List[float]]) -> bool:
-    """Ray-casting point-in-polygon test. poly = list of [x,y] normalised coords."""
-    n, inside, j = len(poly), False, len(poly) - 1
-    for i in range(n):
-        xi, yi = poly[i];  xj, yj = poly[j]
-        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi + 1e-9) + xi):
-            inside = not inside
-        j = i
-    return inside
-
-
-def _rect_to_poly(pts: List[List[float]]) -> List[List[float]]:
-    """Convert [[x1,y1],[x2,y2]] rectangle spec to 4-corner polygon."""
-    (x1, y1), (x2, y2) = pts[0], pts[1]
-    return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
 
 
 def _denorm_poly(poly: List[List[float]], w: int, h: int) -> List[Tuple[int, int]]:
@@ -677,12 +653,12 @@ class _CashierTaskJsonlWriter:
         os.makedirs(base, exist_ok=True)
         self._path = os.path.join(base, f"task_{self._task_id}.jsonl")
         self._lock = threading.Lock()
+        from utils.jsonl_writer import JsonlWriter as _JW
+        self._jsonl_writer = _JW(Path(self._path))
 
     def append(self, event: Dict[str, Any]) -> None:
-        line = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
         with self._lock:
-            with open(self._path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            self._jsonl_writer.append(event)
 
 
 # ─────────────────────────────────────────────
@@ -1211,6 +1187,130 @@ class CashierService:
         )
         return filtered
 
+    # S-5: Declarative transition table for _evaluate.
+    # Each row: (case_id, severity, alert_template, is_transaction, condition).
+    # ``condition`` is a callable that accepts the _EvalCtx namedtuple.
+    # Rows are evaluated in priority order; first match wins.
+    # alert_template may be a string (static) or a callable(ctx)->str.
+    # A row with alert_template=None produces no alert.
+
+    @staticmethod
+    def _build_transition_table(svc: "CashierService"):
+        """
+        Return the ordered priority table bound to the given service instance.
+        Rebuilding is cheap; it is called once per _evaluate call so that
+        instance attributes like _wait_max and _drawer_max are always current.
+        """
+        from collections import namedtuple
+
+        _T = namedtuple("_T", ["cid", "sev", "alert", "txn", "cond"])
+
+        s = svc  # alias
+
+        return [
+            # Row 1 — A3: cash + open drawer, no cashier
+            _T("A3", SEVERITY_CRITICAL,
+               "A3 CRITICAL: Cash + open drawer — register unguarded", False,
+               lambda c: c.drawer_open and c.cash_any and c.cz.persons == 0),
+
+            # Row 2 — A4: unauthorized person + open drawer + cash (staff-list mode)
+            _T("A4", SEVERITY_CRITICAL,
+               "A4 CRITICAL: Unauthorised person at open register with cash", False,
+               lambda c: (
+                   c.drawer_open and c.cash_any and s._enable_staff_list and c.unauthorized_in_cz
+               )),
+
+            # Row 2b — A4 legacy (no staff list): cash present, cashier not near drawer
+            _T("A4", SEVERITY_CRITICAL,
+               "A4 CRITICAL: Unauthorised person at open register with cash", False,
+               lambda c: (
+                   c.drawer_open and c.cash_any and not s._enable_staff_list
+                   and c.cz.persons >= 1
+                   and not s._nearby(c.cz.person_bboxes, c.cz.drawer_bboxes)
+               )),
+
+            # Row 3 — A1 CRITICAL: unattended + customer present
+            _T("A1", SEVERITY_CRITICAL,
+               "A1 CRITICAL: Unattended open drawer — customer present", False,
+               lambda c: c.cz.persons == 0 and c.kz.persons >= 1 and c.drawer_open and c.cash_zero),
+
+            # Row 4 — A1 ALERT: unattended, no customer
+            _T("A1", SEVERITY_ALERT,
+               "A1 ALERT: Unattended open drawer", False,
+               lambda c: c.cz.persons == 0 and c.drawer_open and c.cash_zero),
+
+            # Row 5 — A2: unauthorized in cashier zone
+            _T("A2", SEVERITY_ALERT,
+               "A2 ALERT: Unexpected person in cashier zone", False,
+               lambda c: c.unauthorized_in_cz),
+
+            # Row 6 — A7: cash in customer zone, no cashier
+            _T("A7", SEVERITY_ALERT,
+               "A7 ALERT: Cash in customer zone — no cashier present", False,
+               lambda c: c.cz.persons == 0 and not c.drawer_open and c.kz.cash >= 1),
+
+            # Row 7 — A5: customer waiting too long
+            _T("A5", SEVERITY_ALERT,
+               lambda c: f"A5 ALERT: Customer waiting {c.wait_elapsed:.0f}s — no cashier present",
+               False,
+               lambda c: (
+                   c.cz.persons == 0 and c.kz.persons >= 1
+                   and not c.drawer_open and c.cash_zero
+                   and c.wait_elapsed >= s._wait_max
+               )),
+
+            # Row 8 — A6: drawer open too long
+            _T("A6", SEVERITY_ALERT,
+               lambda c: f"A6 ALERT: Drawer open {c.drawer_elapsed:.0f}s (limit {s._drawer_max:.0f}s)",
+               False,
+               lambda c: c.cz.persons >= 1 and c.drawer_open and c.drawer_elapsed >= s._drawer_max),
+
+            # Row 9 — N4: staff handover
+            _T("N4", SEVERITY_NORMAL,
+               "N4 EVENT: Staff handover / supervisor at register", False,
+               lambda c: (
+                   c.cz.persons >= 2 and c.drawer_open
+                   and s._all_nearby(c.cz.person_bboxes, c.cz.drawer_bboxes)
+               )),
+
+            # Row 10 — N3: transaction in progress
+            _T("N3", SEVERITY_NORMAL,
+               "N3 EVENT: Transaction in progress", True,
+               lambda c: (
+                   c.cz.persons == 1 and c.kz.persons >= 1 and c.drawer_open and c.cash_any
+                   and s._nearby(c.cz.person_bboxes, c.cz.drawer_bboxes)
+               )),
+
+            # Row 11 — N6: drawer open, no cash
+            _T("N6", SEVERITY_NORMAL,
+               "N6 EVENT: Drawer open, no cash (card / float check)", False,
+               lambda c: c.cz.persons == 1 and c.drawer_open and c.cz.cash == 0 and c.kz.cash == 0),
+
+            # Row 12 — N2: cashier present, drawer closed
+            _T("N2", SEVERITY_NORMAL, None, False,
+               lambda c: c.cz.persons >= 1 and not c.drawer_open),
+
+            # Row 13 — N5: customer waiting, within limit
+            _T("N5", SEVERITY_NORMAL, None, False,
+               lambda c: (
+                   c.cz.persons == 0 and c.kz.persons >= 1
+                   and not c.drawer_open and c.cash_zero
+                   and c.wait_elapsed < s._wait_max
+               )),
+
+            # Row 14 — N1: idle / empty
+            _T("N1", SEVERITY_NORMAL, None, False,
+               lambda c: c.cz.persons == 0 and c.kz.persons == 0 and not c.drawer_open and c.cash_zero),
+
+            # Fallback A2: CZ persons, authorized, no row matched
+            _T("A2", SEVERITY_ALERT,
+               "A2 ALERT: Unexpected person in cashier zone", False,
+               lambda c: c.cz.persons >= 1 and not c.unauthorized_in_cz),
+
+            # Ultimate fallback
+            _T("N1", SEVERITY_NORMAL, None, False, lambda c: True),
+        ]
+
     def _evaluate(
         self,
         cz: ZoneCount,
@@ -1219,12 +1319,13 @@ class CashierService:
         unauthorized_in_cz: bool,
     ) -> Tuple[str, str, List[str], bool, int, int]:
         """
-        CASHIER_BOX_OPEN 14-rule first match (Section 8).
+        CASHIER_BOX_OPEN 14-rule first match (Section 8) — S-5 declarative table.
         Returns (case_id, severity, alerts, transaction, drawer_ms, wait_ms).
         """
-        alerts: List[str] = []
-        cash_any = (cz.cash + kz.cash) >= 1
-        cash_zero = not cash_any
+        from collections import namedtuple
+
+        cash_any   = (cz.cash + kz.cash) >= 1
+        cash_zero  = not cash_any
         drawer_open = cz.drawers >= 1
 
         if cz.drawers >= 1:
@@ -1244,137 +1345,42 @@ class CashierService:
             wait_elapsed = 0.0
 
         drawer_ms = int(drawer_elapsed * 1000) if drawer_open else 0
-        wait_ms = int(wait_elapsed * 1000) if (kz.persons >= 1 and cz.persons == 0) else 0
+        wait_ms   = int(wait_elapsed * 1000) if (kz.persons >= 1 and cz.persons == 0) else 0
 
-        def ret(
-            cid: str, sev: str, al: List[str], txn: bool
-        ) -> Tuple[str, str, List[str], bool, int, int]:
-            return cid, sev, al, txn, drawer_ms, wait_ms
+        # Build evaluation context.
+        _Ctx = namedtuple("_Ctx", [
+            "cz", "kz", "cash_any", "cash_zero", "drawer_open",
+            "drawer_elapsed", "wait_elapsed", "unauthorized_in_cz",
+        ])
+        ctx = _Ctx(
+            cz=cz, kz=kz,
+            cash_any=cash_any, cash_zero=cash_zero, drawer_open=drawer_open,
+            drawer_elapsed=drawer_elapsed, wait_elapsed=wait_elapsed,
+            unauthorized_in_cz=unauthorized_in_cz,
+        )
 
-        # Row 1 — A3
-        if drawer_open and cash_any and cz.persons == 0:
-            msg = "A3 CRITICAL: Cash + open drawer — register unguarded"
-            alerts.append(msg)
-            return ret("A3", SEVERITY_CRITICAL, alerts, False)
+        table = self._build_transition_table(self)
+        alerts: List[str] = []
 
-        # Row 2 — A4 (spec: non-staff + open drawer + cash), or legacy IoU when staff list off
-        if drawer_open and cash_any:
-            if self._enable_staff_list:
-                if unauthorized_in_cz:
-                    msg = "A4 CRITICAL: Unauthorised person at open register with cash"
-                    alerts.append(msg)
-                    return ret("A4", SEVERITY_CRITICAL, alerts, False)
-            else:
-                # Legacy: cash present but no person↔drawer proximity (staff may lack overlap)
-                if (
-                    cz.persons >= 1
-                    and not self._nearby(cz.person_bboxes, cz.drawer_bboxes)
-                ):
-                    msg = "A4 CRITICAL: Unauthorised person at open register with cash"
-                    alerts.append(msg)
-                    return ret("A4", SEVERITY_CRITICAL, alerts, False)
+        for row in table:
+            try:
+                if not row.cond(ctx):
+                    continue
+            except Exception:
+                continue
 
-        # Row 3 — A1 elevated (CRITICAL)
-        if cz.persons == 0 and kz.persons >= 1 and drawer_open and cash_zero:
-            msg = "A1 CRITICAL: Unattended open drawer — customer present"
-            alerts.append(msg)
-            return ret("A1", SEVERITY_CRITICAL, alerts, False)
+            if row.alert is not None:
+                if callable(row.alert):
+                    try:
+                        alerts.append(row.alert(ctx))
+                    except Exception:
+                        alerts.append(str(row.alert))
+                else:
+                    alerts.append(str(row.alert))
 
-        # Row 4 — A1 ALERT
-        if cz.persons == 0 and drawer_open and cash_zero:
-            msg = "A1 ALERT: Unattended open drawer"
-            alerts.append(msg)
-            return ret("A1", SEVERITY_ALERT, alerts, False)
+            return row.cid, row.sev, alerts, row.txn, drawer_ms, wait_ms
 
-        # Row 5 — A2
-        if unauthorized_in_cz:
-            msg = "A2 ALERT: Unexpected person in cashier zone"
-            alerts.append(msg)
-            return ret("A2", SEVERITY_ALERT, alerts, False)
-
-        # Row 6 — A7
-        if cz.persons == 0 and not drawer_open and kz.cash >= 1:
-            msg = "A7 ALERT: Cash in customer zone — no cashier present"
-            alerts.append(msg)
-            return ret("A7", SEVERITY_ALERT, alerts, False)
-
-        # Row 7 — A5
-        if (
-            cz.persons == 0
-            and kz.persons >= 1
-            and not drawer_open
-            and cash_zero
-            and wait_elapsed >= self._wait_max
-        ):
-            msg = f"A5 ALERT: Customer waiting {wait_elapsed:.0f}s — no cashier present"
-            alerts.append(msg)
-            return ret("A5", SEVERITY_ALERT, alerts, False)
-
-        # Row 8 — A6 (authorized CZ staff only; unauthorized handled by A2)
-        if (
-            cz.persons >= 1
-            and drawer_open
-            and drawer_elapsed >= self._drawer_max
-        ):
-            msg = f"A6 ALERT: Drawer open {drawer_elapsed:.0f}s (limit {self._drawer_max:.0f}s)"
-            alerts.append(msg)
-            return ret("A6", SEVERITY_ALERT, alerts, False)
-
-        # Row 9 — N4
-        if (
-            cz.persons >= 2
-            and drawer_open
-            and self._all_nearby(cz.person_bboxes, cz.drawer_bboxes)
-        ):
-            alerts.append("N4 EVENT: Staff handover / supervisor at register")
-            return ret("N4", SEVERITY_NORMAL, alerts, False)
-
-        # Row 10 — N3
-        if (
-            cz.persons == 1
-            and kz.persons >= 1
-            and drawer_open
-            and cash_any
-            and self._nearby(cz.person_bboxes, cz.drawer_bboxes)
-        ):
-            alerts.append("N3 EVENT: Transaction in progress")
-            return ret("N3", SEVERITY_NORMAL, alerts, True)
-
-        # Row 11 — N6
-        if (
-            cz.persons == 1
-            and drawer_open
-            and cz.cash == 0
-            and kz.cash == 0
-        ):
-            alerts.append("N6 EVENT: Drawer open, no cash (card / float check)")
-            return ret("N6", SEVERITY_NORMAL, alerts, False)
-
-        # Row 12 — N2
-        if cz.persons >= 1 and not drawer_open:
-            return ret("N2", SEVERITY_NORMAL, [], False)
-
-        # Row 13 — N5
-        if (
-            cz.persons == 0
-            and kz.persons >= 1
-            and not drawer_open
-            and cash_zero
-            and wait_elapsed < self._wait_max
-        ):
-            return ret("N5", SEVERITY_NORMAL, [], False)
-
-        # Row 14 — N1
-        if cz.persons == 0 and kz.persons == 0 and not drawer_open and cash_zero:
-            return ret("N1", SEVERITY_NORMAL, [], False)
-
-        # Authorized CZ but no table row (e.g. 2+ staff, drawer open, not all IoU with drawer)
-        if cz.persons >= 1 and not unauthorized_in_cz:
-            msg = "A2 ALERT: Unexpected person in cashier zone"
-            alerts.append(msg)
-            return ret("A2", SEVERITY_ALERT, alerts, False)
-
-        return ret("N1", SEVERITY_NORMAL, [], False)
+        return "N1", SEVERITY_NORMAL, [], False, drawer_ms, wait_ms
 
     def _detections_for_person_structural(
         self, detections: List[Any], w: int, h: int, context: Dict[str, Any]

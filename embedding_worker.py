@@ -142,16 +142,35 @@ def _embedding_is_valid(vec: Any) -> bool:
 
 
 def run_embedding_worker(embedding_queue, stop_event):
-    from services.person_search import PersonSearchService
-    from services.semantic_search import SemanticSearchService
     from logger.logger_config import Logger
 
     log = Logger.get_logger("EmbeddingWorker")
     _dlq_init()
     log.info("[EmbeddingWorker] Starting up — loading services...")
 
-    person_search = PersonSearchService()
-    semantic_search = SemanticSearchService()
+    # M-14: EMBED_LOAD_SERVICES controls which services are loaded in this worker.
+    # Format: comma-separated list of service names, e.g. "person,semantic".
+    # Default "all" loads both (backward compatible).
+    _embed_svcs = {
+        s.strip().lower()
+        for s in os.getenv("EMBED_LOAD_SERVICES", "all").split(",")
+        if s.strip()
+    }
+    _load_all = "all" in _embed_svcs
+
+    if _load_all or "person" in _embed_svcs:
+        from services.person_search import PersonSearchService
+        person_search = PersonSearchService()
+    else:
+        person_search = None
+        log.info("[EmbeddingWorker] PersonSearchService skipped (EMBED_LOAD_SERVICES)")
+
+    if _load_all or "semantic" in _embed_svcs:
+        from services.semantic_search import SemanticSearchService
+        semantic_search = SemanticSearchService()
+    else:
+        semantic_search = None
+        log.info("[EmbeddingWorker] SemanticSearchService skipped (EMBED_LOAD_SERVICES)")
 
     person_search_ready = (
         getattr(person_search, "model", None) is not None

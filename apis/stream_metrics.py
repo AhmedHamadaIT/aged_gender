@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from apis.ws_live import decode_live_frame_message
+from apis.ws_live import decode_live_frame_message, _sync_incr_subscriber, _sync_decr_subscriber
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
@@ -185,6 +185,7 @@ async def live_stream_sse(camera_id: str, request: Request):
     """SSE — annotated JPEG frames as base64 in JSON (from Redis live:frame:{id})."""
 
     async def _generator():
+        await asyncio.to_thread(_sync_incr_subscriber, camera_id)
         try:
             import redis.asyncio as aioredis
 
@@ -216,6 +217,8 @@ async def live_stream_sse(camera_id: str, request: Request):
                 await client.aclose()
         except asyncio.CancelledError:
             raise
+        finally:
+            await asyncio.to_thread(_sync_decr_subscriber, camera_id)
 
     return StreamingResponse(
         _generator(),

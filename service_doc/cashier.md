@@ -10,6 +10,8 @@ Evidence directory default: `./evidence/cashier` (override with `CASHIER_EVIDENC
 
 **ML Image Contract V2:** the Eyego **`data`** block may include **`data.evidence`** with **`captureImage`** and **`sceneImage`** as structured image objects (in addition to `captureUrl` / `sceneId` / `sceneUrl`). Per-frame **structured** events on `GET /detection/stream` use top-level `evidence` with V2 objects; when only one JPEG exists, `sceneImage` may be `{ "url": null, "type": "scene", "status": "not_available" }`. Details: [ml_image_v2.md](./ml_image_v2.md).
 
+**Rule engine:** `CashierService._evaluate()` uses a declarative priority table (`_build_transition_table`) preserving **N1–N6** / **A1–A7** behavior. Tests: `tests/unit/test_cashier_parametrized.py`. Evidence listing supports optional `since` and `camera_id` query filters (QW-15).
+
 ## Endpoints
 
 | Method | Path | Description |

@@ -137,6 +137,70 @@ class DetectionSSEBridge:
             if int(e.get("_seq") or 0) > after_seq
         ]
 
+    async def replay_after_stream(self, after_seq: int, camera_id: str = "*") -> List[dict]:
+        """
+        S-7: Read missed events from Redis Streams when REDIS_STREAMS_ENABLED=true.
+
+        Falls back to the in-memory ring if Streams are disabled or Redis is
+        unreachable.  The Pub/Sub path remains authoritative; this is read-only
+        replay on reconnect.
+
+        ``camera_id`` filters to a specific stream key; use ``"*"`` for all cameras.
+        ``after_seq`` is an integer _seq value — events with _seq > after_seq are returned.
+        """
+        if not os.getenv("REDIS_STREAMS_ENABLED", "false").lower() in ("true", "1", "yes"):
+            return self.replay_after(after_seq)
+
+        redis_url = os.getenv("REDIS_URL", "")
+        if not redis_url:
+            return self.replay_after(after_seq)
+
+        results: List[dict] = []
+        try:
+            import redis.asyncio as aioredis
+
+            client = aioredis.from_url(redis_url, socket_connect_timeout=2)
+            stream_maxlen = int(os.getenv("REDIS_STREAMS_MAXLEN", "500"))
+
+            if camera_id == "*":
+                # Scan all known stream keys matching the pattern.
+                keys: List[str] = []
+                async for k in client.scan_iter("live:events:*", count=100):
+                    keys.append(k.decode("utf-8") if isinstance(k, bytes) else k)
+            else:
+                keys = [f"live:events:{camera_id}"]
+
+            for key in keys:
+                try:
+                    # XRANGE returns oldest-to-newest; we read the full stream
+                    # (bounded by MAXLEN) and filter by seq in Python.
+                    entries = await client.xrange(key, count=stream_maxlen)
+                    for _entry_id, fields in entries:
+                        raw = fields.get(b"data") or fields.get("data")
+                        if raw is None:
+                            continue
+                        try:
+                            ev = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+                            if isinstance(ev, dict) and int(ev.get("_seq") or 0) > after_seq:
+                                results.append(ev)
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            await client.aclose()
+        except Exception:
+            # Any Redis error → fall back to in-memory ring.
+            return self.replay_after(after_seq)
+
+        if not results:
+            # Nothing from Streams — fall back to in-memory ring to avoid empty replay.
+            return self.replay_after(after_seq)
+
+        # Sort by _seq ascending so the client receives them in order.
+        results.sort(key=lambda e: int(e.get("_seq") or 0))
+        return results
+
     def _record_replay(self, event: dict) -> None:
         seq = int(event.get("_seq") or 0)
         if seq and seq in self._seen_seq:

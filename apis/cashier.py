@@ -548,18 +548,41 @@ def clear_events():
 
 @router.get("/evidence", summary="List saved evidence files")
 def list_evidence(
-    severity: Optional[str] = Query(None, description="NORMAL | ALERT | CRITICAL"),
-    case_id : Optional[str] = Query(None, description="N3 / A1 / A3 …"),
-    limit   : int           = Query(50, ge=1, le=500),
+    severity  : Optional[str] = Query(None, description="NORMAL | ALERT | CRITICAL"),
+    case_id   : Optional[str] = Query(None, description="N3 / A1 / A3 …"),
+    limit     : int           = Query(50, ge=1, le=500),
+    since     : Optional[str] = Query(None, description="YYYY-MM-DD date prefix — scope glob to this day's folder"),
+    camera_id : Optional[str] = Query(None, description="Camera ID — limit listing to this camera's evidence"),
 ):
     """
     Lists saved annotated JPEG evidence files under the evidence directory.
-    Each entry includes the relative path, size (KB), and modification time.
+
+    Use ``since=YYYY-MM-DD`` and/or ``camera_id`` to restrict the recursive glob
+    to a specific date subdirectory or camera, keeping the scan bounded.
     """
     if not _evidence_dir.exists():
         return {"total": 0, "files": []}
 
-    files = sorted(_evidence_dir.glob("**/*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # QW-15: scope the glob to a date prefix and/or camera_id subdirectory to
+    # avoid a full recursive scan on large evidence directories.
+    if since:
+        import re as _re
+        if _re.match(r"^\d{4}-\d{2}-\d{2}$", since):
+            scan_root = _evidence_dir / since
+        else:
+            scan_root = _evidence_dir
+    else:
+        scan_root = _evidence_dir
+
+    if camera_id and scan_root.exists():
+        cam_sub = scan_root / camera_id
+        if cam_sub.is_dir():
+            scan_root = cam_sub
+
+    if not scan_root.exists():
+        return {"total": 0, "files": []}
+
+    files = sorted(scan_root.glob("**/*.jpg"), key=lambda p: p.stat().st_mtime, reverse=True)
 
     if severity:
         files = [f for f in files if severity.lower() in f.parts]

@@ -81,17 +81,38 @@ def annotate(frame: np.ndarray, detections: List[Detection], fps: float, mode: s
 # ─────────────────────────────────────────────
 # Resizing
 # ─────────────────────────────────────────────
+def _cuda_resize(frame: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Attempt cv2.cuda.resize; returns None on failure (S-4 CUDA_PREPROCESS)."""
+    try:
+        gpu = cv2.cuda_GpuMat()
+        gpu.upload(frame)
+        resized_gpu = cv2.cuda.resize(gpu, (width, height), interpolation=cv2.INTER_LINEAR)
+        return resized_gpu.download()
+    except Exception:
+        return None
+
+
+import os as _os
+_CUDA_PREPROCESS = _os.getenv("CUDA_PREPROCESS", "false").lower() in ("true", "1", "yes")
+
+
 def resize(frame: np.ndarray, width: int, height: int = 0) -> np.ndarray:
     """
     Resize frame to given width (and optional height).
     If height=0, preserves aspect ratio from width alone.
     No-op if frame is already at or below the target size.
+
+    S-4: When CUDA_PREPROCESS=true, attempts cv2.cuda.resize with CPU fallback.
     """
     h, w = frame.shape[:2]
     if height == 0:
         if w <= width:
             return frame
         height = int(h * width / w)
+    if _CUDA_PREPROCESS:
+        result = _cuda_resize(frame, width, height)
+        if result is not None:
+            return result
     return cv2.resize(frame, (width, height))
 
 

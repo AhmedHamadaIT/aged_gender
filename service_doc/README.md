@@ -20,12 +20,16 @@ This folder describes each HTTP/WebSocket surface of the **Vision Pipeline API**
 
 For the **internal process model, annotation flow, RTSP transport override API, zombie-process reaping, and E2E test guide** see [`docs/pipeline-architecture.md`](../docs/pipeline-architecture.md).
 
+For **optimization feature flags, Prometheus, optional auth, and CI** see [`docs/OPTIMIZATION_REFERENCE.md`](../docs/OPTIMIZATION_REFERENCE.md).
+
 ## Defaults
 
 - **Default bind** (from `app.py`): `uvicorn app:app --host 0.0.0.0 --port 9000`
 - **Base URL in examples**: `http://<ML_SERVER_HOST>:9000` — replace with your server IP or hostname.
 - **Redis**: Set `REDIS_URL` (default `redis://localhost:6379/0`) on the ML server for WebSocket live fan-out (`/cameras/.../live`, `/cameras/.../events`, `/tasks/.../live`) and for cashier multi-process sync. Without Redis, some live features degrade gracefully.
 - **Local dev without Redis**: set `REDIS_CONNECT_RETRIES=1` so FrameBus fails fast on the Redis publish path and continues processing.
+- **Production auth (optional)**: set `API_AUTH_TOKEN` to require `Authorization: Bearer <token>` on mutating HTTP methods only; GET/SSE/WebSocket unchanged.
+- **Upload limit**: `UPLOAD_MAX_BYTES` (default 10 MB) on person/semantic/face image routes.
 
 ## OpenAPI
 

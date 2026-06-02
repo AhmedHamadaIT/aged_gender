@@ -23,6 +23,12 @@ Uvicorn (see [`docker-compose.yml`](../docker-compose.yml)) is configured with *
 
 Valid examples: `cam1`, `cam_01`, `entrance-left`, `42`.
 
+### Redis connection efficiency (optional)
+
+When `WS_MUX_ENABLED=true`, live frame WebSockets use [`apis/_redis_fanout.py`](../apis/_redis_fanout.py): **one Redis pubsub subscription per camera** shared across all clients on that camera (instead of one subscription per client). Default is `false` (legacy per-client pubsub).
+
+When `LIVE_PUBLISH_REQUIRE_SUBSCRIBER=true`, FrameBus skips publishing to `live:frame:{camera_id}` if the subscriber counter is zero (saves CPU/Redis when no one is watching).
+
 ## Endpoints
 
 | Protocol | Path | Payload |

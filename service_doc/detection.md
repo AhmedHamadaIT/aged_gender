@@ -33,7 +33,12 @@ All filters combine with **AND** semantics:
 
 Idle connections receive SSE comment keepalives (`: ping`) about every 30 seconds.
 
-Optional header **`Last-Event-ID`** (last seen **`_seq`** on events) requests a short replay from the server ring buffer after reconnect; see [API_USAGE.md](../docs/API_USAGE.md) §5. Ops metrics: **`GET /stream/resilience-stats`**.
+Optional header **`Last-Event-ID`** (last seen **`_seq`** on events) requests replay after reconnect:
+
+1. In-memory ring (`SSE_REPLAY_BUFFER`, default 200).
+2. When `REDIS_STREAMS_ENABLED=true`, also reads `live:events:{camera_id}` via Redis `XRANGE` (shadow written by `task_worker` alongside Pub/Sub).
+
+See [API_USAGE.md](../docs/API_USAGE.md) §5 and [OPTIMIZATION_REFERENCE.md](../docs/OPTIMIZATION_REFERENCE.md). Ops metrics: **`GET /stream/resilience-stats`**, optional **`GET /metrics`** (`PROMETHEUS_ENABLED`).
 
 ## curl — start all
 

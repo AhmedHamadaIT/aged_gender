@@ -27,6 +27,14 @@ Each algorithm uses the **same** HTTP surface (`/cameras`, `/api/tasks`, `/detec
 | GET | `/api/tasks/{task_id}` | Get one task by numeric id |
 | PUT | `/api/tasks/{task_id}` | Update; body `taskId` must match URL |
 | DELETE | `/api/tasks/{task_id}` | Delete a task |
+| PATCH | `/api/tasks/{task_id}/lines/{line_id}` | Update one line in a `CROSS_LINE` task’s `areaPosition` (hot-reload worker) |
+
+Mutating routes require `Authorization: Bearer <token>` when `API_AUTH_TOKEN` is set.
+
+### `detailConfig` additions
+
+- **`confThreshold`** (float, optional): minimum detection confidence for this task at the worker (M-4).
+- **`minPersonAreaPx`** (int, optional): minimum bbox area in pixels (FrameBus fan-out, QW-7).
 
 ## curl — create cross-line task
 

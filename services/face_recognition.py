@@ -114,6 +114,9 @@ class FaceRecognitionTask:
         os.makedirs(self._scene_dir,   exist_ok=True)
 
         self._jsonl_path = os.path.join(self._events_dir, f"task_{self.task_id}.jsonl")
+        from pathlib import Path
+        from utils.jsonl_writer import JsonlWriter as _JW
+        self._jsonl_writer = _JW(Path(self._jsonl_path))
 
         print(
             f"[Face/{self.task_id}] Ready — "
@@ -359,8 +362,7 @@ class FaceRecognitionTask:
         scene_vis = draw_evidence_scene(frame, subject_bbox=face_det.bbox, label=label)
         cv2.imwrite(scene_path, scene_vis)
 
-        with open(self._jsonl_path, "a") as f:
-            f.write(json.dumps(event) + "\n")
+        self._jsonl_writer.append(event)
 
     @staticmethod
     def _crop_face(frame: np.ndarray, face_det) -> Optional[np.ndarray]:

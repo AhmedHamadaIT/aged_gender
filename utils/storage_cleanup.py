@@ -88,10 +88,24 @@ def _sweep_interval_sec() -> float:
         return 3600.0
 
 
-def start_storage_cleanup_thread() -> threading.Thread | None:
+class StorageCleanupHandle:
+    """Handle returned by start_storage_cleanup_thread for cooperative shutdown."""
+
+    def __init__(self, thread: threading.Thread, stop: threading.Event) -> None:
+        self._thread = thread
+        self._stop = stop
+
+    def stop(self, timeout: float = 3.0) -> None:
+        """Signal the cleanup thread to stop and wait briefly for it to exit."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+
+
+def start_storage_cleanup_thread() -> "StorageCleanupHandle | None":
     """
     Start a daemon thread that periodically deletes files older than OUTPUT_RETENTION_HOURS.
-    Returns None if retention is disabled (OUTPUT_RETENTION_HOURS <= 0).
+    Returns a StorageCleanupHandle or None if retention is disabled (OUTPUT_RETENTION_HOURS <= 0).
     """
     max_age = _retention_seconds()
     if max_age <= 0:
@@ -123,4 +137,4 @@ def start_storage_cleanup_thread() -> threading.Thread | None:
 
     t = threading.Thread(target=_run, name="storage_cleanup", daemon=True)
     t.start()
-    return t
+    return StorageCleanupHandle(t, stop)

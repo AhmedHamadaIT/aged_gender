@@ -43,7 +43,11 @@ class PersonSearchResource(BaseResource):
         try:
             image_bytes = await file.read()
 
-            results = self.person_search_service.search_by_image(image_bytes, top_k=top_k)
+            # M-13: wrap sync inference in thread so it doesn't block the event loop.
+            import asyncio as _aio
+            results = await _aio.to_thread(
+                self.person_search_service.search_by_image, image_bytes, top_k
+            )
 
             return {
                 "status": "success",

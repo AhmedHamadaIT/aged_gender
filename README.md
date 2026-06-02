@@ -23,6 +23,7 @@ The older **per-process pipeline** (`pipeline.py` + `services.REGISTRY`: `detect
 | [Cashier validation & cases](#cashier-full-dataset-validation-report) | Batch metrics, N1–A7 tables |
 | [Models & structure](#-models--services) | Weights, ONNX, repo layout |
 | [Configuration](#-configuration) | Env vars, thresholds |
+| [Optimization reference](docs/OPTIMIZATION_REFERENCE.md) | Performance, security, CI feature flags |
 | [Endpoint summary table](#-api-endpoints-summary) | Quick lookup |
 
 ---
@@ -73,7 +74,8 @@ from the directory that contains `docker-compose.yml`.
 - **FrameBus** ([`frame_bus.py`](frame_bus.py)) — One process per active camera: RTSP capture, **YOLO** detection, **BoT-SORT** tracking, fan-out of `{frame + tracks}` to task queues, and **Redis publish** of annotated JPEG frames to `live:frame:{camera_id}` for the live WebSocket stream. Env: `YOLO_MODEL`, `CONF_THRESHOLD`, `DEVICE`, `FILTER_CLASSES`, `WIDTH`, `HEIGHT`, `SAVE_OUTPUT`, `OUTPUT_DIR`, `REDIS_URL`, `REDIS_LIVE_FPS`, `LIVE_ANNOTATION_MODE` (`opencv` / `ultralytics` / `none`). Ingest path: `RTSP_BACKEND` (`auto` / `gstreamer` / `ffmpeg` / `opencv`) — see [`stream.py`](stream.py) / [`stream_gstreamer.py`](stream_gstreamer.py) on Jetson.
 - **Task workers** ([`task_worker.py`](task_worker.py)) — One worker process per enabled task; looks up `algorithmType` in [`services/__init__.py`](services/__init__.py) `TASK_REGISTRY`, emits events to the shared result queue **and** publishes them to Redis `live:event:{camera_id}`.
 - **FastAPI lifespan** ([`app.py`](app.py)) — Starts `DetectionSSEBridge` (subscribes from both the multiprocessing queue and Redis `live:event:*` so multiple uvicorn workers can all serve SSE). Serves **WebSocket** live frame stream at `WS /cameras/{id}/live` via [`apis/ws_live.py`](apis/ws_live.py). Camera IDs are validated by `apis.ws_live.validate_camera_id()` (rejects reserved JS sentinels and invalid characters).
-- **Redis** ([`docker-compose.yml`](docker-compose.yml) `redis:7-alpine`) — Fire-and-forget Pub/Sub broker. FrameBus publishes binary JPEG frames; FastAPI WebSocket handlers subscribe. No persistence needed (`--appendonly no`).
+- **Redis** ([`docker-compose.yml`](docker-compose.yml) `redis:7-alpine`) — Fire-and-forget Pub/Sub broker. FrameBus publishes binary JPEG frames; FastAPI WebSocket handlers subscribe. No persistence needed (`--appendonly no`). Optional **Redis Streams** shadow for event replay (`REDIS_STREAMS_ENABLED`). Optional **WS multiplexer** (`WS_MUX_ENABLED`) shares one pubsub per camera across clients ([`apis/_redis_fanout.py`](apis/_redis_fanout.py)).
+- **Optimization reference** — All performance/security feature flags: [`docs/OPTIMIZATION_REFERENCE.md`](docs/OPTIMIZATION_REFERENCE.md).
 - **Zombie-process reaping** ([`apis/detection.py`](apis/detection.py)) — `DetectionResource._reap_finished_processes()` is called at the start of every `_start()` and `_stop()` invocation. It joins any FrameBus or task-worker process that has already exited (e.g. a local video file that was exhausted), preventing OS zombie accumulation.
 - **RTSP transport override** ([`utils/rtsp_ffmpeg.py`](utils/rtsp_ffmpeg.py)) — `set_rtsp_transport(cam_id, transport)` / `get_rtsp_transport(cam_id)` / `clear_rtsp_transport_overrides()` allow per-camera RTSP transport selection at runtime (`tcp` / `udp`). The global default is `RTSP_TRANSPORT` env var (default `tcp`).
 - **Stream ingest probe** ([`stream.py`](stream.py), [`utils/stream_pyav.py`](utils/stream_pyav.py)) — `media_pts_ingest_enabled()` returns `True` when `STREAM_INGEST=pyav|av`. `utils.stream_pyav.pyav_available()` safely probes whether the optional `av` package is installed.
@@ -2301,6 +2303,36 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `CASHIER_EVIDENCE_DIR` | `./evidence/cashier` | Evidence storage |
 | `CASHIER_LOG_MAX` | `5000` | Max in-memory cashier events |
 
+### Performance & reliability (optional — see [OPTIMIZATION_REFERENCE](docs/OPTIMIZATION_REFERENCE.md))
+
+| Variable | Default | Role |
+|----------|---------|------|
+| `ANNOTATION_THREADS` | `0` | Thread pool for live annotate+encode (0 = synchronous) |
+| `DYNAMIC_FRAME_SKIP` | `false` | Skip frames when task queues are full |
+| `LIVE_PUBLISH_REQUIRE_SUBSCRIBER` | `false` | Skip Redis live JPEG when no WS subscribers |
+| `WS_MUX_ENABLED` | `false` | One Redis sub per camera for all WS clients |
+| `MODEL_WARMUP_FRAMES` | `5` | Dummy inferences after YOLO load |
+| `MIN_DETECTION_AREA_PX` | `0` | Drop tiny boxes in `_parse_tracks` |
+| `TRACK_BUFFER_SECONDS` | `0` | Derive BoT-SORT buffer from FPS × seconds |
+| `BBOX_SMOOTHING_ALPHA` | `0` | EMA on annotation boxes only |
+| `TASK_SHM_ENABLED` | `false` | Shared-memory ring for task fan-out |
+| `REGISTRY_RESTORE` | `false` | Restore task registry from JSON checkpoint on startup |
+| `TRACKER_STATE_RESTORE` | `false` | Save/load tracker bbox checkpoint on respawn |
+| `JSONL_ROTATE` / `JSONL_RETAIN_DAYS` | `false` / `30` | Daily JSONL shards + retention |
+| `FAISS_SAVE_INTERVAL_SEC` | `300` | Periodic FAISS index persistence |
+| `PROMETHEUS_ENABLED` | `false` | Expose `GET /metrics` |
+| `LOG_FORMAT` | `text` | Set `json` for structured logs |
+| `REDIS_STREAMS_ENABLED` | `false` | XADD shadow + SSE XRANGE replay |
+| `CPU_AFFINITY_ENABLED` | `false` | Pin FrameBus to CPU cores |
+| `CUDA_PREPROCESS` | `false` | `cv2.cuda.resize` with CPU fallback |
+
+### Security (optional)
+
+| Variable | Default | Role |
+|----------|---------|------|
+| `API_AUTH_TOKEN` | *(unset)* | Bearer token on POST/PUT/PATCH/DELETE (mutating routes only) |
+| `UPLOAD_MAX_BYTES` | `10485760` | Max upload body size for image endpoints |
+
 ### RTSP stability (H.264 / H.265) and snapshots
 | Variable | Default | Role |
 |----------|---------|------|
@@ -2350,6 +2382,8 @@ export PPE_MODEL="./models/best_PPE.onnx"
 | `/api/tasks/{task_id}` | GET | Get one task |
 | `/api/tasks/{task_id}` | PUT | Update task |
 | `/api/tasks/{task_id}` | DELETE | Delete task |
+| `/api/tasks/{task_id}/lines/{line_id}` | PATCH | Hot-update one cross-line segment (geometry only) |
+| `/metrics` | GET | Prometheus metrics when `PROMETHEUS_ENABLED=true` |
 | `/detection/start` | POST | Start FrameBus + task workers (optional `camera_id`) |
 | `/detection/stop` | POST | Stop processing (optional `camera_id`; omit = all) |
 | `/detection/status` | GET | Operational status per camera |
@@ -2399,7 +2433,7 @@ After starting the server (`uvicorn` on port **9000** by default):
 - Swagger UI: `http://localhost:9000/docs`
 - ReDoc: `http://localhost:9000/redoc`
 
-Supplementary docs (in git): [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including live WebSocket), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest, cURL, SSH, cashier `data`/cases/evidence), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`docs/pipeline-architecture.md`](docs/pipeline-architecture.md) (process model, annotation flow, RTSP transport API, zombie reaping, E2E test guide), [`sse_cashier.md`](sse_cashier.md).
+Supplementary docs (in git): [`docs/API_USAGE.md`](docs/API_USAGE.md) (full API walkthrough including live WebSocket), [`docs/FRONTEND_BACKEND_INTEGRATION.md`](docs/FRONTEND_BACKEND_INTEGRATION.md) (how a web/mobile UI integrates — REST, SSE, WebSocket, face attendance), [`docs/FACE_API.md`](docs/FACE_API.md) (face library REST), [`docs/VISION_PIPELINE_README.md`](docs/VISION_PIPELINE_README.md) (pytest, cURL, SSH, cashier `data`/cases/evidence), [`docs/OPTIMIZATION_REFERENCE.md`](docs/OPTIMIZATION_REFERENCE.md) (performance/security env vars and CI), [`docs/ADDING_A_SERVICE.md`](docs/ADDING_A_SERVICE.md) (new FrameBus tasks), [`docs/CASHIER_BOX_OPEN.md`](docs/CASHIER_BOX_OPEN.md) (Eyego + cashier cURL + mocks + JSON), [`docs/pipeline-architecture.md`](docs/pipeline-architecture.md) (process model, annotation flow, RTSP transport API, zombie reaping, E2E test guide), [`sse_cashier.md`](sse_cashier.md), [`PROJECTS_DOCUMENTATION.md`](PROJECTS_DOCUMENTATION.md) (portfolio handover).
 
 ## Models
 

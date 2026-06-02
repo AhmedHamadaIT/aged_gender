@@ -11,6 +11,7 @@ Single reference that merges:
 |-------------|-----|
 | Docker / Compose failures (NVIDIA runtime, image arch, healthcheck, Redis volume) | [stream_test_runbook.md](./stream_test_runbook.md#docker-troubleshooting) |
 | Tests, log paths, curl cheat sheet | Part I of this file; [API_USAGE.md](./API_USAGE.md) for HTTP walkthrough |
+| Optimization env vars, CI, security flags | [OPTIMIZATION_REFERENCE.md](./OPTIMIZATION_REFERENCE.md) |
 | ML Image V2 — evidence, env, disk, SSH / JSONL | [../service_doc/ml_image_v2.md](../service_doc/ml_image_v2.md) |
 | Add a FrameBus task | [ADDING_A_SERVICE.md](./ADDING_A_SERVICE.md) |
 | API walkthrough | [API_USAGE.md](./API_USAGE.md) |
@@ -55,19 +56,27 @@ Single reference that merges:
 
 ## Part I — Run automated tests (all services)
 
-From the repo root, when pytest modules exist under `tests/`:
+From the repo root:
 
 ```bash
+# Fast CI-style run (no ML models, no Docker)
+pip install -r requirements-ci.txt
+python3 -m pytest tests/unit/ tests/contract/ tests/security/ \
+  -m "not models and not integration and not e2e and not soak" -v --tb=short
+
+# Full tree (may skip faiss / ONNX placeholders)
 python3 -m pytest tests/ -v --tb=short
 ```
 
-| Test module (examples; add or restore under `tests/`) | What it covers |
-|-------------|----------------|
-| API / OpenAPI smoke | Cameras, tasks, detection stop, cashier REST |
-| Task worker smoke | `CrossLineTask`, `MaskHairnetChefHatTask`, `CashierDrawerTask` |
-| Cashier rules | `CashierService` offline / envelope tests |
+| Test area | Examples |
+|-----------|----------|
+| Unit | `test_cashier_parametrized.py`, `test_geometry_properties.py`, `test_sse_schema_snapshot.py`, `test_multi_camera_throughput.py`, `test_cross_line_line_patch.py` |
+| Contract | `tests/contract/test_sse_filters.py`, OpenAPI snapshot |
+| Security | `tests/security/test_path_traversal.py` (auth, upload cap, path traversal) |
+| Integration | `tests/integration/` — use `docker compose -f docker-compose.test.yml up -d` |
+| E2E | `tests/e2e/test_final_system_validation.py` |
 
-There is no bundled pytest tree in this checkout beyond what you add under `tests/`; use the **cURL** sections below for a full manual pass.
+CI: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml). See [OPTIMIZATION_REFERENCE.md](./OPTIMIZATION_REFERENCE.md) for env flags used in production tuning.
 
 ---
 

@@ -19,10 +19,17 @@ Endpoints (registered in app.py):
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional
+import logging
+import os
+import signal
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from pydantic import BaseModel, field_validator
+
+_log_tasks = logging.getLogger(__name__)
 
 # Sentinel returned when a taskName lookup is ambiguous (multiple tasks share the same name).
 _AMBIGUOUS = object()
@@ -48,6 +55,12 @@ class DetailConfig(BaseModel):
     yawThreshold    : int        = 35
     pitchThreshold  : int        = 25
     failCount       : int        = 2
+    # QW-7: minimum bbox area (px²) — 0 = disabled (all tasks)
+    minPersonAreaPx : int        = 0
+    # QW-8: cross-line cooldown seconds per (track_id, line_id) — 0 = disabled
+    debounceSec     : float      = 0.0
+    # M-4: per-task confidence threshold override — 0.0 = use global CONF_THRESHOLD
+    confThreshold   : float      = 0.0
 
 
 class TaskConfig(BaseModel):
@@ -122,11 +135,86 @@ def _validate_cross_line_area_position(area_position: str) -> None:
         )
 
 
+# ─────────────────────────────────────────────
+# M-5: Cross-line line patch
+# ─────────────────────────────────────────────
+
+class CrossLineLinePatch(BaseModel):
+    """Partial update for a single virtual line within a CROSS_LINE task."""
+    point    : Optional[List[Dict[str, Any]]] = None
+    direction: Optional[int]                  = None
+
+
+def _refresh_cross_line_stream(task_id: int, task: dict) -> dict:
+    """
+    Ask the running DetectionResource to hot-reload the cross-line task.
+    Returns {"applied": bool, "reason": str, ...}.
+    Late import avoids circular dependency.
+    """
+    try:
+        from apis.detection import detection  # noqa: PLC0415
+        if detection is not None:
+            return detection.reload_cross_line_task(task_id, task)
+    except Exception:
+        pass
+    return {"applied": False, "reason": "detection_not_running"}
+
+
+def _checkpoint_path() -> Path:
+    """Absolute path to the registry checkpoint file."""
+    out_dir = os.getenv("OUTPUT_DIR", "/output")
+    return Path(out_dir) / "registry_checkpoint.json"
+
+
+def _save_checkpoint(tasks: dict) -> None:
+    """Atomically write all task configs to JSON checkpoint."""
+    cp = _checkpoint_path()
+    try:
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cp.with_suffix(".tmp")
+        tmp.write_text(json.dumps(list(tasks.values()), indent=2), encoding="utf-8")
+        tmp.replace(cp)
+    except Exception as exc:
+        _log_tasks.warning("registry_checkpoint: save failed: %s", exc)
+
+
+def _load_checkpoint() -> Optional[dict]:
+    """Load checkpoint and return {task_id: config} or None."""
+    cp = _checkpoint_path()
+    if not cp.exists():
+        return None
+    try:
+        data = json.loads(cp.read_text(encoding="utf-8"))
+        return {int(t["taskId"]): t for t in data}
+    except Exception as exc:
+        _log_tasks.warning("registry_checkpoint: load failed: %s", exc)
+        return None
+
+
 class TaskRegistry:
     SUPPORTED = {"CROSS_LINE", "MASK_HAIRNET_CHEF_HAT", "CASHIER_BOX_OPEN", "PHONE_USAGE", "FACE"}
 
     def __init__(self):
         self._tasks: dict = {}   # {task_id (int): task_config (dict)}
+
+        # M-7: restore from checkpoint on boot when REGISTRY_RESTORE=true.
+        if os.getenv("REGISTRY_RESTORE", "false").lower() in ("true", "1", "yes"):
+            restored = _load_checkpoint()
+            if restored:
+                self._tasks = restored
+                _log_tasks.info(
+                    "registry_checkpoint: restored %d tasks from %s",
+                    len(restored), _checkpoint_path(),
+                )
+
+        # M-7: save on SIGTERM so checkpoint is current on graceful shutdown.
+        try:
+            signal.signal(signal.SIGTERM, self._sigterm_handler)
+        except (ValueError, OSError):
+            pass  # Non-main thread — SIGTERM handler set elsewhere.
+
+    def _sigterm_handler(self, signum, frame) -> None:
+        _save_checkpoint(self._tasks)
 
     def _validate_config(self, config: TaskConfig) -> None:
         if config.algorithmType not in self.SUPPORTED:
@@ -145,6 +233,7 @@ class TaskRegistry:
     def upsert(self, config: TaskConfig) -> dict:
         self._validate_config(config)
         self._tasks[config.taskId] = config.model_dump()
+        _save_checkpoint(self._tasks)
         return self._tasks[config.taskId]
 
     def get(self, task_id: int) -> Optional[dict]:
@@ -159,6 +248,7 @@ class TaskRegistry:
     def remove(self, task_id: int):
         self.require(task_id)
         del self._tasks[task_id]
+        _save_checkpoint(self._tasks)
 
     def all(self) -> list:
         return list(self._tasks.values())
@@ -231,6 +321,47 @@ class TaskRegistry:
         self.remove(task_id)
         _notify_detection_task_changed(task_id, enabled=False, exists=False)
         return {"status": "deleted", "taskId": task_id}
+
+    def on_patch_cross_line(
+        self, task_id: int, line_id: str, patch: CrossLineLinePatch
+    ) -> dict:
+        """
+        Update a single virtual line geometry within a CROSS_LINE task.
+        Persists the change to the in-memory registry and asks DetectionResource
+        to hot-reload the worker process (overlay + re-spawn) without restarting
+        the whole camera pipeline.
+        """
+        task = self.require(task_id)
+        if task.get("algorithmType") != "CROSS_LINE":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Task {task_id} is not a CROSS_LINE task.",
+            )
+
+        from services.cross_line import update_line_in_area_position
+
+        try:
+            new_ap = update_line_in_area_position(
+                task.get("areaPosition", "[]"),
+                line_id,
+                point=patch.point,
+                direction=patch.direction,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        task["areaPosition"] = new_ap
+        self._tasks[task_id] = task
+        _save_checkpoint(self._tasks)
+
+        refresh_result = _refresh_cross_line_stream(task_id, task)
+        return {
+            "status"        : "updated",
+            "task_id"       : task_id,
+            "line_id"       : line_id,
+            "areaPosition"  : new_ap,
+            "live_reload"   : refresh_result,
+        }
 
 
 def _notify_detection_task_changed(

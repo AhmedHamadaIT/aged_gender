@@ -145,7 +145,6 @@ class CorruptionDetector:
     """Fast multi-check gate for HEVC decode glitches before JPEG / YOLO."""
 
     def __init__(self, threshold_ratio: float = 0.35):
-        self.threshold = threshold_ratio
         self._last_good_frame = None
         self._corrupt_streak = 0
         self._consecutive_corrupt_all = 0
@@ -207,6 +206,49 @@ class CorruptionDetector:
         self._last_good_frame = frame
         self._corrupt_streak = 0
         return frame, False
+
+
+class FrozenFrameDetector:
+    """
+    QW-10: Detect video feeds that deliver pixel-identical frames (frozen camera /
+    network-level multicast loop).  Every CHECK_INTERVAL_FRAMES frames, compute the
+    mean absolute difference against the previous sample.  If the diff stays below
+    STREAM_FROZEN_THRESHOLD for STREAM_FROZEN_CONSECUTIVE checks in a row, emit a
+    STREAM_FROZEN event and request a reconnect via bus_fatal_event.
+    """
+
+    def __init__(
+        self,
+        check_interval: int = 30,
+        diff_threshold: float = 0.5,
+        consecutive_required: int = 3,
+    ):
+        self._interval = max(1, check_interval)
+        self._threshold = diff_threshold
+        self._required = max(1, consecutive_required)
+        self._last_sample: Optional[np.ndarray] = None
+        self._consecutive_frozen: int = 0
+
+    def check(self, frame: np.ndarray, frame_count: int) -> bool:
+        """
+        Call once per hot-loop iteration.  Returns True when a freeze is detected
+        (caller should trigger reconnect) and resets internal state.
+        """
+        if frame_count % self._interval != 0:
+            return False
+        sample = frame[::4, ::4]  # 1/16 of pixels for speed
+        if self._last_sample is not None and self._last_sample.shape == sample.shape:
+            diff = float(np.abs(sample.astype(np.int16) - self._last_sample.astype(np.int16)).mean())
+            if diff < self._threshold:
+                self._consecutive_frozen += 1
+                if self._consecutive_frozen >= self._required:
+                    self._consecutive_frozen = 0
+                    self._last_sample = sample
+                    return True
+            else:
+                self._consecutive_frozen = 0
+        self._last_sample = sample
+        return False
 
 
 class PublishCircuitBreaker:
@@ -327,6 +369,34 @@ class FrameBus:
             camera_id, model_path, device, conf, iou,
         )
 
+        # ── Model warm-up ─────────────────────────────────────────────────────
+        # Run dummy inference passes so TensorRT/CUDA kernels are compiled before
+        # the first real frame arrives, eliminating the cold-start latency spike.
+        _warmup_frames = int(os.getenv("MODEL_WARMUP_FRAMES", "5"))
+        if _warmup_frames > 0:
+            import time as _time
+            _w_start = _time.monotonic()
+            _h = int(os.getenv("HEIGHT", "0")) or int(os.getenv("WIDTH", "1280"))
+            _w = int(os.getenv("WIDTH", "1280"))
+            _dummy = np.zeros((_h or _w, _w, 3), dtype=np.uint8)
+            try:
+                for _ in range(_warmup_frames):
+                    self._model.track(
+                        _dummy,
+                        persist=False,
+                        conf=self._conf,
+                        iou=self._iou,
+                        device=self._device,
+                        verbose=False,
+                    )
+                log.info(
+                    "[%s] FrameBus: model warm-up done (%d frames, %.1f ms)",
+                    camera_id, _warmup_frames,
+                    (_time.monotonic() - _w_start) * 1000,
+                )
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("[%s] FrameBus: model warm-up skipped (%s)", camera_id, _exc)
+
         # Signal to the parent process (apis/detection.py) that YOLO init succeeded.
         # Parent waits on this event (step 8 of the validation sequence).
         if self._bus_ready_event is not None:
@@ -386,6 +456,86 @@ class FrameBus:
         self._embed_skipped  = 0
         self._embed_passed   = 0
 
+        # S-6: tracker state checkpoint — save last known bbox per track_id to
+        # JSON on SIGTERM so a respawning FrameBus can re-seed the tracker.
+        # Disabled by default (TRACKER_STATE_RESTORE=false).
+        self._tracker_ckpt_enabled = os.getenv("TRACKER_STATE_RESTORE", "false").lower() in (
+            "true", "1", "yes"
+        )
+        _out_dir = os.getenv("OUTPUT_DIR", "/output")
+        self._tracker_ckpt_path = os.path.join(
+            _out_dir, f"tracker_state_{camera_id}.json"
+        )
+        self._tracker_last_state: dict = {}   # {track_id: {bbox, conf, frame_id}}
+        if self._tracker_ckpt_enabled:
+            self._tracker_ckpt_load()
+
+        # S-2: adaptive frame skip — when DYNAMIC_FRAME_SKIP=true the bus
+        # increments _dyn_skip_n (skip every Nth frame) when queues fill and
+        # decrements it as they drain.  Default off (0 = disabled).
+        self._dynamic_skip_enabled = os.getenv("DYNAMIC_FRAME_SKIP", "false").lower() in (
+            "true", "1", "yes"
+        )
+        self._dyn_skip_n       = 1   # 1 = no skip; 2 = skip every other frame, etc.
+        self._dyn_skip_counter = 0
+        self._dyn_skip_max     = max(1, int(os.getenv("DYNAMIC_FRAME_SKIP_MAX", "4")))
+
+        # QW-7: global min bbox area filter (0 = disabled).
+        try:
+            self._min_detection_area_px = max(0, int(os.getenv("MIN_DETECTION_AREA_PX", "0")))
+        except ValueError:
+            self._min_detection_area_px = 0
+
+        # QW-14: annotation-only EMA bbox smoothing.
+        # alpha=1.0 (default) → no smoothing. Set 0.5–0.7 to enable.
+        try:
+            self._bbox_ema_alpha = min(1.0, max(0.0, float(os.getenv("BBOX_SMOOTHING_ALPHA", "1.0"))))
+        except ValueError:
+            self._bbox_ema_alpha = 1.0
+        # {track_id: (x1, y1, x2, y2)} — smoothed positions for annotation only.
+        self._bbox_ema_state: Dict[int, tuple] = {}
+
+        # M-1: optional thread pool for annotation+encode+publish offload.
+        # ANNOTATION_THREADS=0 (default) keeps current synchronous behavior.
+        try:
+            self._annotation_threads = max(0, int(os.getenv("ANNOTATION_THREADS", "0")))
+        except ValueError:
+            self._annotation_threads = 0
+        self._annotation_pool = None
+        if self._annotation_threads > 0:
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            self._annotation_pool = _TPE(
+                max_workers=self._annotation_threads,
+                thread_name_prefix=f"ann_{camera_id}",
+            )
+            log.info(
+                "[%s] FrameBus: annotation thread pool enabled (%d workers)",
+                camera_id, self._annotation_threads,
+            )
+
+        # M-2: optional shared-memory ring for task payload fan-out.
+        self._shm_ring = None
+        if os.getenv("TASK_SHM_ENABLED", "false").lower() in ("true", "1", "yes"):
+            try:
+                from utils.shm_ring import ShmFrameRing
+                _ring_size = max(2, int(os.getenv("TASK_SHM_RING", "8")))
+                _slot_kb = max(64, int(os.getenv("TASK_SHM_SLOT_KB", "512")))
+                self._shm_ring = ShmFrameRing(
+                    name_prefix=f"fb_{camera_id}",
+                    ring_size=_ring_size,
+                    slot_bytes=_slot_kb * 1024,
+                )
+                log.info(
+                    "[%s] FrameBus: SHM ring enabled (ring=%d, slot=%dKB)",
+                    camera_id, _ring_size, _slot_kb,
+                )
+            except Exception as _shm_exc:
+                log.warning(
+                    "[%s] FrameBus: SHM ring init failed (%s) — falling back to pickle",
+                    camera_id, _shm_exc,
+                )
+                self._shm_ring = None
+
         # Highwater fraction: when ANY task queue exceeds this fill ratio the
         # current frame is dropped before YOLO inference to shed load.
         # Set TASK_QUEUE_HIGHWATER=1.0 to disable early skipping.
@@ -397,6 +547,19 @@ class FrameBus:
         self._tracker_yaml = _tracker_env or (
             _DEFAULT_TRACKER_YAML if os.path.isfile(_DEFAULT_TRACKER_YAML) else "botsort.yaml"
         )
+
+        # QW-6: Derive track_buffer from TRACK_BUFFER_SECONDS * target FPS.
+        # TRACK_BUFFER_SECONDS=0 keeps whatever is in the YAML (backward compat).
+        _track_buf_sec = float(os.getenv("TRACK_BUFFER_SECONDS", "0"))
+        if _track_buf_sec > 0 and not os.getenv("BOTSORT_TRACK_BUFFER", "").strip():
+            _fps_est = float(os.getenv("STREAM_TARGET_FPS", str(self._target_fps)))
+            _computed_buf = max(1, round(_track_buf_sec * _fps_est))
+            os.environ["BOTSORT_TRACK_BUFFER"] = str(_computed_buf)
+            log.info(
+                "[%s] track_buffer derived: %ds × %.0f fps = %d frames",
+                camera_id, _track_buf_sec, _fps_est, _computed_buf,
+            )
+
         # Allow per-process tracker threshold overrides without editing the YAML.
         # These are written into a temp YAML that shadows the base file when set.
         self._tracker_yaml = _patch_tracker_yaml(self._tracker_yaml, camera_id)
@@ -451,6 +614,20 @@ class FrameBus:
         self._corruption = CorruptionDetector(
             threshold_ratio=float(os.getenv("CORRUPTION_DETECTOR_THRESHOLD", "0.35"))
         )
+
+        # QW-10: Frozen-frame detection.
+        try:
+            _frozen_check_interval = max(1, int(os.getenv("STREAM_FROZEN_CHECK_INTERVAL", "30")))
+            _frozen_threshold = float(os.getenv("STREAM_FROZEN_THRESHOLD", "0.5"))
+            _frozen_consecutive = max(1, int(os.getenv("STREAM_FROZEN_CONSECUTIVE", "3")))
+        except ValueError:
+            _frozen_check_interval, _frozen_threshold, _frozen_consecutive = 30, 0.5, 3
+        self._frozen_detector = FrozenFrameDetector(
+            check_interval=_frozen_check_interval,
+            diff_threshold=_frozen_threshold,
+            consecutive_required=_frozen_consecutive,
+        )
+
         self._integrity_events: deque = deque(maxlen=512)
         self._last_idr_signal_wall = 0.0
         self._last_keyframe_only_signal_wall = 0.0
@@ -462,6 +639,18 @@ class FrameBus:
             failure_threshold=max(1, int(os.getenv("REDIS_PUBLISH_CB_FAILURES", "5"))),
             recovery_timeout=float(os.getenv("REDIS_PUBLISH_CB_RECOVERY_SEC", "10.0")),
         )
+
+        # Subscriber-count gate: when LIVE_PUBLISH_REQUIRE_SUBSCRIBER=true, skip
+        # JPEG encode+publish when no WebSocket/SSE clients are watching this camera.
+        self._require_subscriber = os.getenv(
+            "LIVE_PUBLISH_REQUIRE_SUBSCRIBER", "false"
+        ).lower() in ("true", "1", "yes")
+        self._subscriber_count_cache: int = 0
+        self._subscriber_count_last_check: float = 0.0
+
+        # QW-5: cached WS backpressure flag to avoid per-frame Redis GET.
+        self._bp_cached: bool = False
+        self._bp_last_check: float = 0.0
         best_i = 0
         best_d = 999
         for i, row in enumerate(LIVE_QUALITY_LADDER):
@@ -485,10 +674,6 @@ class FrameBus:
             self._state_update_min_sec = 1.0
 
         self._perf_log_every = max(1, int(os.getenv("PERF_LOG_INTERVAL", "300")))
-        self._need_draw_warn_interval = max(
-            1.0, float(os.getenv("FRAMEBUS_NEED_DRAW_WARN_SEC", "60.0"))
-        )
-        self._last_need_draw_warn_wall = 0.0
 
         self._last_live_publish_seq: int = 0
         self._last_live_frame_had_boxes: bool = False
@@ -653,6 +838,24 @@ class FrameBus:
         """Reuse the task JPEG only when the live frame is still identical to it."""
         return will_publish and not had_boxes and not drew_geometry
 
+    def _refresh_subscriber_count(self) -> int:
+        """Fetch live:subscribers:{camera_id} from Redis; cached for poll interval."""
+        if self._redis is None:
+            return 0
+        now = time.monotonic()
+        poll_sec = float(os.getenv("WS_BACKPRESSURE_POLL_SEC", "1.0"))
+        if now - self._subscriber_count_last_check < poll_sec:
+            return self._subscriber_count_cache
+        try:
+            val = self._redis.get(f"live:subscribers:{self.camera_id}")
+            count = int(val) if val else 0
+            self._subscriber_count_cache = max(0, count)
+            self._subscriber_count_last_check = now
+            return self._subscriber_count_cache
+        except Exception:
+            # On Redis error, return cached value (safe fallback)
+            return self._subscriber_count_cache if self._subscriber_count_cache > 0 else 1
+
     def _publish_live_jpeg(
         self,
         annotated,
@@ -663,6 +866,12 @@ class FrameBus:
         """Publish annotated frame to Redis. Returns wall seconds spent in publish path."""
         if self._redis is None:
             return 0.0
+
+        # QW-4: short-circuit when no subscribers and recording is off.
+        if self._require_subscriber and not self._save_annotated_video:
+            if self._refresh_subscriber_count() == 0:
+                return 0.0
+
         if not self._redis_breaker.allow_request():
             log.warning(
                 "[%s] live frame publish skipped: redis circuit %s",
@@ -749,17 +958,31 @@ class FrameBus:
         return bad / len(self._integrity_events)
 
     def _ws_backpressure_flag(self) -> bool:
+        """Return True when a WebSocket client has reported backpressure recently.
+
+        QW-5: The Redis GET is cached for WS_BACKPRESSURE_POLL_SEC (default 1.0s)
+        so it is NOT issued on every frame, eliminating a per-frame round-trip.
+        """
         if self._redis is None:
             return False
+        now = time.monotonic()
+        poll_sec = float(os.getenv("WS_BACKPRESSURE_POLL_SEC", "1.0"))
+        if now - self._bp_last_check < poll_sec:
+            return self._bp_cached
         try:
             v = self._redis.get(f"stream:ws_backpressure:{self.camera_id}")
+            flag: bool
             if v is None:
-                return False
-            if isinstance(v, bytes):
-                return v not in (b"0", b"", b"false")
-            return str(v).lower() not in ("0", "", "false")
+                flag = False
+            elif isinstance(v, bytes):
+                flag = v not in (b"0", b"", b"false")
+            else:
+                flag = str(v).lower() not in ("0", "", "false")
+            self._bp_cached = flag
+            self._bp_last_check = now
+            return flag
         except Exception:
-            return False
+            return self._bp_cached
 
     def _publish_quality_tier_redis(self) -> None:
         row = LIVE_QUALITY_LADDER[self._live_quality_tier]
@@ -898,8 +1121,26 @@ class FrameBus:
     def _draw_boxes_opencv(self, frame, detections: list):
         """Lighter than Ultralytics plot(); for Redis preview / LIVE_ANNOTATION_MODE=opencv."""
         out = frame
+        alpha = self._bbox_ema_alpha
+        active_tids = {det.track_id for det in detections if det.track_id >= 0}
+        # GC stale EMA state for disappeared tracks.
+        for tid in list(self._bbox_ema_state):
+            if tid not in active_tids:
+                del self._bbox_ema_state[tid]
+
         for det in detections:
-            x1, y1, x2, y2 = int(det.x1), int(det.y1), int(det.x2), int(det.y2)
+            raw = (int(det.x1), int(det.y1), int(det.x2), int(det.y2))
+            tid = det.track_id
+
+            # QW-14: apply EMA smoothing when alpha < 1.0 (annotation-only; detection coords unchanged).
+            if alpha < 1.0 and tid is not None and int(tid) >= 0:
+                prev = self._bbox_ema_state.get(tid, raw)
+                smoothed = tuple(int(alpha * r + (1 - alpha) * p) for r, p in zip(raw, prev))
+                self._bbox_ema_state[tid] = smoothed
+                x1, y1, x2, y2 = smoothed
+            else:
+                x1, y1, x2, y2 = raw
+
             cv2.rectangle(out, (x1, y1), (x2, y2), (0, 200, 0), 1, lineType=cv2.LINE_AA)
             tid = det.track_id
             if tid is not None and int(tid) >= 0:
@@ -1150,6 +1391,29 @@ class FrameBus:
                 ws_bp = self._ws_backpressure_flag()
                 self._maybe_adjust_live_quality_tier(corrupt_rate, ws_bp)
 
+                # QW-10: frozen-frame detection — triggers reconnect via fatal event.
+                if self._frozen_detector.check(resized_frame, frame_count):
+                    log.warning(
+                        "[%s] STREAM_FROZEN detected after %d checks — triggering reconnect",
+                        self.camera_id, frame_count,
+                    )
+                    # Emit STREAM_FROZEN system event on the live:event channel.
+                    if self._redis is not None:
+                        try:
+                            import json as _json
+                            _frozen_evt = _json.dumps({
+                                "type": "STREAM_FROZEN",
+                                "camera_id": self.camera_id,
+                                "frame_id": frame_count,
+                                "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+                            }, separators=(",", ":"))
+                            self._redis.publish(f"live:event:{self.camera_id}", _frozen_evt)
+                        except Exception:
+                            pass
+                    if self._bus_fatal_event is not None:
+                        self._bus_fatal_event.set()
+                    break
+
                 if use_frame is None:
                     if now_wall - corrupt_warn_last_wall >= 5.0:
                         corrupt_warn_last_wall = now_wall
@@ -1201,6 +1465,26 @@ class FrameBus:
 
                 t_after_resize = time.perf_counter()
 
+                # ── S-2: Adaptive dynamic frame skip ──────────────────────────
+                if self._dynamic_skip_enabled and self.task_queues:
+                    self._dyn_skip_counter += 1
+                    if self._dyn_skip_counter < self._dyn_skip_n:
+                        self._frames_skipped_load += 1
+                        self._frames_dropped += 1
+                        continue
+                    self._dyn_skip_counter = 0
+                    try:
+                        _fill = max(
+                            q.qsize() / max(1, self._task_queue_maxsize)
+                            for q in self.task_queues.values()
+                        )
+                        if _fill >= self._task_queue_highwater:
+                            self._dyn_skip_n = min(self._dyn_skip_max, self._dyn_skip_n + 1)
+                        elif _fill < self._task_queue_highwater * 0.5 and self._dyn_skip_n > 1:
+                            self._dyn_skip_n = max(1, self._dyn_skip_n - 1)
+                    except Exception:
+                        pass
+
                 # ── Highwater frame-skip ───────────────────────────────────────
                 # Drop this frame before YOLO inference when ANY task queue is
                 # saturated past TASK_QUEUE_HIGHWATER to avoid cascading lag.
@@ -1228,15 +1512,9 @@ class FrameBus:
                     except Exception:
                         pass
 
-                _, buf = cv2.imencode(
-                    ".jpg",
-                    resized_frame,
-                    [cv2.IMWRITE_JPEG_QUALITY, self._task_jpeg_quality],
-                )
-                frame_b64 = base64.b64encode(buf).decode("utf-8")
-                t_after_task_enc = time.perf_counter()
-
                 # ── BoT-SORT tracking ──────────────────────────────────────────
+                # Encode JPEG after inference so frames dropped by RuntimeError
+                # or by the highwater-skip above never pay the encode cost.
                 try:
                     _track_kw: Dict[str, Any] = {
                         "persist": True,  # keeps track state across frames
@@ -1264,6 +1542,15 @@ class FrameBus:
 
                 t_after_yolo = time.perf_counter()
                 detections = self._parse_tracks(results)
+
+                # Encode the task payload JPEG now that we know inference succeeded.
+                _, buf = cv2.imencode(
+                    ".jpg",
+                    resized_frame,
+                    [cv2.IMWRITE_JPEG_QUALITY, self._task_jpeg_quality],
+                )
+                frame_b64 = base64.b64encode(buf).decode("utf-8")
+                t_after_task_enc = time.perf_counter()
                 last_det   = len(detections)
                 total_detections += last_det
 
@@ -1275,66 +1562,102 @@ class FrameBus:
                 )
                 need_draw = self.save_output or will_publish or self._save_annotated_video
 
-                # Single annotated frame used everywhere: Redis, disk, scene evidence.
-                # detections > 0  → always returns an annotated copy (rule enforced in helper).
-                # detections == 0 → returns raw frame; JPEG reuse is safe.
-                annotated, had_boxes = self._annotate_for_stream(
-                    resized_frame,
-                    results,
-                    detections,
-                    need_draw,
-                    frame_count,
-                )
-                drew_geometry = self._live_stream_geometry_active and need_draw
-                if drew_geometry:
-                    self._draw_live_stream_geometry(annotated)
-                t_after_ann = time.perf_counter()
+                _ts_str = datetime.utcnow().isoformat()
 
-                # Reuse the pre-track JPEG only when the annotated frame IS the raw
-                # frame (no detections, no overlay drawn).
-                reuse_live_buf = self._can_reuse_live_encode(
-                    will_publish=will_publish,
-                    had_boxes=had_boxes,
-                    drew_geometry=drew_geometry,
-                )
+                # M-2: use SHM ring if enabled and write succeeds; else pickle path.
+                if self._shm_ring is not None:
+                    _shm_ref = self._shm_ring.write(bytes(buf))
+                else:
+                    _shm_ref = None
 
-                publish_sec = 0.0
-                if will_publish:
-                    publish_sec = self._publish_live_jpeg(
-                        annotated,
-                        task_encode_buf=buf,
-                        reuse_task_encode=reuse_live_buf,
+                if _shm_ref is not None:
+                    from utils.shm_ring import FrameRef as _FrameRef
+                    _shm_name, _shm_off, _shm_sz = _shm_ref
+                    _ref = _FrameRef(
+                        shm_name=_shm_name,
+                        offset=_shm_off,
+                        size=_shm_sz,
+                        frame_id=frame_count,
+                        camera_id=self.camera_id,
+                        timestamp=_ts_str,
+                        detections=detections,
+                        count=last_det,
                     )
-                    self._last_live_frame_had_boxes = had_boxes
+                    for task_id, q in self.task_queues.items():
+                        self._enqueue_task_payload(q, str(task_id), _ref)
+                else:
+                    payload = {
+                        "camera_id" : self.camera_id,
+                        "frame_id"  : frame_count,
+                        "timestamp" : _ts_str,
+                        "frame_b64" : frame_b64,
+                        "detection" : {
+                            "items": detections,
+                            "count": last_det,
+                        },
+                    }
+                    if self._include_frame_ndarray:
+                        payload["frame"] = resized_frame.copy()
 
-                payload = {
-                    "camera_id" : self.camera_id,
-                    "frame_id"  : frame_count,
-                    "timestamp" : datetime.utcnow().isoformat(),
-                    "frame_b64" : frame_b64,
-                    "detection" : {
-                        "items": detections,
-                        "count": last_det,
-                    },
-                }
-                if self._include_frame_ndarray:
-                    payload["frame"] = resized_frame.copy()
+                    for task_id, q in self.task_queues.items():
+                        tid = str(task_id)
+                        self._enqueue_task_payload(q, tid, payload)
 
-                for task_id, q in self.task_queues.items():
-                    tid = str(task_id)
-                    self._enqueue_task_payload(q, tid, payload)
+                def _do_annotate_and_publish(
+                    _frame=resized_frame,
+                    _results=results,
+                    _dets=detections,
+                    _need=need_draw,
+                    _fc=frame_count,
+                    _buf=buf,
+                    _will=will_publish,
+                    _fps=fps,
+                ):
+                    annotated, had_boxes = self._annotate_for_stream(
+                        _frame, _results, _dets, _need, _fc,
+                    )
+                    drew_geometry = self._live_stream_geometry_active and _need
+                    if drew_geometry:
+                        self._draw_live_stream_geometry(annotated)
 
-                if self.save_output:
-                    save_frame(annotated, self.out_dir, frame_count)
+                    reuse_live_buf = self._can_reuse_live_encode(
+                        will_publish=_will,
+                        had_boxes=had_boxes,
+                        drew_geometry=drew_geometry,
+                    )
+                    if _will:
+                        self._publish_live_jpeg(
+                            annotated, task_encode_buf=_buf, reuse_task_encode=reuse_live_buf,
+                        )
+                        self._last_live_frame_had_boxes = had_boxes
 
-                if self._save_annotated_video:
-                    if self._annotated_video_match_ws:
-                        if self._redis is not None and will_publish:
-                            self._annotated_video_write_frame(annotated, fps)
-                        elif self._redis is None:
-                            self._annotated_video_write_frame(annotated, fps)
-                    else:
-                        self._annotated_video_write_frame(annotated, fps)
+                    if self.save_output:
+                        save_frame(annotated, self.out_dir, _fc)
+
+                    if self._save_annotated_video:
+                        if self._annotated_video_match_ws:
+                            if self._redis is not None and _will:
+                                self._annotated_video_write_frame(annotated, _fps)
+                            elif self._redis is None:
+                                self._annotated_video_write_frame(annotated, _fps)
+                        else:
+                            self._annotated_video_write_frame(annotated, _fps)
+
+                if self._annotation_pool is not None:
+                    # M-1: offload annotation+publish to thread pool; inference continues.
+                    try:
+                        self._annotation_pool.submit(_do_annotate_and_publish)
+                    except Exception:
+                        _do_annotate_and_publish()
+                else:
+                    _do_annotate_and_publish()
+
+                annotated = resized_frame  # for perf log / video writer timing below
+                had_boxes = bool(detections)
+                drew_geometry = False
+                reuse_live_buf = False
+                publish_sec = 0.0  # publish_sec not tracked in async path
+                t_after_ann = time.perf_counter()
 
                 t_iter_end = time.perf_counter()
                 if frame_count % self._perf_log_every == 0:
@@ -1345,8 +1668,8 @@ class FrameBus:
                         self.camera_id,
                         frame_count,
                         (t_iter_end - t_iter0) * 1000.0,
-                        (t_after_yolo - t_after_task_enc) * 1000.0,
-                        (t_after_task_enc - t_after_resize) * 1000.0,
+                        (t_after_yolo - t_after_resize) * 1000.0,
+                        (t_after_task_enc - t_after_yolo) * 1000.0,
                         (t_after_ann - t_after_yolo) * 1000.0,
                         publish_sec * 1000.0,
                         last_det,
@@ -1522,6 +1845,17 @@ class FrameBus:
                     "running": False,
                     "state_updated_at": time.time(),
                 }
+            if self._annotation_pool is not None:
+                self._annotation_pool.shutdown(wait=True, cancel_futures=False)
+                self._annotation_pool = None
+            if self._shm_ring is not None:
+                try:
+                    self._shm_ring.close()
+                except Exception:
+                    pass
+                self._shm_ring = None
+            # S-6: persist tracker state on stop so next respawn can restore it.
+            self._tracker_ckpt_save()
             log.info(
                 "[%s] FrameBus stopped. Frames: %s", self.camera_id, frame_count
             )
@@ -1628,10 +1962,16 @@ class FrameBus:
 
         boxes     = results[0].boxes
         has_ids   = boxes.id is not None
+        min_area  = self._min_detection_area_px
 
         detections = []
         for i in range(len(boxes)):
             x1, y1, x2, y2 = map(int, boxes.xyxy[i])
+
+            # QW-7: drop tiny detections (noise, partial occlusions at image edge).
+            if min_area > 0 and (x2 - x1) * (y2 - y1) < min_area:
+                continue
+
             cls_id   = int(boxes.cls[i])
             conf     = float(boxes.conf[i])
             track_id = int(boxes.id[i]) if has_ids else -1
@@ -1647,4 +1987,44 @@ class FrameBus:
                 track_id   = track_id,
             ))
 
+        # S-6: update in-memory tracker state for checkpoint.
+        if self._tracker_ckpt_enabled and detections:
+            for det in detections:
+                if det.track_id >= 0:
+                    self._tracker_last_state[str(det.track_id)] = {
+                        "bbox": [det.x1, det.y1, det.x2, det.y2],
+                        "conf": det.confidence,
+                        "class_id": det.class_id,
+                    }
+
         return detections
+
+    def _tracker_ckpt_load(self) -> None:
+        """S-6: load tracker state from JSON checkpoint on startup."""
+        try:
+            import json as _j
+            from pathlib import Path as _P
+            p = _P(self._tracker_ckpt_path)
+            if p.exists():
+                self._tracker_last_state = _j.loads(p.read_text()) or {}
+                log.info(
+                    "[%s] tracker checkpoint loaded: %d tracks from %s",
+                    self.camera_id, len(self._tracker_last_state), self._tracker_ckpt_path,
+                )
+        except Exception as exc:
+            log.warning("[%s] tracker checkpoint load failed: %s", self.camera_id, exc)
+
+    def _tracker_ckpt_save(self) -> None:
+        """S-6: atomically save tracker state to JSON checkpoint."""
+        if not self._tracker_ckpt_enabled or not self._tracker_last_state:
+            return
+        try:
+            import json as _j
+            from pathlib import Path as _P
+            p = _P(self._tracker_ckpt_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(_j.dumps(self._tracker_last_state, indent=2))
+            tmp.replace(p)
+        except Exception as exc:
+            log.warning("[%s] tracker checkpoint save failed: %s", self.camera_id, exc)

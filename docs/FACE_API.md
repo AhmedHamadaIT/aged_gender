@@ -98,6 +98,12 @@ Strangers are unknown faces detected during surveillance that do not match exist
 
 ---
 
+## Frontend integration
+
+For dashboards and mobile apps (SSE consumption, attendance check-in rules, env vars, TypeScript examples), see **[FRONTEND_BACKEND_INTEGRATION.md](./FRONTEND_BACKEND_INTEGRATION.md)**.
+
+---
+
 ## Usage: Pipeline Configuration
 
 To use the Face Recognition engine in live video processing streams, setup a `FaceRecognitionTask` by configuring it via POST `/api/tasks`.

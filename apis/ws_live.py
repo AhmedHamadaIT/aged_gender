@@ -163,6 +163,37 @@ def _tier_to_min_frame_interval(tier: Optional[str]) -> float:
     return 1.0 / cap if cap > 0 else 0.0
 
 
+def _sync_incr_subscriber(camera_id: str) -> None:
+    """Increment live:subscribers:{camera_id} counter with a 60s TTL."""
+    try:
+        import redis as r
+
+        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        c = r.Redis.from_url(url, socket_connect_timeout=0.3, socket_timeout=0.3)
+        key = f"live:subscribers:{camera_id}"
+        c.incr(key)
+        c.expire(key, 60)
+        c.close()
+    except Exception:
+        pass
+
+
+def _sync_decr_subscriber(camera_id: str) -> None:
+    """Decrement live:subscribers:{camera_id} counter (floor at 0)."""
+    try:
+        import redis as r
+
+        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        c = r.Redis.from_url(url, socket_connect_timeout=0.3, socket_timeout=0.3)
+        key = f"live:subscribers:{camera_id}"
+        val = c.decr(key)
+        if val is not None and int(val) < 0:
+            c.set(key, 0)
+        c.close()
+    except Exception:
+        pass
+
+
 def _sync_set_ws_backpressure(camera_id: str) -> None:
     try:
         import redis as r
@@ -291,12 +322,57 @@ async def live_frames_ws(websocket: WebSocket, camera_id: str) -> None:
         return
 
     await websocket.accept()
+    await asyncio.to_thread(_sync_incr_subscriber, camera_id)
 
-    last_seq = 0
-    q = websocket.query_params.get("last_seq")
-    if q and q.isdigit():
-        last_seq = int(q)
+    last_seq_str = websocket.query_params.get("last_seq")
+    last_seq = int(last_seq_str) if last_seq_str and last_seq_str.isdigit() else 0
     await _replay_frames(websocket, camera_id, last_seq)
+
+    # M-3: use multiplexer (one Redis sub per camera) when WS_MUX_ENABLED=true.
+    _use_mux = os.getenv("WS_MUX_ENABLED", "false").lower() in ("true", "1", "yes")
+    if _use_mux:
+        from apis._redis_fanout import get_camera_mux
+        _mux = await get_camera_mux(camera_id)
+        _mux_q = await _mux.subscribe()
+        last_sent_at = 0.0
+        min_interval = _WS_MIN_FRAME_INTERVAL
+        last_qos_check = 0.0
+        try:
+            while True:
+                if websocket.client_state != WebSocketState.CONNECTED:
+                    break
+                try:
+                    data = await asyncio.wait_for(_mux_q.get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    continue
+                jpeg_bytes, seq = decode_live_frame_message(data)
+                _record_frame_ring(camera_id, seq, jpeg_bytes)
+                nowm = time.monotonic()
+                if nowm - last_qos_check >= _WS_QUALITY_REFRESH_SEC:
+                    last_qos_check = nowm
+                    tier = await asyncio.to_thread(_sync_redis_get_stream_quality, camera_id)
+                    min_interval = _tier_to_min_frame_interval(tier)
+                if min_interval > 0 and nowm - last_sent_at < min_interval:
+                    continue
+                last_sent_at = nowm
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_bytes(_frame_ws_payload(jpeg_bytes, seq)),
+                        timeout=_SEND_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    await _maybe_publish_ws_backpressure(camera_id)
+                except (WebSocketDisconnect, RuntimeError):
+                    break
+        finally:
+            _mux.unsubscribe(_mux_q)
+            await asyncio.to_thread(_sync_decr_subscriber, camera_id)
+            if websocket.client_state == WebSocketState.CONNECTED:
+                try:
+                    await websocket.close(code=1011, reason="stream ended")
+                except Exception:
+                    pass
+        return
 
     last_sent_at = 0.0
     min_interval = _WS_MIN_FRAME_INTERVAL
@@ -402,6 +478,8 @@ async def live_frames_ws(websocket: WebSocket, camera_id: str) -> None:
 
         if _ws_dead:
             break
+
+    await asyncio.to_thread(_sync_decr_subscriber, camera_id)
 
     if websocket.client_state == WebSocketState.CONNECTED:
         try:

@@ -113,6 +113,8 @@ class DetectionResource(BaseResource):
         self._event_seq_locks     : Dict[str, object] = {}
         self._watchdog_respawn_times: Dict[str, List[float]] = defaultdict(list)
         self._task_queues_ref: Dict[str, Dict[str, object]] = {}
+        # M-5: live overlay store — camera_id → overlay dict built from enabled tasks.
+        self._live_overlay_store: Dict[str, dict] = {}
 
     # ── Task validity map ─────────────────────────────────────────────────────
 
@@ -136,6 +138,93 @@ class DetectionResource(BaseResource):
     def remove_task_validity(self, task_id: str) -> None:
         """Mark task as removed — workers will detect this and stop cleanly."""
         self.update_task_validity(task_id, enabled=False, exists=False)
+
+    # ── M-5: Cross-line hot-reload ────────────────────────────────────────────
+
+    def _set_channel_live_overlay(self, cam_id: str, tasks: list) -> None:
+        """Rebuild and store the live-stream overlay for a camera."""
+        overlay = build_live_stream_overlay(tasks)
+        self._live_overlay_store[cam_id] = overlay
+
+    def reload_cross_line_task(self, task_id: int, task: dict) -> dict:
+        """
+        Hot-reload a CROSS_LINE task worker:
+        1. Refresh the live-stream overlay for the owning camera.
+        2. Terminate the old task worker process and start a fresh one.
+
+        Returns {"applied": bool, "reason": str?, "overlay_refreshed": bool}.
+        """
+        cam_id = str(task.get("channelId", ""))
+        tid_str = str(task_id)
+
+        bus_proc = self._bus_processes.get(cam_id)
+        if bus_proc is None or not bus_proc.is_alive():
+            return {"applied": False, "reason": "camera_not_running"}
+
+        # Refresh overlay from all currently-enabled tasks on this camera.
+        try:
+            chan_tasks = [
+                t for t in task_registry.get_enabled()
+                if str(t.get("channelId", "")) == cam_id
+            ]
+            self._set_channel_live_overlay(cam_id, chan_tasks)
+            overlay_refreshed = True
+        except Exception:
+            overlay_refreshed = False
+
+        # Respawn the task worker.
+        old_proc = (self._task_processes.get(cam_id) or {}).get(tid_str)
+        if old_proc is not None and old_proc.is_alive():
+            old_proc.terminate()
+            try:
+                old_proc.join(timeout=3.0)
+            except Exception:
+                pass
+
+        q = (self._task_queues_ref.get(cam_id) or {}).get(tid_str)
+        stop_event = self._stop_events.get(cam_id)
+        if q is None or stop_event is None:
+            return {
+                "applied": False,
+                "reason": "no_queue_or_stop_event",
+                "overlay_refreshed": overlay_refreshed,
+            }
+
+        from task_worker import run_task_worker  # noqa: PLC0415
+
+        worker_ready = self._worker_ready_events.get(cam_id, {}).get(tid_str)
+        if worker_ready is None:
+            worker_ready = self._manager.Event()
+            self._worker_ready_events.setdefault(cam_id, {})[tid_str] = worker_ready
+        else:
+            worker_ready.clear()
+
+        new_proc = multiprocessing.Process(
+            target=run_task_worker,
+            args=(
+                cam_id,
+                task,
+                q,
+                self._result_queue,
+                stop_event,
+                self._shared_state,
+                self._event_seq.get(cam_id),
+                self._event_seq_locks.get(cam_id),
+            ),
+            kwargs={"worker_ready_event": worker_ready, "task_validity_map": self._task_validity_map},
+            daemon=True,
+        )
+        new_proc.start()
+        self._task_processes.setdefault(cam_id, {})[tid_str] = new_proc
+
+        # Wait briefly for worker to signal readiness.
+        worker_ready.wait(timeout=5.0)
+
+        log.info(
+            "[detection] CROSS_LINE task %s reloaded for cam %s (pid=%s)",
+            task_id, cam_id, new_proc.pid,
+        )
+        return {"applied": True, "overlay_refreshed": overlay_refreshed}
 
     # ── Status ───────────────────────────────────────────────────────────────
 
@@ -311,7 +400,7 @@ class DetectionResource(BaseResource):
                 self._bus_fatal_events[cam_id],
                 live_overlay,
             ),
-            kwargs={"bus_ready_event": bus_ready},
+            kwargs={"bus_ready_event": bus_ready, "cpu_affinity": _cpu_affinity_for(cam_id)},
             daemon=True,
         )
         self._bus_processes[cam_id] = bus
@@ -523,10 +612,10 @@ class DetectionResource(BaseResource):
                     self._embedding_queue,
                     self._frame_seq[chan_id],
                     self._frame_seq_locks[chan_id],
-                    self._bus_fatal_events[chan_id],
-                    live_overlay,
+                self._bus_fatal_events[chan_id],
+                live_overlay,
                 ),
-                kwargs={"bus_ready_event": bus_ready},
+                kwargs={"bus_ready_event": bus_ready, "cpu_affinity": _cpu_affinity_for(chan_id)},
                 daemon=True,
             )
             self._bus_processes[chan_id] = bus
@@ -688,6 +777,32 @@ class DetectionResource(BaseResource):
 # ─────────────────────────────────────────────
 # Top-level picklable entry for the FrameBus process
 # ─────────────────────────────────────────────
+def _cpu_affinity_for(camera_id: str):
+    """
+    S-1: Return CPU core list for this camera, or None when affinity is off.
+    CAMERA_CPU_AFFINITY=cam1:0,1;cam2:2,3 — semicolon-separated, colon-delimited
+    camera_id:core,core assignments.  Unspecified cameras are not pinned.
+    CPU_AFFINITY_ENABLED=true must also be set.
+    """
+    import os as _os
+    if _os.getenv("CPU_AFFINITY_ENABLED", "false").lower() not in ("true", "1", "yes"):
+        return None
+    raw = _os.getenv("CAMERA_CPU_AFFINITY", "").strip()
+    if not raw:
+        return None
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if ":" not in entry:
+            continue
+        cam, cores_str = entry.split(":", 1)
+        if cam.strip() == camera_id:
+            try:
+                return [int(c.strip()) for c in cores_str.split(",") if c.strip()]
+            except ValueError:
+                return None
+    return None
+
+
 def _run_frame_bus(
     camera_id,
     rtsp_url,
@@ -700,7 +815,20 @@ def _run_frame_bus(
     bus_fatal_event=None,
     live_overlay=None,
     bus_ready_event=None,
+    cpu_affinity=None,
 ):
+    # S-1: pin this process to specific CPUs when CPU_AFFINITY_ENABLED=true.
+    import os as _os
+    if _os.getenv("CPU_AFFINITY_ENABLED", "false").lower() in ("true", "1", "yes") and cpu_affinity:
+        try:
+            import psutil as _psutil
+            _psutil.Process().cpu_affinity(cpu_affinity)
+        except Exception as _aff_exc:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "[%s] CPU affinity pin failed: %s", camera_id, _aff_exc
+            )
+
     from frame_bus import FrameBus
 
     try:
